@@ -19,6 +19,7 @@ await build({
   format: "esm",
   platform: "neutral",
   target: "esnext",
+  charset: "utf8", // pin literal UTF-8 output so bundle bytes stay stable across esbuild versions
   legalComments: "none",
   banner: {
     js:
