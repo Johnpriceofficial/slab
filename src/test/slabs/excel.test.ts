@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import ExcelJS from "exceljs";
 import { buildInventoryWorkbook, workbookFilename } from "@/lib/slabs/excel";
 import { EXCEL_MASTER_COLUMNS } from "@/lib/slabs/constants";
 import type { Slab, SlabComp } from "@/lib/slabs/types";

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every quality gate that verify-live.sh runs locally, now enforced on every
+# push/PR so nothing reaches main unchecked. (Live integration tests still run
+# only via verify-live.sh against a dedicated project — they skip here without
+# SLABVAULT_TEST_* env, by design.)
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit + component tests
+        run: bunx vitest run
+
+      - name: Production build
+        run: bun run build
+
+      - name: Rebuild edge bundles (must match committed output)
+        run: |
+          node scripts/build-pricecharting-edge-bundle.mjs
+          node scripts/build-analyze-slab-edge-bundle.mjs
+          if ! git diff --quiet -- supabase/functions/_shared/*-bundle.js; then
+            echo "::error::Edge bundle is stale — run the build:*-bundle scripts and commit the output."
+            git --no-pager diff --stat -- supabase/functions/_shared/*-bundle.js
+            exit 1
+          fi
+
+      - name: Secret scan (source + generated bundles)
+        run: |
+          SECRET_RE='sk-ant-[A-Za-z0-9_-]{8}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xoxb-[0-9A-Za-z-]{10}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}'
+          if grep -rnE "$SECRET_RE" src supabase scripts \
+               --include='*.ts' --include='*.tsx' --include='*.js' --include='*.sql' --include='*.mjs' --include='*.sh' \
+               2>/dev/null | grep -v node_modules; then
+            echo "::error::possible secret committed"
+            exit 1
+          fi
+          echo "secret scan clean"

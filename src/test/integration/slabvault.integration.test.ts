@@ -34,7 +34,6 @@ const looksProd = /joyrent|party|rhodeisland|mycousin|prod/i.test(URL ?? "");
 const suite = LIVE && !looksProd ? describe : describe.skip;
 
 if (LIVE && looksProd) {
-  // eslint-disable-next-line no-console
   console.warn("[integration] Refusing to run: SLABVAULT_TEST_URL looks like a production project.");
 }
 
