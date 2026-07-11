@@ -112,6 +112,11 @@ const INSTRUCTION =
   "}\n" +
   `Fields: ${ANALYZE_FIELD_KEYS.join(", ")}.\n` +
   "Rules: certification_number is a STRING — preserve leading zeros, never a number. " +
+  "The certification/serial number is printed on the grading company's label (CGC, PSA, " +
+  "BGS, SGC), usually a long digit string and often SMALL — look closely at the label and " +
+  "read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/" +
+  "glared to read with confidence, set readable=false for certification_number and DO NOT " +
+  "guess (a wrong cert number is worse than a blank one). " +
   "grade is a STRING (e.g. \"10\", \"9.5\"). If the label and the visible card disagree, " +
   "set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.";
 
