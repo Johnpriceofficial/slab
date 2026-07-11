@@ -47,7 +47,14 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         return;
       }
       setResult(res);
-      if (res.candidates.length === 0) toast.info("No PriceCharting candidates found.");
+      if (res.candidates.length === 0) {
+        const rejected = res.rejected_candidates?.length ?? 0;
+        toast.info(
+          rejected > 0
+            ? `No eligible match — ${rejected} candidate(s) rejected (wrong number/character/set).`
+            : "No PriceCharting candidates found.",
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Search failed");
     } finally {
@@ -157,6 +164,45 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
             );
           })}
         </div>
+      )}
+
+      {/* No eligible product, but candidates were returned and rejected. */}
+      {result && result.candidates.length === 0 && (result.rejected_candidates?.length ?? 0) > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            No eligible PriceCharting match. Every returned candidate conflicts on a mandatory identity field
+            (collector number, character, or set) — see rejected candidates below. This is common for Japanese cards;
+            value from sold comps instead.
+          </span>
+        </div>
+      )}
+
+      {/* Hard-disqualified candidates — collapsed, NOT selectable by default. */}
+      {result && (result.rejected_candidates?.length ?? 0) > 0 && (
+        <details className="rounded-lg border">
+          <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
+            Rejected candidates ({result.rejected_candidates.length}) — conflicting identity
+          </summary>
+          <div className="space-y-2 border-t p-3">
+            {result.rejected_candidates.map((c) => (
+              <div key={c.product_id} className="rounded-md border border-destructive/20 bg-destructive/5 p-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{c.product_name}</span>
+                  <Badge variant="destructive">rejected</Badge>
+                  <span className="text-xs text-muted-foreground">ID: {c.product_id}</span>
+                </div>
+                {c.conflicts.length > 0 && (
+                  <div className="mt-1 text-xs text-destructive">Reason: {c.conflicts.join("; ")}</div>
+                )}
+              </div>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              These were disqualified on a mandatory field and can't be selected here. If PriceCharting genuinely lists
+              this card under one of them, correct the identity fields and re-search.
+            </p>
+          </div>
+        </details>
       )}
     </div>
   );

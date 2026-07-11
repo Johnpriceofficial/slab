@@ -691,6 +691,90 @@ async function getProductById(client, productId) {
   return product;
 }
 
+// src/lib/pricecharting/card-number.ts
+function dropLeadingZeros(s) {
+  return s.replace(/^0+(?=[0-9a-z])/i, "");
+}
+function canon(part) {
+  if (!part) return null;
+  const cleaned = part.trim().toLowerCase().replace(/[^0-9a-z]/g, "");
+  if (!cleaned) return null;
+  return dropLeadingZeros(cleaned);
+}
+function parseCardNumber(raw) {
+  const display = (raw ?? "").trim();
+  let numerator = null;
+  let denominator = null;
+  if (display) {
+    const body = display.replace(/^#\s*/, "").trim();
+    const slash = body.indexOf("/");
+    if (slash >= 0) {
+      numerator = body.slice(0, slash).trim() || null;
+      denominator = body.slice(slash + 1).trim() || null;
+    } else {
+      numerator = body || null;
+    }
+  }
+  const canonicalNumerator = canon(numerator);
+  return {
+    display,
+    numerator,
+    denominator,
+    canonicalNumerator,
+    canonicalDenominator: canon(denominator),
+    isAlphanumeric: canonicalNumerator !== null && /[a-z]/.test(canonicalNumerator)
+  };
+}
+function cardNumberToken(raw) {
+  return parseCardNumber(raw).canonicalNumerator;
+}
+
+// src/lib/pricecharting/character-name.ts
+var NON_CHARACTER_TOKENS = /* @__PURE__ */ new Set([
+  "gx",
+  "ex",
+  "v",
+  "vmax",
+  "vstar",
+  "vunion",
+  "break",
+  "prime",
+  "legend",
+  "star",
+  "delta",
+  "lv",
+  "lvx",
+  "tag",
+  "team",
+  "radiant",
+  "shining",
+  "dark",
+  "light",
+  "and",
+  "the",
+  "of",
+  "de",
+  "des",
+  "le",
+  "la",
+  "el",
+  "los"
+]);
+function nameTokens(name) {
+  return (name ?? "").toLowerCase().normalize("NFKD").replace(/&/g, " ").replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+}
+function extractCharacters(name) {
+  return nameTokens(name).filter(
+    (t) => !NON_CHARACTER_TOKENS.has(t) && !/^\d+$/.test(t)
+  );
+}
+function characterMatch(wantedName, candidateName) {
+  const wanted = extractCharacters(wantedName);
+  const candidateSet = new Set(nameTokens(candidateName));
+  const missing = wanted.filter((c) => !candidateSet.has(c));
+  return { ok: wanted.length > 0 && missing.length === 0, missing, wanted };
+}
+
 // src/lib/pricecharting/matching.ts
 var STOPWORDS = /* @__PURE__ */ new Set(["the", "of", "a", "an", "and", "card", "edition"]);
 function normalizeText(s) {
@@ -775,7 +859,8 @@ function buildSearchQuery(item) {
   const parts = [];
   const seen = /* @__PURE__ */ new Set();
   for (const id of ids) {
-    const raw = id.kind === "number" ? `#${id.value.replace(/[^0-9a-z]/gi, "")}` : id.value;
+    const numTok = id.kind === "number" ? cardNumberToken(id.value) : null;
+    const raw = id.kind === "number" ? numTok ? `#${numTok}` : id.value : id.value;
     for (const tok of raw.split(/\s+/)) {
       const key = tok.toLowerCase();
       if (!key || seen.has(key)) continue;
@@ -800,21 +885,21 @@ function scoreCandidate(item, product) {
   for (const id of ids) {
     possible += id.weight;
     if (id.kind === "number") {
-      const candNumber = extractHashNumber(product.name);
-      const wanted = id.value.toLowerCase().replace(/[^0-9a-z]/g, "");
-      if (candNumber !== null) {
-        if (candNumber === wanted) {
+      const wantedTok = cardNumberToken(id.value);
+      const candTok = cardNumberToken(extractHashNumber(product.name));
+      if (candTok !== null && wantedTok !== null) {
+        if (candTok === wantedTok) {
           awarded += id.weight;
-          reasons.push(`Exact ${id.key} #${wanted}`);
+          reasons.push(`Exact ${id.key} #${wantedTok} (display ${id.value})`);
         } else {
-          conflicts.push(`${id.key} mismatch: wanted #${wanted}, candidate #${candNumber}`);
+          conflicts.push(`${id.key} mismatch: wanted #${wantedTok} (${id.value}), candidate #${candTok}`);
           disqualified = true;
         }
-      } else if (numberTokenPresent(hay, wanted)) {
+      } else if (wantedTok !== null && numberTokenPresent(hay, wantedTok)) {
         awarded += id.weight * 0.85;
-        reasons.push(`${id.key} #${wanted} present`);
+        reasons.push(`${id.key} #${wantedTok} present`);
       } else {
-        missing.push(`${id.key} #${wanted} not found in candidate`);
+        missing.push(`${id.key} #${wantedTok ?? id.value} not found in candidate`);
       }
       continue;
     }
@@ -851,6 +936,13 @@ function scoreCandidate(item, product) {
     if (wantTokens.length === 0) {
       possible -= id.weight;
       continue;
+    }
+    if (id.key === "card_name") {
+      const cm = characterMatch(id.value, product.name);
+      if (cm.wanted.length > 0 && !cm.ok) {
+        conflicts.push(`character mismatch: candidate is missing ${cm.missing.join(", ")}`);
+        disqualified = true;
+      }
     }
     const hits = wantTokens.filter((t) => hay.includes(t)).length;
     const coverage = hits / wantTokens.length;
@@ -1235,7 +1327,7 @@ async function handleSearch(client, input) {
   const scored = products.map((p) => scoreCandidate(item, p)).sort((a, b) => b.score - a.score);
   const grader = item.grading_company;
   const grade = item.grade ?? null;
-  const candidates = scored.slice(0, 5).map((s) => {
+  const toCandidate = (s) => {
     const lookup = getValueForRequestedGrade(s.product, grader, grade, { category: "card" });
     return {
       product_id: s.product.pricecharting_id,
@@ -1246,10 +1338,15 @@ async function handleSearch(client, input) {
       grade_field: lookup.field_used,
       guide_value_cents: lookup.value_pennies,
       company_specific: lookup.company_specific,
-      conflicts: s.conflicts
+      conflicts: s.conflicts,
+      rejected: s.disqualified
     };
-  });
-  const eligible = scored.filter((s) => !s.disqualified);
+  };
+  const eligibleScored = scored.filter((s) => !s.disqualified);
+  const rejectedScored = scored.filter((s) => s.disqualified);
+  const candidates = eligibleScored.slice(0, 5).map(toCandidate);
+  const rejected_candidates = rejectedScored.slice(0, 5).map(toCandidate);
+  const eligible = eligibleScored;
   const top = eligible[0];
   const runnerUp = eligible[1];
   let confidence = top ? top.score : 0;
@@ -1267,6 +1364,7 @@ async function handleSearch(client, input) {
     // Never auto-confirm the first result: only surface an id when the gate clears.
     auto_confirmed_product_id: !requiresConfirmation && top ? top.product.pricecharting_id : null,
     candidates,
+    rejected_candidates,
     warnings: [
       "Values are the Current PriceCharting Guide Value \u2014 not a last-sold, eBay-sold, or confirmed sale price."
     ]

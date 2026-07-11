@@ -69,6 +69,8 @@ export interface CandidateResult {
   guide_value_cents: number | null;
   company_specific: boolean;
   conflicts: string[];
+  /** True when the candidate was hard-disqualified (shown only under "Rejected"). */
+  rejected: boolean;
 }
 
 export interface SearchResponse {
@@ -80,6 +82,8 @@ export interface SearchResponse {
   requires_confirmation: boolean;
   auto_confirmed_product_id: string | null;
   candidates: CandidateResult[];
+  /** Hard-disqualified products (wrong number/character/set), with reasons. */
+  rejected_candidates: CandidateResult[];
   warnings: string[];
 }
 
@@ -249,7 +253,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
   const grader = item.grading_company;
   const grade = item.grade ?? null;
 
-  const candidates: CandidateResult[] = scored.slice(0, 5).map((s) => {
+  const toCandidate = (s: (typeof scored)[number]): CandidateResult => {
     // Per-candidate guide value at the requested grade (integer cents).
     const lookup = getValueForRequestedGrade(s.product, grader, grade, { category: "card" });
     return {
@@ -262,10 +266,18 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
       guide_value_cents: lookup.value_pennies,
       company_specific: lookup.company_specific,
       conflicts: s.conflicts,
+      rejected: s.disqualified,
     };
-  });
+  };
 
-  const eligible = scored.filter((s) => !s.disqualified);
+  const eligibleScored = scored.filter((s) => !s.disqualified);
+  const rejectedScored = scored.filter((s) => s.disqualified);
+  // Selectable candidates are ELIGIBLE only. Hard-disqualified products (wrong
+  // number/character/set/language) go in a separate rejected list with reasons.
+  const candidates: CandidateResult[] = eligibleScored.slice(0, 5).map(toCandidate);
+  const rejected_candidates: CandidateResult[] = rejectedScored.slice(0, 5).map(toCandidate);
+
+  const eligible = eligibleScored;
   const top = eligible[0];
   const runnerUp = eligible[1];
 
@@ -287,6 +299,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
     // Never auto-confirm the first result: only surface an id when the gate clears.
     auto_confirmed_product_id: !requiresConfirmation && top ? top.product.pricecharting_id : null,
     candidates,
+    rejected_candidates,
     warnings: [
       "Values are the Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed sale price.",
     ],

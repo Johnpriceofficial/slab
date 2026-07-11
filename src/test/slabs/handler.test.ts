@@ -81,7 +81,7 @@ describe("handler — search", () => {
     }
   });
 
-  it("marks a conflicting card number as no_match", async () => {
+  it("hard-rejects a conflicting card number (separate from selectable candidates)", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/products?", { json: { products: [CARD_ROW({ id: "9", "product-name": "Charizard #11" })] } });
     const res = await handlePriceChartingRequest(
@@ -89,9 +89,13 @@ describe("handler — search", () => {
       deps(mock),
     );
     if (res.body.status === "success" && res.body.action === "search") {
-      const cand = res.body.candidates[0];
-      expect(cand.match_status).toBe("no_match");
-      expect(cand.conflicts.join(" ")).toMatch(/mismatch/i);
+      // The wrong number is NOT a selectable candidate — it's rejected.
+      expect(res.body.candidates.map((c) => c.product_id)).not.toContain("9");
+      const rej = res.body.rejected_candidates[0];
+      expect(rej.product_id).toBe("9");
+      expect(rej.rejected).toBe(true);
+      expect(rej.match_status).toBe("no_match");
+      expect(rej.conflicts.join(" ")).toMatch(/mismatch/i);
       expect(res.body.auto_confirmed_product_id).toBeNull();
     }
   });

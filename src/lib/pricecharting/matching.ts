@@ -10,6 +10,8 @@
 import type { PriceChartingClient } from "./client";
 import { searchProducts, getProductById, getProductByUPC } from "./api";
 import { PriceChartingError, isPriceChartingError } from "./errors";
+import { cardNumberToken } from "./card-number";
+import { characterMatch } from "./character-name";
 import type {
   ConfidenceLevel,
   ItemInput,
@@ -132,8 +134,10 @@ export function buildSearchQuery(item: ItemInput): string {
   const parts: string[] = [];
   const seen = new Set<string>();
   for (const id of ids) {
-    // Card/issue numbers are searched with a leading '#'.
-    const raw = id.kind === "number" ? `#${id.value.replace(/[^0-9a-z]/gi, "")}` : id.value;
+    // Card/issue numbers are searched by their canonical numerator ("#16"),
+    // never the concatenated "#016064".
+    const numTok = id.kind === "number" ? cardNumberToken(id.value) : null;
+    const raw = id.kind === "number" ? (numTok ? `#${numTok}` : id.value) : id.value;
     for (const tok of raw.split(/\s+/)) {
       const key = tok.toLowerCase();
       if (!key || seen.has(key)) continue;
@@ -176,22 +180,25 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
     possible += id.weight;
 
     if (id.kind === "number") {
-      const candNumber = extractHashNumber(product.name);
-      const wanted = id.value.toLowerCase().replace(/[^0-9a-z]/g, "");
-      if (candNumber !== null) {
-        if (candNumber === wanted) {
+      // Compare canonical NUMERATORS only. "016/064" → "16" matches candidate
+      // "#16"; it does NOT match "#69"/"#76", and is never concatenated to
+      // "016064". The denominator (set size) is not part of the identity.
+      const wantedTok = cardNumberToken(id.value);
+      const candTok = cardNumberToken(extractHashNumber(product.name));
+      if (candTok !== null && wantedTok !== null) {
+        if (candTok === wantedTok) {
           awarded += id.weight;
-          reasons.push(`Exact ${id.key} #${wanted}`);
+          reasons.push(`Exact ${id.key} #${wantedTok} (display ${id.value})`);
         } else {
           // A DIFFERENT explicit number is a disqualifying conflict.
-          conflicts.push(`${id.key} mismatch: wanted #${wanted}, candidate #${candNumber}`);
+          conflicts.push(`${id.key} mismatch: wanted #${wantedTok} (${id.value}), candidate #${candTok}`);
           disqualified = true;
         }
-      } else if (numberTokenPresent(hay, wanted)) {
+      } else if (wantedTok !== null && numberTokenPresent(hay, wantedTok)) {
         awarded += id.weight * 0.85;
-        reasons.push(`${id.key} #${wanted} present`);
+        reasons.push(`${id.key} #${wantedTok} present`);
       } else {
-        missing.push(`${id.key} #${wanted} not found in candidate`);
+        missing.push(`${id.key} #${wantedTok ?? id.value} not found in candidate`);
       }
       continue;
     }
@@ -236,6 +243,18 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       possible -= id.weight;
       continue;
     }
+
+    // Card name: every MAJOR character must be present. A missing/replaced
+    // character (e.g. Piplup vs Pikachu) is a hard disqualification, not a
+    // partial-coverage penalty.
+    if (id.key === "card_name") {
+      const cm = characterMatch(id.value, product.name);
+      if (cm.wanted.length > 0 && !cm.ok) {
+        conflicts.push(`character mismatch: candidate is missing ${cm.missing.join(", ")}`);
+        disqualified = true;
+      }
+    }
+
     const hits = wantTokens.filter((t) => hay.includes(t)).length;
     const coverage = hits / wantTokens.length;
     if (coverage > 0) {
