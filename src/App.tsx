@@ -52,7 +52,7 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <BrowserRouter>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <Toaster richColors position="top-right" />
           <Suspense fallback={<div className="container py-12"><LoadingState message="Loading…" /></div>}>
             <Routes>
