@@ -1,10 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { analyzeSlabImages, type AnalyzeDeps } from "@/server/analyze-slab/handler";
+import { analyzeSlabImages, type AnalyzeDeps, type AnalyzeModelRequest } from "@/server/analyze-slab/handler";
 
 const FRONT = { front_image_base64: "AAA", front_mime: "image/jpeg" };
 
 function deps(reply: string | (() => Promise<string>)): AnalyzeDeps {
   return { callModel: typeof reply === "function" ? reply : async () => reply };
+}
+
+/** Sequential mock: call N gets replies[N] (or the last entry if exhausted). Each
+ * entry may be a JSON string or a function (so a call can throw). */
+function seqDeps(replies: Array<string | (() => Promise<string>)>): { deps: AnalyzeDeps; calls: AnalyzeModelRequest[] } {
+  const calls: AnalyzeModelRequest[] = [];
+  let i = 0;
+  const callModel = async (req: AnalyzeModelRequest) => {
+    calls.push(req);
+    const entry = replies[Math.min(i, replies.length - 1)];
+    i++;
+    return typeof entry === "function" ? entry() : entry;
+  };
+  return { deps: { callModel }, calls };
 }
 
 const fullReply = JSON.stringify({
@@ -120,5 +134,94 @@ describe("analyzeSlabImages", () => {
     expect(res.statusCode).toBe(502);
     if (res.body.status !== "error") throw new Error("expected error");
     expect(res.body.error_code).toBe("ANALYSIS_PROVIDER_ERROR");
+  });
+
+  // ── card_number tiered re-verification (real-world: "015/064" misread for "016/064") ──
+
+  it("sends digit-by-digit / confusable-pair guidance in the FIRST-pass instruction", async () => {
+    const highConfidenceReply = JSON.stringify({
+      fields: { card_number: { value: "4", confidence: 0.99, source: "front", readable: true } },
+    });
+    const { deps: d, calls } = seqDeps([highConfidenceReply]);
+    await analyzeSlabImages(FRONT, d);
+    expect(calls.length).toBe(1); // high confidence: no second call
+    const instruction = calls[0].instruction;
+    expect(instruction).toMatch(/card_number/);
+    expect(instruction).toMatch(/digit by digit/i);
+    expect(instruction).toMatch(/0\/6\/8/);
+    expect(instruction).toMatch(/confidence <= 0\.6/);
+  });
+
+  it("does NOT fire a second pass when card_number confidence is already high", async () => {
+    const reply = JSON.stringify({
+      fields: { card_number: { value: "016/064", confidence: 0.97, source: "label", readable: true } },
+    });
+    const { deps: d, calls } = seqDeps([reply]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(1);
+    expect(res.body.proposed.card_number.value).toBe("016/064");
+    expect(res.body.warnings.some((w) => /Card number/.test(w))).toBe(false);
+  });
+
+  it("CONFIRMS card_number when the independent second pass agrees (canonical match)", async () => {
+    const firstReply = JSON.stringify({
+      fields: { card_number: { value: "016/064", confidence: 0.6, source: "label", readable: true } },
+    });
+    // Second pass reads it slightly differently formatted but canonically identical.
+    const secondReply = JSON.stringify({ card_number: { value: "16/64", confidence: 0.9, readable: true } });
+    const { deps: d, calls } = seqDeps([firstReply, secondReply]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(2);
+    expect(res.body.proposed.card_number.readable).toBe(true);
+    expect(res.body.proposed.card_number.value).toBe("016/064"); // original display value preserved
+    expect(res.body.proposed.card_number.confidence).toBeGreaterThanOrEqual(0.95);
+    expect(res.body.warnings.some((w) => /Card number confidence is/.test(w))).toBe(false);
+    expect(res.body.warnings.some((w) => /disagree/.test(w))).toBe(false);
+  });
+
+  it("CLEARS card_number (never guesses) when two independent passes disagree", async () => {
+    const firstReply = JSON.stringify({
+      fields: { card_number: { value: "015/064", confidence: 0.6, source: "label", readable: true } },
+    });
+    const secondReply = JSON.stringify({ card_number: { value: "016/064", confidence: 0.85, readable: true } });
+    const { deps: d, calls } = seqDeps([firstReply, secondReply]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(2);
+    expect(res.body.proposed.card_number.readable).toBe(false);
+    expect(res.body.proposed.card_number.value).toBeNull();
+    expect(res.body.warnings.some((w) => /disagree/.test(w) && /015\/064/.test(w) && /016\/064/.test(w))).toBe(true);
+    // Now unreadable, so it must also show up in the generic "Could not read" list.
+    expect(res.body.warnings.some((w) => /Could not read.*card_number/.test(w))).toBe(true);
+  });
+
+  it("keeps the low-confidence warning when the second pass also can't read it", async () => {
+    const firstReply = JSON.stringify({
+      fields: { card_number: { value: "015/064", confidence: 0.6, source: "label", readable: true } },
+    });
+    const secondReply = JSON.stringify({ card_number: { value: null, confidence: 0, readable: false } });
+    const { deps: d, calls } = seqDeps([firstReply, secondReply]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(2);
+    // Original low-confidence reading is preserved (not cleared) since the second
+    // pass had nothing to disagree WITH — it simply couldn't confirm either way.
+    expect(res.body.proposed.card_number.readable).toBe(true);
+    expect(res.body.proposed.card_number.value).toBe("015/064");
+    expect(res.body.warnings.some((w) => /second-pass re-verification also could not read it/.test(w))).toBe(true);
+  });
+
+  it("falls back gracefully if the second-pass call itself throws", async () => {
+    const firstReply = JSON.stringify({
+      fields: { card_number: { value: "015/064", confidence: 0.6, source: "label", readable: true } },
+    });
+    const { deps: d, calls } = seqDeps([firstReply, async () => { throw new Error("network blip"); }]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(2);
+    expect(res.body.proposed.card_number.value).toBe("015/064"); // unchanged, not crashed
+    expect(res.body.warnings.some((w) => /re-verification pass failed to run/.test(w))).toBe(true);
   });
 });
