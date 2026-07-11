@@ -1,0 +1,372 @@
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { PageHead } from "@/components/seo/PageHead";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { AlertTriangle, Save, Loader2 } from "lucide-react";
+import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUploader";
+import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
+import {
+  GRADERS,
+  LANGUAGES,
+  VERIFICATION_STATUSES,
+  LABEL_ACCURACY,
+  VALUATION_CONFIDENCE,
+} from "@/lib/slabs/constants";
+import { dollarsToCents, centsToInputString } from "@/lib/slabs/format";
+import { priceVariancePercent } from "@/lib/slabs/compute-stats";
+import { saveSlab, validateSlabInput, type SlabDataAccess } from "@/lib/slabs/save-slab";
+import { supabaseSlabDataAccess } from "@/lib/slabs/data";
+import type { SlabInput } from "@/lib/slabs/types";
+
+const EMPTY_IDENTITY = {
+  card_name: "",
+  set_name: "",
+  card_number: "",
+  year: "",
+  language: "English",
+  rarity: "",
+  variation: "",
+  grader: "PSA",
+  grade: "",
+  certification_number: "",
+  label_description: "",
+  label_accuracy: "accurate",
+  verification_status: "unverified",
+};
+
+const EMPTY_VALUATION = {
+  final: "",
+  quick: "",
+  replacement: "",
+  guide: "",
+  confidence: "manual",
+  notes: "",
+  date_valued: new Date().toISOString().slice(0, 10),
+};
+
+interface NewSlabPageProps {
+  /** Injectable for tests; defaults to the Supabase-backed implementation. */
+  dao?: SlabDataAccess;
+}
+
+export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPageProps) {
+  const navigate = useNavigate();
+  const [front, setFront] = useState<SlabImageState | null>(null);
+  const [back, setBack] = useState<SlabImageState | null>(null);
+  const [id, setId] = useState(EMPTY_IDENTITY);
+  const [val, setVal] = useState(EMPTY_VALUATION);
+  const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
+  const [dup, setDup] = useState<{ id: string; inventory_number: number } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const setIdField = (k: keyof typeof EMPTY_IDENTITY, v: string) => setId((s) => ({ ...s, [k]: v }));
+  const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => setVal((s) => ({ ...s, [k]: v }));
+
+  // ── Live duplicate certification check (debounced) ──────────────────────
+  useEffect(() => {
+    const cert = id.certification_number.trim();
+    if (!cert) {
+      setDup(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const existing = await dao.checkCertification(cert);
+        if (!cancelled) setDup(existing);
+      } catch {
+        if (!cancelled) setDup(null);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [id.certification_number, dao]);
+
+  const variance = useMemo(
+    () => priceVariancePercent(dollarsToCents(val.final), dollarsToCents(val.guide)),
+    [val.final, val.guide],
+  );
+
+  const onSelectPc = (sel: SelectedPriceCharting) => {
+    setPc(sel);
+    setVal((s) => ({
+      ...s,
+      guide: centsToInputString(sel.value_cents),
+      // Prefill final value from the guide only when the operator hasn't set one.
+      final: s.final ? s.final : centsToInputString(sel.value_cents),
+    }));
+  };
+
+  const buildInput = (): SlabInput => ({
+    card_name: id.card_name.trim() || null,
+    set_name: id.set_name.trim() || null,
+    card_number: id.card_number.trim() || null,
+    year: id.year.trim() ? Number(id.year.replace(/[^0-9]/g, "").slice(0, 4)) : null,
+    language: id.language || null,
+    rarity: id.rarity.trim() || null,
+    variation: id.variation.trim() || null,
+    grader: id.grader || null,
+    grade: id.grade.trim() || null,
+    certification_number: id.certification_number.trim() || null,
+    label_description: id.label_description.trim() || null,
+    label_accuracy: id.label_accuracy || null,
+    verification_status: id.verification_status || null,
+    final_value_cents: dollarsToCents(val.final),
+    quick_sale_value_cents: dollarsToCents(val.quick),
+    replacement_value_cents: dollarsToCents(val.replacement),
+    valuation_confidence: val.confidence || null,
+    price_variance_percent: variance,
+    notes: val.notes.trim() || null,
+    date_valued: val.date_valued ? new Date(val.date_valued).toISOString() : null,
+    pricecharting_product_id: pc?.product_id ?? null,
+    pricecharting_product_name: pc?.product_name ?? null,
+    pricecharting_grade_field: pc?.grade_field ?? null,
+    pricecharting_value_cents: dollarsToCents(val.guide),
+    pricecharting_sales_volume: pc?.sales_volume ?? null,
+    pricecharting_match_status: pc?.match_status ?? null,
+    duplicate_status: "unique",
+  });
+
+  const canSubmit = !dup && !saving;
+
+  const handleSave = async () => {
+    if (dup) {
+      toast.error(`Certification already exists as Inventory #${dup.inventory_number}. Open that record instead.`);
+      return;
+    }
+    const input = buildInput();
+    const problems = validateSlabInput(input, !!front, !!back);
+    if (problems.length > 0) {
+      toast.error(problems[0]);
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await saveSlab(
+        input,
+        front ? { blob: front.file, ext: front.ext } : null,
+        back ? { blob: back.file, ext: back.ext } : null,
+        dao,
+      );
+      if (result.status === "success") {
+        toast.success(`Saved as Inventory #${result.slab.inventory_number}`);
+        navigate(`/slabs/${result.slab.id}`);
+      } else if (result.status === "duplicate") {
+        toast.error(`Duplicate certification — already Inventory #${result.existing_inventory_number}.`);
+        setDup({ id: "", inventory_number: result.existing_inventory_number });
+      } else if (result.status === "validation_error") {
+        toast.error(result.errors[0]);
+      } else {
+        toast.error(result.message);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const identity = {
+    card_name: id.card_name,
+    set: id.set_name,
+    card_number: id.card_number,
+    year: id.year,
+    language: id.language,
+    variation: id.variation,
+    grader: id.grader,
+    grade: id.grade,
+  };
+
+  return (
+    <div className="container max-w-5xl py-8">
+      <PageHead title="New Slab · SlabVault" noindex />
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Add a Slab</h1>
+          <p className="text-sm text-muted-foreground">One graded card at a time. Verify identity before saving.</p>
+        </div>
+        <Button variant="outline" asChild>
+          <Link to="/slabs">Back to inventory</Link>
+        </Button>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Images */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Slab Photographs</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            <ImageUploader label="Front" side="front" image={front} onChange={setFront} />
+            <ImageUploader label="Back" side="back" image={back} onChange={setBack} />
+          </CardContent>
+        </Card>
+
+        {/* Identity */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Card Identity</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-3">
+            <Field label="Card Name" className="col-span-2">
+              <Input value={id.card_name} onChange={(e) => setIdField("card_name", e.target.value)} />
+            </Field>
+            <Field label="Set">
+              <Input value={id.set_name} onChange={(e) => setIdField("set_name", e.target.value)} />
+            </Field>
+            <Field label="Card #">
+              <Input value={id.card_number} onChange={(e) => setIdField("card_number", e.target.value)} />
+            </Field>
+            <Field label="Year">
+              <Input value={id.year} onChange={(e) => setIdField("year", e.target.value)} inputMode="numeric" />
+            </Field>
+            <Field label="Language">
+              <SelectBox value={id.language} onChange={(v) => setIdField("language", v)} options={LANGUAGES.map((l) => ({ value: l, label: l }))} />
+            </Field>
+            <Field label="Rarity">
+              <Input value={id.rarity} onChange={(e) => setIdField("rarity", e.target.value)} />
+            </Field>
+            <Field label="Variation">
+              <Input value={id.variation} onChange={(e) => setIdField("variation", e.target.value)} />
+            </Field>
+            <Field label="Grader">
+              <SelectBox value={id.grader} onChange={(v) => setIdField("grader", v)} options={GRADERS.map((g) => ({ value: g, label: g }))} />
+            </Field>
+            <Field label="Grade">
+              <Input value={id.grade} onChange={(e) => setIdField("grade", e.target.value)} placeholder="e.g. 10, 9.5" />
+            </Field>
+            <Field label="Certification #" className="col-span-2">
+              {/* Text input — leading zeros preserved; never numeric. */}
+              <Input
+                value={id.certification_number}
+                onChange={(e) => setIdField("certification_number", e.target.value)}
+                inputMode="text"
+                autoComplete="off"
+              />
+              {dup && (
+                <div className="mt-1 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-sm text-destructive">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>
+                    Already exists as Inventory #{dup.inventory_number}.{" "}
+                    {dup.id ? (
+                      <Link to={`/slabs/${dup.id}`} className="underline">
+                        Open existing record
+                      </Link>
+                    ) : (
+                      <Link to="/slabs" className="underline">
+                        Find it in inventory
+                      </Link>
+                    )}
+                  </span>
+                </div>
+              )}
+            </Field>
+            <Field label="Label Description" className="col-span-2">
+              <Input value={id.label_description} onChange={(e) => setIdField("label_description", e.target.value)} />
+            </Field>
+            <Field label="Label Accuracy">
+              <SelectBox value={id.label_accuracy} onChange={(v) => setIdField("label_accuracy", v)} options={LABEL_ACCURACY} />
+            </Field>
+            <Field label="Verification Status">
+              <SelectBox value={id.verification_status} onChange={(v) => setIdField("verification_status", v)} options={VERIFICATION_STATUSES} />
+            </Field>
+          </CardContent>
+        </Card>
+
+        {/* PriceCharting */}
+        <Card className="lg:col-span-2">
+          <CardContent className="pt-6">
+            <PriceChartingPanel identity={identity} selectedProductId={pc?.product_id ?? null} onSelect={onSelectPc} />
+          </CardContent>
+        </Card>
+
+        {/* Valuation */}
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Valuation</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Field label="Final Value ($)">
+              <Input value={val.final} onChange={(e) => setValField("final", e.target.value)} inputMode="decimal" />
+            </Field>
+            <Field label="Quick-Sale Value ($)">
+              <Input value={val.quick} onChange={(e) => setValField("quick", e.target.value)} inputMode="decimal" />
+            </Field>
+            <Field label="Replacement Value ($)">
+              <Input value={val.replacement} onChange={(e) => setValField("replacement", e.target.value)} inputMode="decimal" />
+            </Field>
+            <Field label="PriceCharting Guide Value ($)">
+              <Input value={val.guide} onChange={(e) => setValField("guide", e.target.value)} inputMode="decimal" />
+            </Field>
+            <Field label="Valuation Confidence">
+              <SelectBox value={val.confidence} onChange={(v) => setValField("confidence", v)} options={VALUATION_CONFIDENCE} />
+            </Field>
+            <Field label="Price Variance %">
+              <Input value={variance === null ? "" : String(variance)} readOnly disabled />
+            </Field>
+            <Field label="Date Valued">
+              <Input type="date" value={val.date_valued} onChange={(e) => setValField("date_valued", e.target.value)} />
+            </Field>
+            <Field label="Valuation Notes" className="col-span-2 sm:col-span-4">
+              <Textarea value={val.notes} onChange={(e) => setValField("notes", e.target.value)} rows={2} />
+            </Field>
+            <p className="col-span-2 text-xs text-muted-foreground sm:col-span-4">
+              The PriceCharting figure is the <strong>Current PriceCharting Guide Value</strong> — not a last-sold,
+              eBay-sold, confirmed, or historical sale.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="mt-6 flex justify-end gap-3">
+        <Button variant="outline" asChild>
+          <Link to="/slabs">Cancel</Link>
+        </Button>
+        <Button onClick={handleSave} disabled={!canSubmit}>
+          {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+          Save Slab
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <div className={`space-y-1 ${className ?? ""}`}>
+      <Label className="text-xs">{label}</Label>
+      {children}
+    </div>
+  );
+}
+
+function SelectBox({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: ReadonlyArray<{ value: string; label: string }>;
+}) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o.value} value={o.value}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}

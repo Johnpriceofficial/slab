@@ -1,0 +1,112 @@
+import { describe, it, expect } from "vitest";
+import { saveSlab, validateSlabInput } from "@/lib/slabs/save-slab";
+import { makeMockDao, validInput, image } from "./helpers";
+
+describe("saveSlab — duplicate certification", () => {
+  it("rejects a duplicate certification and reports the existing inventory number", async () => {
+    const { dao } = makeMockDao({ existingCerts: { "000123": 7 } });
+    const result = await saveSlab(validInput({ certification_number: "000123" }), image(), image(), dao);
+    expect(result.status).toBe("duplicate");
+    if (result.status === "duplicate") expect(result.existing_inventory_number).toBe(7);
+  });
+
+  it("never creates a second row with the same certification", async () => {
+    const { dao, state } = makeMockDao();
+    const first = await saveSlab(validInput({ certification_number: "ABC999" }), image(), image(), dao);
+    const second = await saveSlab(validInput({ certification_number: "ABC999" }), image(), image(), dao);
+    expect(first.status).toBe("success");
+    expect(second.status).toBe("duplicate");
+    expect(state.createdNumbers).toHaveLength(1); // only one row created
+  });
+});
+
+describe("saveSlab — sequential & concurrent numbering", () => {
+  it("assigns sequential inventory numbers from the database, not the browser", async () => {
+    const { dao } = makeMockDao();
+    const a = await saveSlab(validInput({ certification_number: "C1" }), image(), image(), dao);
+    const b = await saveSlab(validInput({ certification_number: "C2" }), image(), image(), dao);
+    const c = await saveSlab(validInput({ certification_number: "C3" }), image(), image(), dao);
+    const nums = [a, b, c].map((r) => (r.status === "success" ? r.slab.inventory_number : -1));
+    expect(nums).toEqual([1, 2, 3]);
+  });
+
+  it("gives concurrent creations distinct sequential numbers", async () => {
+    const { dao, state } = makeMockDao();
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        saveSlab(validInput({ certification_number: `CC${i}` }), image(), image(), dao),
+      ),
+    );
+    const nums = results
+      .filter((r): r is Extract<typeof r, { status: "success" }> => r.status === "success")
+      .map((r) => r.slab.inventory_number)
+      .sort((x, y) => x - y);
+    expect(nums).toEqual([1, 2, 3, 4, 5]);
+    expect(new Set(state.createdNumbers).size).toBe(5); // all unique
+  });
+});
+
+describe("saveSlab — failure cleanup", () => {
+  it("cleans up the row and images when the FRONT upload fails", async () => {
+    const { dao, state } = makeMockDao({ failUpload: "front" });
+    const result = await saveSlab(validInput(), image(), image(), dao);
+    expect(result.status).toBe("error");
+    expect(state.deletedRows).toEqual(["slab-1"]); // row removed
+    expect(state.deletedImages).toContain("slabs/1/front.jpg"); // partial image removed
+  });
+
+  it("cleans up the row and both images when the BACK upload fails", async () => {
+    const { dao, state } = makeMockDao({ failUpload: "back" });
+    const result = await saveSlab(validInput(), image(), image(), dao);
+    expect(result.status).toBe("error");
+    expect(state.deletedRows).toEqual(["slab-1"]);
+    expect(state.deletedImages).toEqual(expect.arrayContaining(["slabs/1/front.jpg", "slabs/1/back.jpg"]));
+  });
+
+  it("does NOT upload images when the database insert fails (no incomplete record)", async () => {
+    const { dao, state } = makeMockDao({ createError: { message: "db exploded" } });
+    const result = await saveSlab(validInput(), image(), image(), dao);
+    expect(result.status).toBe("error");
+    expect(state.uploads).toHaveLength(0); // nothing uploaded
+    expect(state.deletedRows).toHaveLength(0); // nothing to roll back
+  });
+
+  it("succeeds and returns the completed slab when everything works", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput(), image("png"), image("png"), dao);
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.slab.inventory_number).toBe(1);
+      expect(result.slab.front_image_path).toBe("slabs/1/front.png");
+    }
+    expect(state.uploads).toEqual(["slabs/1/front.png", "slabs/1/back.png"]);
+    expect(state.deletedRows).toHaveLength(0);
+  });
+});
+
+describe("saveSlab — validation", () => {
+  it("requires card name, grader, grade, certification, and both images", () => {
+    const errors = validateSlabInput(
+      { ...validInput(), card_name: "", grader: "", grade: "", certification_number: "" },
+      false,
+      false,
+    );
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        "Card name is required.",
+        "Grader is required.",
+        "Grade is required.",
+        "Certification number is required.",
+        "Front image is required.",
+        "Back image is required.",
+      ]),
+    );
+  });
+
+  it("blocks save on validation error before touching the database", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput({ card_name: "" }), image(), image(), dao);
+    expect(result.status).toBe("validation_error");
+    expect(state.createdNumbers).toHaveLength(0);
+  });
+});

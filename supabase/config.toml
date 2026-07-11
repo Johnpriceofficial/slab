@@ -1,0 +1,4 @@
+project_id = "slabvault"
+
+[functions.pricecharting-search]
+verify_jwt = true
