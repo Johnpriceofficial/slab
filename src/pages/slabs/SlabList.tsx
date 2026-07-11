@@ -39,6 +39,7 @@ export default function SlabList() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [includeArchived, setIncludeArchived] = useState(false);
 
   const query: SlabQuery = useMemo(
     () => ({
@@ -50,12 +51,13 @@ export default function SlabList() {
       duplicate_status: duplicate || undefined,
       minValueCents: minVal ? dollarsToCents(minVal) : null,
       maxValueCents: maxVal ? dollarsToCents(maxVal) : null,
+      includeArchived,
       sortKey,
       sortDir,
       page,
       pageSize: PAGE_SIZE,
     }),
-    [search, grader, grade, language, verification, duplicate, minVal, maxVal, sortKey, sortDir, page],
+    [search, grader, grade, language, verification, duplicate, minVal, maxVal, includeArchived, sortKey, sortDir, page],
   );
 
   const { data, isLoading } = useQuery({
@@ -104,6 +106,12 @@ export default function SlabList() {
           <p className="text-sm text-muted-foreground">{total} slabs</p>
         </div>
         <div className="flex gap-2">
+          <Button
+            variant={includeArchived ? "secondary" : "outline"}
+            onClick={() => { setIncludeArchived((v) => !v); setPage(0); }}
+          >
+            {includeArchived ? "Hide archived" : "Show archived"}
+          </Button>
           <Button variant="outline" onClick={handleExport} disabled={exporting}>
             {exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
             Export Inventory

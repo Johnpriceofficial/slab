@@ -1,10 +1,12 @@
 # SlabVault — Graded Pokémon Slab Inventory
 
-A one-card-at-a-time intake workflow layered onto the existing Vite + React +
-Supabase app. Upload a graded slab's front/back photos, verify its identity,
-pull the **Current PriceCharting Guide Value** via a server-side function, assign
-the next race-safe inventory number, block duplicate certifications, save
-permanently, and export the whole inventory to Excel. Built for ~1,000 slabs.
+A one-card-at-a-time intake workflow on a standalone Vite + React + Supabase app.
+Sign in as an admin, upload a graded slab's front/back photos, optionally
+**analyze** them with AI to propose an identity (which you confirm/edit), pull the
+**Current PriceCharting Guide Value** via a server-side function, record **sold
+comps**, get an operator-approved **Final Value**, assign a permanent inventory
+number, block grader-scoped duplicate certifications, and export the inventory to
+Excel. Built for ~1,000 slabs.
 
 It reuses the completed `src/lib/pricecharting/` library **unmodified**.
 
@@ -13,25 +15,46 @@ It reuses the completed `src/lib/pricecharting/` library **unmodified**.
 ## Architecture
 
 ```
-Browser (admin-only routes)                Supabase
-┌───────────────────────────┐              ┌─────────────────────────────┐
-│ /dashboard  /slabs        │  invoke      │ Edge Fn: pricecharting-search│
-│ /slabs/new  /slabs/:id    │────────────► │  ├─ isCallerAdmin (JWT)      │
-│                           │              │  ├─ reads PRICECHARTING_API_ │
-│ src/lib/slabs/*           │              │  │   TOKEN (server-only)     │
-│  ├─ save-slab (DI flow)   │              │  └─ _shared/pricecharting-   │
-│  ├─ data (supabase RPC/   │  rpc/storage │      bundle.js (bundled      │
-│  │   storage/invoke)      │◄────────────►│      handler + library)      │
-│  ├─ excel (exceljs, lazy) │              │ Postgres: slabs, slab_comps  │
-│  └─ compute-stats         │              │  ├─ create_slab() atomic RPC │
-└───────────────────────────┘              │  └─ RLS admin-only           │
-                                           │ Storage: slab-images (private)│
-                                           └─────────────────────────────┘
+Browser (admin-only routes, guarded)        Supabase
+┌───────────────────────────┐              ┌──────────────────────────────────┐
+│ /login (public)           │              │ Edge Fn: pricecharting-search     │
+│ AuthProvider + guard       │  invoke      │  ├─ isCallerAdmin (JWT)           │
+│ /dashboard /slabs          │────────────► │  ├─ reserve_api_request_slot RPC  │
+│ /slabs/new /slabs/:id      │              │  │   (durable 1 req/s)            │
+│                            │              │  ├─ PRICECHARTING_API_TOKEN (env) │
+│ src/lib/slabs/*            │              │  └─ pricecharting-bundle.js        │
+│  ├─ save-slab (DI flow)    │  rpc/storage │ Edge Fn: analyze-slab             │
+│  ├─ comps (stats/valuation)│◄────────────►│  ├─ isCallerAdmin (JWT)           │
+│  ├─ data (rpc/storage/     │              │  ├─ ANTHROPIC_API_KEY (env)       │
+│  │   invoke)               │              │  └─ analyze-slab-bundle.js        │
+│  └─ excel (exceljs, lazy)  │              │ Postgres: slabs, slab_comps,      │
+└───────────────────────────┘              │   api_rate_limits                  │
+                                           │  ├─ create_slab() (seq numbering)  │
+                                           │  ├─ check_slab_certification()     │
+                                           │  ├─ archive/unarchive/hard_delete  │
+                                           │  └─ RLS admin-only                 │
+                                           │ Storage: slab-images (private)     │
+                                           └──────────────────────────────────┘
 ```
 
-The PriceCharting token lives **only** in the edge-function environment. The
-browser sends card identity fields; it never sees the token, and the token never
-appears in responses, logs, DB rows, or the Excel export.
+Neither secret ever reaches the browser: the PriceCharting token and the
+Anthropic key live **only** in their edge-function environments. The browser
+sends card fields / image bytes; it never sees a key, and keys never appear in
+responses, logs, DB rows, or the Excel export.
+
+---
+
+## Security model (defense in depth)
+
+1. **Frontend** — `AuthProvider` reads the session, subscribes to auth changes,
+   and verifies `is_admin(auth.uid())`. `ProtectedAdminRoute` renders protected
+   pages only for a confirmed admin; unauthenticated users are redirected to
+   `/login`, authenticated non-admins see an explicit Access Denied page.
+2. **Database** — RLS restricts every table to `is_admin`; `create_slab` and the
+   archive/delete RPCs are `SECURITY DEFINER` and re-check admin.
+3. **Edge functions** — both re-verify the caller's JWT via `isCallerAdmin`.
+
+The frontend guard is additive; the DB + edge checks remain authoritative.
 
 ---
 
@@ -41,132 +64,140 @@ appears in responses, logs, DB rows, or the Excel export.
 ```
 supabase db push          # or: supabase migration up
 ```
-Creates `public.slabs`, `public.slab_comps`, the race-safe
-`create_slab` / `next_slab_inventory_number` / `check_slab_certification`
-functions, admin RLS, and the private `slab-images` storage bucket.
+Creates `public.slabs`, `public.slab_comps`, `public.api_rate_limits`; the
+`create_slab` / `check_slab_certification` / `reserve_api_request_slot` /
+`archive_slab` / `unarchive_slab` / `hard_delete_slab` functions; normalized
+certification columns + composite unique; identity constraints; the inventory
+sequence; admin RLS; and the private `slab-images` bucket. (Migrations live in
+`supabase/migrations/`.)
 
-### 2. Set the edge-function secret (server-side only)
+### 2. Bootstrap the first admin
+```
+-- after you sign up in the app / dashboard:
+select id, email from auth.users;
+insert into public.slab_admins (user_id) values ('<your-user-id>');
+```
+Until a row exists, no one can read or write slabs — that is intentional.
+
+### 3. Set edge-function secrets (server-side only)
 ```
 supabase secrets set PRICECHARTING_API_TOKEN="your-pricecharting-token"
+supabase secrets set ANTHROPIC_API_KEY="your-anthropic-key"   # for analyze-slab
+# optional: ANALYZE_MODEL (defaults to claude-sonnet-5)
 ```
-> **Never** use a `VITE_` prefix for this — that would expose it in the browser
-> bundle. It is read via `Deno.env.get("PRICECHARTING_API_TOKEN")` in the edge
-> function only. Requires a paid PriceCharting API subscription.
+> **Never** use a `VITE_` prefix for these — that would expose them in the
+> browser bundle. They are read via `Deno.env.get(...)` in the edge functions.
 
-### 3. Build the edge bundle & deploy the function
+### 4. Build the edge bundles & deploy the functions
 ```
-node scripts/build-pricecharting-edge-bundle.mjs   # regenerate when the handler/library changes
+node scripts/build-pricecharting-edge-bundle.mjs
+node scripts/build-analyze-slab-edge-bundle.mjs
 supabase functions deploy pricecharting-search
+supabase functions deploy analyze-slab
 ```
 
-### 4. Run the app
+### 5. Run the app
 ```
 bun run dev
 ```
-Sign in as an admin, then open **`/dashboard`** or **`/slabs/new`**.
+Sign in at **`/login`**, then open **`/dashboard`** or **`/slabs/new`**.
 
 ### Required environment variables
 | Name | Where | Purpose |
 |---|---|---|
-| `PRICECHARTING_API_TOKEN` | Edge function secret (server) | PriceCharting auth — never client-exposed |
-| `VITE_SUPABASE_URL` | Client (existing) | Supabase project URL |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | Client (existing) | Supabase anon key |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY` | Edge (existing) | Admin JWT verification |
+| `VITE_SUPABASE_URL` | Client (`.env.local`) | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | Client (`.env.local`) | Supabase anon (public) key |
+| `PRICECHARTING_API_TOKEN` | Edge secret (server) | PriceCharting auth — never client-exposed |
+| `ANTHROPIC_API_KEY` | Edge secret (server) | analyze-slab vision model — never client-exposed |
+| `ANALYZE_MODEL` | Edge secret (optional) | Override the analysis model id |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY` | Edge (auto) | JWT verification + service-role RPCs |
 
 ---
 
 ## Run tests / typecheck / build
 ```
-bun run test -- src/test/slabs src/test/pricecharting   # 117 tests
-bunx tsc --noEmit -p tsconfig.app.json                  # slab/pricecharting code is clean
-bun run build                                           # production build succeeds
+bun run test          # 163 tests
+bun run typecheck     # slab / server / pricecharting code is clean
+bun run build         # production build succeeds
 ```
 
 ---
 
-## Race-safe numbering & duplicate guard
+## Inventory numbering & duplicate guard
 
-`create_slab(p, front_ext, back_ext)` runs under a transaction-scoped advisory
-lock: it re-checks the certification, computes `max(inventory_number)+1`, and
-inserts atomically — so numbers are sequential/gapless and duplicate
-certifications are impossible even under concurrent saves. A `UNIQUE` constraint
-on both `inventory_number` and `certification_number` is the final backstop.
+`create_slab(p, front_ext, back_ext)` validates image extensions, runs a
+grader-scoped **normalized** duplicate check under a transaction advisory lock
+(so a duplicate raises a friendly error with the existing number), then allocates
+a number from a monotonic **sequence** (`slab_inventory_seq`) and inserts.
+
+- **Numbers are permanent and never reused.** A deleted/archived number is never
+  reissued. Gaps from failed transactions (rejected duplicate, rolled-back upload,
+  hard-deleted test record) are acceptable and expected — **not** claimed gapless.
+- **Duplicates are grader-scoped:** a certification is unique within a grading
+  company, matched on normalized `(grader, certification_number)` (whitespace
+  stripped, uppercased, leading zeros preserved). The displayed cert text is
+  stored verbatim. A partial composite `UNIQUE` index is the final backstop.
 
 **Save order:** the row is created (with its number + deterministic image paths)
 first, then both images upload to `slabs/{n}/front|back.{ext}`. If any upload
-fails, the row and any uploaded object are removed (compensating cleanup), so no
-incomplete inventory record ever persists. If the insert itself fails (e.g. a
-duplicate certification), nothing was uploaded — there is nothing to clean up.
+fails, the row and any uploaded object are removed (compensating cleanup).
 
 ---
 
-## Exact file list (added/changed)
+## Archival vs deletion
 
-**Database & storage**
-- `supabase/migrations/20260710000000_slab_inventory.sql`
-- `supabase/migrations/20260710000001_slab_images_storage.sql`
+Real inventory is **archived** (`archive_slab`) — hidden from active inventory but
+number, comps, images, and history preserved; reversible via `unarchive_slab`. A
+separate, explicitly-confirmed **hard delete** (`hard_delete_slab`) exists only
+for temporary test records; it removes comps + both images + the row and reports
+partial cleanup failures.
 
-**Server-side PriceCharting**
-- `src/server/pricecharting/handler.ts` (framework-agnostic, DI, tested)
-- `scripts/build-pricecharting-edge-bundle.mjs`
-- `supabase/functions/_shared/pricecharting-bundle.js` (generated)
-- `supabase/functions/pricecharting-search/index.ts`
-- `supabase/config.toml` (added `[functions.pricecharting-search]`)
+Hard delete is **double-gated** so it can't be used casually in production:
+- **Server-side (authoritative):** `hard_delete_slab` raises `HARD_DELETE_DISABLED`
+  unless an admin sets `public.slab_settings.allow_hard_delete = true`. A direct
+  RPC call is blocked regardless of the UI.
+- **Client-side (defense in depth):** the "Delete test record" button is hidden in
+  production builds unless `VITE_ALLOW_SLAB_HARD_DELETE=true`.
 
-**Frontend data layer** (`src/lib/slabs/`)
-- `types.ts`, `constants.ts`, `format.ts`, `compute-stats.ts`
-- `save-slab.ts` (DI save flow), `data.ts` (Supabase-backed), `excel.ts`
-- `SLABVAULT.md` (this doc)
-
-**Components / pages**
-- `src/components/slabs/ImageUploader.tsx`
-- `src/components/slabs/PriceChartingPanel.tsx`
-- `src/pages/slabs/NewSlab.tsx` (`/slabs/new`)
-- `src/pages/slabs/SlabList.tsx` (`/slabs`)
-- `src/pages/slabs/SlabDetail.tsx` (`/slabs/:id`)
-- `src/pages/slabs/SlabDashboard.tsx` (`/dashboard`)
-- `src/App.tsx` (routes), `.env.template` (token note), `package.json` (exceljs)
-
-**Tests** (`src/test/slabs/`)
-- `helpers.ts`, `save-slab.test.ts`, `handler.test.ts`, `excel.test.ts`,
-  `format-stats.test.ts`
+Archival is the standard action and is always available.
 
 ---
 
-## Verification report
+## Sales comps & valuation
 
-**Tests — 117/117 pass** (`src/test/slabs` 37 + `src/test/pricecharting` 80):
-duplicate certification rejection, leading-zero preservation, sequential
-numbering, concurrent creation, low-confidence confirmation, conflicting
-card-number rejection, token-never-in-responses/logs, image-upload cleanup,
-DB-failure cleanup, currency conversion, Excel column order, Excel text certs,
-summary totals, empty export, 1,000-record export.
+`slab_comps` supports full CRUD from the slab detail page. Derived stats:
+exact-comp count + median, accepted median, sold range, most-recent sale. A
+suggested **Final Value** follows exact-median → accepted-median → PriceCharting
+guide (secondary evidence only) and is written only on explicit operator
+approval. PriceCharting is always labeled a guide value, never a sold comp.
 
-**Typecheck:** slab / server / pricecharting code has **0 errors**. The repo has
-21 pre-existing `tsc` errors in `src/pages/admin/AdminProductDetail.tsx`
-(stale generated `types.ts` vs already-committed product migrations) — identical
-count with and without this work; none introduced here.
+---
 
-**Production build:** succeeds. `exceljs` is lazy-loaded into its own chunk
-(only fetched on export); slab pages are individually code-split.
+## Rate limiting
 
-**Full test suite:** 42 pre-existing failures across 7 `seo`/`ers`/`security`
-doc-evidence files — verified identical on a clean tree (stash) with none of this
-work applied. This integration adds zero new failures.
+Every PriceCharting call from the edge function reserves a durable, global slot
+via `reserve_api_request_slot` (≥1s apart across all isolates and retries). The
+in-memory limiter in `src/lib/pricecharting` is retained as a secondary
+within-isolate safeguard.
 
-**Scope honored:** no marketplace selling, refunds, shipping, offer publishing,
-buyer addresses, or feedback surfaces are exposed in the UI. The `slab-images`
-bucket is private; images render via short-lived signed URLs.
+---
 
-### Unresolved assumptions
-1. **PriceCharting sales volume** is read from a `sales-volume`/`sale-volume`
-   field on the product payload if present; if the subscription tier omits it,
-   `pricecharting_sales_volume` is `null` (never fabricated).
-2. **`duplicate_status`** powers the dashboard "duplicate attempts" count; blocked
-   duplicates never become rows, so this counts slabs an operator explicitly
-   flagged (`duplicate_attempt`/`confirmed_duplicate`).
-3. **Admin-only:** slab routes use `requireAdmin` and RLS/RPCs enforce
-   `is_admin(auth.uid())`. Change the policies if a non-admin operator role is
-   later required.
-4. Migrations and the edge function are authored and verified but not applied to
-   a live project in this environment; run the setup steps above to deploy.
+## Migrations (in order)
+- `20260709000000_slab_admin.sql` — admin allowlist + `is_admin`
+- `20260710000000_slab_inventory.sql` — tables + original RPCs + RLS
+- `20260710000001_slab_images_storage.sql` — private bucket (MIME + 15 MB limits)
+- `20260711000000_cert_normalization.sql` — normalized grader/cert + composite unique
+- `20260712000000_slab_constraints.sql` — NOT NULL / CHECK / image-ext validation
+- `20260713000000_api_rate_limits.sql` — durable PriceCharting reservation
+- `20260714000000_slab_archive.sql` — archive / unarchive / hard delete
+- `20260715000000_inventory_sequence.sql` — permanent, non-reused numbering
+- `20260716000000_hard_delete_guard.sql` — `slab_settings` gate for hard delete
+
+---
+
+## Deployment status
+
+Migrations and edge functions are authored and pass local typecheck/tests/build,
+but have not been applied to a live project in this environment. Run the setup
+steps above (and the integration tests in `src/test/integration/`) against a
+dedicated SlabVault project to complete verification.

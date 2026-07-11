@@ -23,6 +23,9 @@ export type PriceChartingErrorCode =
   | "SERVER_ERROR"
   | "VALIDATION_ERROR"
   | "CONFIRMATION_REQUIRED"
+  // Durable rate-limit reservation could not be obtained (or the reserved wait
+  // exceeded the cap). We FAIL CLOSED: no PriceCharting call is made.
+  | "RATE_LIMIT_RESERVATION_UNAVAILABLE"
   | "UNKNOWN_API_ERROR";
 
 /** Codes that must never be retried — retrying cannot change the outcome. */
@@ -41,6 +44,9 @@ export const NON_RETRYABLE_CODES: ReadonlySet<PriceChartingErrorCode> = new Set(
   "OFFER_ALREADY_REFUNDED",
   "VALIDATION_ERROR",
   "CONFIRMATION_REQUIRED",
+  // Retrying an unavailable reservation in-process would just re-hit the same
+  // failure and risks an unspaced upstream call — never retry, fail closed.
+  "RATE_LIMIT_RESERVATION_UNAVAILABLE",
 ]);
 
 export class PriceChartingError extends Error {

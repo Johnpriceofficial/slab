@@ -8,9 +8,12 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, Save, Loader2 } from "lucide-react";
+import { AlertTriangle, Save, Loader2, Sparkles } from "lucide-react";
 import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUploader";
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
+import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
+import { analyzeSlab } from "@/lib/slabs/data";
+import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
   GRADERS,
   LANGUAGES,
@@ -64,21 +67,75 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
   const [dup, setDup] = useState<{ id: string; inventory_number: number } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
 
   const setIdField = (k: keyof typeof EMPTY_IDENTITY, v: string) => setId((s) => ({ ...s, [k]: v }));
+
+  // Map an analyze-slab proposal key to the identity form field it fills.
+  const ANALYSIS_TO_FIELD: Record<AnalyzeFieldKey, keyof typeof EMPTY_IDENTITY> = {
+    card_name: "card_name",
+    set: "set_name",
+    card_number: "card_number",
+    year: "year",
+    language: "language",
+    rarity: "rarity",
+    variation: "variation",
+    grader: "grader",
+    grade: "grade",
+    certification_number: "certification_number",
+    label_description: "label_description",
+  };
+
+  const applyAnalysisField = (key: AnalyzeFieldKey, value: string) => setIdField(ANALYSIS_TO_FIELD[key], value);
+  const applyAnalysisAll = (values: Partial<Record<AnalyzeFieldKey, string>>) => {
+    setId((s) => {
+      const next = { ...s };
+      for (const [k, v] of Object.entries(values)) {
+        if (v !== undefined) next[ANALYSIS_TO_FIELD[k as AnalyzeFieldKey]] = v;
+      }
+      return next;
+    });
+  };
+
+  const handleAnalyze = async () => {
+    if (!front) {
+      toast.error("Add a front image first.");
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const res = await analyzeSlab(
+        { blob: front.file, mime: front.file.type || "image/jpeg" },
+        back ? { blob: back.file, mime: back.file.type || "image/jpeg" } : null,
+      );
+      if (res.status === "success") {
+        setAnalysis(res);
+        toast.success("Analysis complete — review and apply the proposed fields.");
+      } else {
+        toast.error(res.message);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Analysis failed.");
+    } finally {
+      setAnalyzing(false);
+    }
+  };
   const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => setVal((s) => ({ ...s, [k]: v }));
 
-  // ── Live duplicate certification check (debounced) ──────────────────────
+  // ── Live duplicate certification check (debounced, grader-scoped) ────────
   useEffect(() => {
     const cert = id.certification_number.trim();
-    if (!cert) {
+    // A cert is only a duplicate within the same grading company, so both the
+    // grader and the cert must be present before we check.
+    if (!cert || !id.grader.trim()) {
       setDup(null);
       return;
     }
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const existing = await dao.checkCertification(cert);
+        const existing = await dao.checkCertification(id.grader, cert);
         if (!cancelled) setDup(existing);
       } catch {
         if (!cancelled) setDup(null);
@@ -88,7 +145,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       cancelled = true;
       clearTimeout(t);
     };
-  }, [id.certification_number, dao]);
+  }, [id.certification_number, id.grader, dao]);
 
   const variance = useMemo(
     () => priceVariancePercent(dollarsToCents(val.final), dollarsToCents(val.guide)),
@@ -199,14 +256,25 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Images */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle>Slab Photographs</CardTitle>
+            <Button type="button" variant="outline" size="sm" onClick={handleAnalyze} disabled={!front || analyzing}>
+              {analyzing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
+              Analyze Images
+            </Button>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <ImageUploader label="Front" side="front" image={front} onChange={setFront} />
             <ImageUploader label="Back" side="back" image={back} onChange={setBack} />
           </CardContent>
         </Card>
+
+        {/* AI analysis proposals (never auto-applied; operator confirms/edits) */}
+        {analysis && (
+          <div className="lg:col-span-2">
+            <SlabAnalysisPanel result={analysis} onApplyField={applyAnalysisField} onApplyAll={applyAnalysisAll} />
+          </div>
+        )}
 
         {/* Identity */}
         <Card>

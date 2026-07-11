@@ -325,7 +325,10 @@ var NON_RETRYABLE_CODES = /* @__PURE__ */ new Set([
   "OFFER_NOT_SOLD",
   "OFFER_ALREADY_REFUNDED",
   "VALIDATION_ERROR",
-  "CONFIRMATION_REQUIRED"
+  "CONFIRMATION_REQUIRED",
+  // Retrying an unavailable reservation in-process would just re-hit the same
+  // failure and risks an unspaced upstream call — never retry, fail closed.
+  "RATE_LIMIT_RESERVATION_UNAVAILABLE"
 ]);
 var PriceChartingError = class extends Error {
   code;
@@ -427,6 +430,7 @@ var PriceChartingClient = class {
   cache;
   tokenProvider;
   requestTimeoutMs;
+  beforeRequest;
   constructor(deps = {}) {
     this.fetch = deps.fetch ?? resolveGlobalFetch();
     this.clock = deps.clock ?? systemClock;
@@ -436,6 +440,7 @@ var PriceChartingClient = class {
     this.cache = new ResponseCache(this.clock);
     this.tokenProvider = deps.tokenProvider ?? (() => readApiTokenFromEnv());
     this.requestTimeoutMs = deps.requestTimeoutMs ?? 15e3;
+    this.beforeRequest = deps.beforeRequest;
   }
   /**
    * Acquire a rate-limit slot for the given endpoint. Public so callers/tests
@@ -580,7 +585,21 @@ var PriceChartingClient = class {
     const urlKey = opts.endpoint === "offers" ? key : void 0;
     const doNetwork = async () => {
       await this.applyRateLimit(opts.endpoint, urlKey);
-      const result = await this.retrySafeRequest(() => this.attempt(opts));
+      const result = await this.retrySafeRequest(async () => {
+        if (this.beforeRequest) {
+          try {
+            await this.beforeRequest(opts.endpoint);
+          } catch (e) {
+            if (isPriceChartingError(e)) throw e;
+            throw new PriceChartingError(
+              "RATE_LIMIT_RESERVATION_UNAVAILABLE",
+              "Could not reserve a rate-limit slot; refusing to call PriceCharting.",
+              { retryable: false, cause: e }
+            );
+          }
+        }
+        return this.attempt(opts);
+      });
       return result;
     };
     if (opts.method === "GET" && ttl > 0) {
@@ -1110,9 +1129,10 @@ function httpStatusFor(code) {
     case "AUTHENTICATION_ERROR":
     case "SUBSCRIPTION_REQUIRED":
       return 502;
-    // upstream/config problem — do not leak specifics to the browser
     case "RATE_LIMITED":
       return 429;
+    case "RATE_LIMIT_RESERVATION_UNAVAILABLE":
+      return 503;
     case "MISSING_PARAMETER":
     case "INVALID_PARAMETER":
     case "VALIDATION_ERROR":
@@ -1177,7 +1197,9 @@ function makeClient(deps) {
     fetch: deps.fetch,
     clock: deps.clock,
     logger: deps.logger ?? nullLogger,
-    tokenProvider: deps.tokenProvider
+    tokenProvider: deps.tokenProvider,
+    // Forward the durable reserver so retries reserve durable slots too.
+    beforeRequest: deps.beforeRequest
   });
 }
 function errorBody(err) {
@@ -1263,7 +1285,6 @@ async function handleValue(client, input) {
   if (!product.pricecharting_id) {
     throw new PriceChartingError("PRODUCT_NOT_FOUND", `No product found for id ${productId}.`);
   }
-  void getProductById;
   const salesVolume = numberOrNull(
     raw["sales-volume"] ?? raw["sale-volume"] ?? raw["salesVolume"] ?? raw["sales_volume"]
   );

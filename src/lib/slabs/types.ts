@@ -13,6 +13,9 @@ export interface Slab {
   grader: string | null;
   grade: string | null;
   certification_number: string | null;
+  /** DB-generated normalized columns (uniqueness only; never displayed). */
+  certification_number_normalized?: string | null;
+  grader_normalized?: string | null;
   set_name: string | null;
   card_number: string | null;
   year: number | null;
@@ -35,6 +38,8 @@ export interface Slab {
   back_image_path: string | null;
   notes: string | null;
   date_valued: string | null;
+  /** Set when the slab is archived (hidden from active inventory; never deleted). */
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -53,6 +58,20 @@ export interface SlabComp {
   source_url: string | null;
   notes: string | null;
   created_at: string;
+}
+
+/** Writable subset used when creating/editing a sales comp (money in cents). */
+export interface SlabCompInput {
+  sale_date: string | null;
+  sold_price_cents: number | null;
+  shipping_cents: number | null;
+  total_price_cents: number | null;
+  marketplace: string | null;
+  grader: string | null;
+  grade: string | null;
+  exact_match: boolean | null;
+  source_url: string | null;
+  notes: string | null;
 }
 
 /** Writable subset used when creating a slab (money already in cents). */

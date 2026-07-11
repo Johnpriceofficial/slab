@@ -28,6 +28,23 @@ const CARD_ROW = (over: Record<string, unknown>) => ({
   ...over,
 });
 
+describe("handler — durable rate-limit fail-closed", () => {
+  it("returns 503 and makes no upstream call when the reservation is unavailable", async () => {
+    const mock = createMockFetch();
+    // Would succeed if reached — it must not be.
+    mock.enqueue("/api/products?", { json: { products: [CARD_ROW({})] } });
+    const res = await handlePriceChartingRequest(
+      { action: "search", card_name: "Charizard", grader: "PSA", grade: 9 },
+      { ...deps(mock), beforeRequest: async () => { throw new Error("reservation unavailable"); } },
+    );
+    expect(res.statusCode).toBe(503);
+    if (res.body.status !== "error") throw new Error("expected error body");
+    expect(res.body.error_code).toBe("RATE_LIMIT_RESERVATION_UNAVAILABLE");
+    expect(res.body.retryable).toBe(false);
+    expect(mock.calls.length).toBe(0); // PriceCharting never contacted
+  });
+});
+
 describe("handler — search", () => {
   it("returns candidates with guide values in integer cents", async () => {
     const mock = createMockFetch();

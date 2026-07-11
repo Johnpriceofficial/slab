@@ -49,6 +49,12 @@ export interface HandlerDeps {
   fetch?: FetchLike;
   clock?: Clock;
   logger?: Logger;
+  /**
+   * Durable rate-limit reservation, awaited before every PriceCharting network
+   * attempt (including retries). The Edge Function injects a DB-backed reserver;
+   * omitted in tests.
+   */
+  beforeRequest?: (endpoint: string) => Promise<void>;
 }
 
 export type MatchStatus = "exact" | "likely" | "unverified" | "no_match";
@@ -113,6 +119,9 @@ function httpStatusFor(code: string): number {
       return 502; // upstream/config problem — do not leak specifics to the browser
     case "RATE_LIMITED":
       return 429;
+    case "RATE_LIMIT_RESERVATION_UNAVAILABLE":
+      return 503; // fail closed — reservation unavailable, no upstream call made
+
     case "MISSING_PARAMETER":
     case "INVALID_PARAMETER":
     case "VALIDATION_ERROR":
@@ -187,6 +196,8 @@ function makeClient(deps: HandlerDeps): PriceChartingClient {
     clock: deps.clock,
     logger: deps.logger ?? nullLogger,
     tokenProvider: deps.tokenProvider,
+    // Forward the durable reserver so retries reserve durable slots too.
+    beforeRequest: deps.beforeRequest,
   });
 }
 

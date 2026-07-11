@@ -11,6 +11,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
+import { makePriceChartingReserver } from "../_shared/rate-limit.ts";
 // deno-lint-ignore no-explicit-any
 import { handlePriceChartingRequest } from "../_shared/pricecharting-bundle.js";
 
@@ -45,7 +46,11 @@ serve(async (req) => {
   }
 
   try {
-    const result = await handlePriceChartingRequest(input, { tokenProvider: () => token });
+    const result = await handlePriceChartingRequest(input, {
+      tokenProvider: () => token,
+      // Durable, DB-backed 1 req/sec reservation across all isolates + retries.
+      beforeRequest: makePriceChartingReserver(),
+    });
     // result.body never contains the token (guaranteed by the handler/library).
     return json(result.body, result.statusCode);
   } catch (_err) {

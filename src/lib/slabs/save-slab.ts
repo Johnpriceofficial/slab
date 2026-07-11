@@ -14,6 +14,7 @@
  */
 
 import type { Slab, SlabInput } from "./types";
+import { normalizeImageExt } from "./constants";
 
 export interface SlabImageUpload {
   blob: Blob;
@@ -28,8 +29,14 @@ export interface SlabDataError {
 }
 
 export interface SlabDataAccess {
-  /** Live duplicate lookup for the intake UI. */
-  checkCertification(cert: string): Promise<{ id: string; inventory_number: number } | null>;
+  /**
+   * Live duplicate lookup for the intake UI. Grader-scoped: a certification
+   * number is only a duplicate within the SAME grading company.
+   */
+  checkCertification(
+    grader: string | null | undefined,
+    cert: string,
+  ): Promise<{ id: string; inventory_number: number } | null>;
   /** Atomic RPC: assigns the next number + inserts, or errors (e.g. duplicate). */
   createSlabRow(
     input: SlabInput,
@@ -75,10 +82,18 @@ export async function saveSlab(
   const errors = validateSlabInput(input, !!front, !!back);
   if (errors.length > 0) return { status: "validation_error", errors };
 
+  // Validate image extensions client-side too (the DB's valid_image_ext is the
+  // authority; this gives a fast, clear error and normalizes the stored path).
+  const frontExt = normalizeImageExt(front!.ext);
+  const backExt = normalizeImageExt(back!.ext);
+  if (!frontExt || !backExt) {
+    return { status: "validation_error", errors: ["Unsupported image type. Use JPG, JPEG, PNG, WEBP, HEIC, or HEIF."] };
+  }
+
   // 1. Atomic: assign next inventory number + insert the row (server-side dup
   //    recheck happens here). No images have been uploaded yet, so an insert
   //    failure leaves nothing to clean up.
-  const { data: slab, error } = await dao.createSlabRow(input, front!.ext, back!.ext);
+  const { data: slab, error } = await dao.createSlabRow(input, frontExt, backExt);
   if (error) {
     if (error.code === "DUPLICATE_CERTIFICATION") {
       return { status: "duplicate", existing_inventory_number: error.existing_inventory_number ?? -1 };

@@ -57,6 +57,14 @@ export interface ClientDeps {
   tokenProvider?: () => string;
   /** Per-request timeout (ms). */
   requestTimeoutMs?: number;
+  /**
+   * Optional durable rate-limit hook, awaited before EVERY network attempt —
+   * including retries. In the Supabase Edge Function this reserves a global slot
+   * in the database (`reserve_api_request_slot`) and waits until it, so
+   * concurrent isolates and retries stay ≥1s apart. Undefined in Node/tests,
+   * where the in-memory RateLimiter is the only (and sufficient) limiter.
+   */
+  beforeRequest?: (endpoint: EndpointKey) => Promise<void>;
 }
 
 export interface RequestOptions {
@@ -87,6 +95,7 @@ export class PriceChartingClient {
   readonly cache: ResponseCache;
   private readonly tokenProvider: () => string;
   private readonly requestTimeoutMs: number;
+  private readonly beforeRequest?: (endpoint: EndpointKey) => Promise<void>;
 
   constructor(deps: ClientDeps = {}) {
     this.fetch = deps.fetch ?? resolveGlobalFetch();
@@ -97,6 +106,7 @@ export class PriceChartingClient {
     this.cache = new ResponseCache(this.clock);
     this.tokenProvider = deps.tokenProvider ?? (() => readApiTokenFromEnv());
     this.requestTimeoutMs = deps.requestTimeoutMs ?? 15_000;
+    this.beforeRequest = deps.beforeRequest;
   }
 
   /**
@@ -265,8 +275,28 @@ export class PriceChartingClient {
     const urlKey = opts.endpoint === "offers" ? key : undefined;
 
     const doNetwork = async (): Promise<T> => {
+      // In-memory limiter: once per logical request (secondary, within-isolate).
       await this.applyRateLimit(opts.endpoint, urlKey);
-      const result = await this.retrySafeRequest(() => this.attempt(opts));
+      const result = await this.retrySafeRequest(async () => {
+        // Durable limiter: reserve a global slot before EVERY attempt so retries
+        // are spaced too. No-op when unset (Node/tests). FAIL CLOSED — if the
+        // reservation cannot be obtained we must NOT contact PriceCharting, so a
+        // reserver failure becomes a non-retryable error (→ 503) and `attempt`
+        // is never reached.
+        if (this.beforeRequest) {
+          try {
+            await this.beforeRequest(opts.endpoint);
+          } catch (e) {
+            if (isPriceChartingError(e)) throw e;
+            throw new PriceChartingError(
+              "RATE_LIMIT_RESERVATION_UNAVAILABLE",
+              "Could not reserve a rate-limit slot; refusing to call PriceCharting.",
+              { retryable: false, cause: e },
+            );
+          }
+        }
+        return this.attempt(opts);
+      });
       return result as T;
     };
 

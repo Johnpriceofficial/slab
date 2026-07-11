@@ -13,11 +13,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { ChevronLeft, ChevronRight, Pencil, ImageOff } from "lucide-react";
+import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
+import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import {
-  fetchSlabById, fetchAdjacentSlabs, fetchComps, signedImageUrl, updateSlab,
+  fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab,
 } from "@/lib/slabs/data";
 import { formatCents, centsToInputString, dollarsToCents } from "@/lib/slabs/format";
 import { VERIFICATION_STATUSES, VALUATION_CONFIDENCE, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
@@ -37,12 +38,6 @@ export default function SlabDetail() {
     queryKey: ["slab-adjacent", slab?.inventory_number],
     queryFn: () => fetchAdjacentSlabs(slab!.inventory_number),
     enabled: !!slab,
-  });
-
-  const { data: comps } = useQuery({
-    queryKey: ["slab-comps", id],
-    queryFn: () => fetchComps(id),
-    enabled: !!id,
   });
 
   const { data: images } = useQuery({
@@ -74,6 +69,7 @@ export default function SlabDetail() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold">Inventory #{slab.inventory_number}</h1>
             {slab.verification_status && <Badge variant="outline">{slab.verification_status}</Badge>}
+            {slab.archived_at && <Badge variant="outline" className="border-amber-500 text-amber-600">Archived</Badge>}
           </div>
           <p className="text-muted-foreground">{slab.card_name ?? "Unnamed card"}</p>
         </div>
@@ -94,6 +90,11 @@ export default function SlabDetail() {
           </Button>
           <EditSlabDialog slab={slab} onSaved={() => queryClient.invalidateQueries({ queryKey: ["slab", id] })} />
         </div>
+      </div>
+
+      {/* Admin actions: archive / restore / hard-delete test records */}
+      <div className="mb-6 flex justify-end">
+        <SlabAdminActions slab={slab} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -154,40 +155,8 @@ export default function SlabDetail() {
         </Card>
       </div>
 
-      {/* Comps */}
-      <Card className="mt-6">
-        <CardHeader><CardTitle>Sales Comps</CardTitle></CardHeader>
-        <CardContent>
-          {comps && comps.length > 0 ? (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Date</TableHead><TableHead>Sold</TableHead><TableHead>Shipping</TableHead>
-                    <TableHead>Total</TableHead><TableHead>Marketplace</TableHead><TableHead>Grade</TableHead>
-                    <TableHead>Exact</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {comps.map((c) => (
-                    <TableRow key={c.id}>
-                      <TableCell>{c.sale_date ?? "—"}</TableCell>
-                      <TableCell>{formatCents(c.sold_price_cents)}</TableCell>
-                      <TableCell>{formatCents(c.shipping_cents)}</TableCell>
-                      <TableCell>{formatCents(c.total_price_cents)}</TableCell>
-                      <TableCell>{c.marketplace ?? "—"}</TableCell>
-                      <TableCell>{[c.grader, c.grade].filter(Boolean).join(" ") || "—"}</TableCell>
-                      <TableCell>{c.exact_match === null ? "—" : c.exact_match ? "Yes" : "No"}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No sales comps recorded.</p>
-          )}
-        </CardContent>
-      </Card>
+      {/* Comps — CRUD + stats + operator-approved Final Value */}
+      <SlabCompsSection slab={slab} />
 
       {/* Notes */}
       <Card className="mt-6">

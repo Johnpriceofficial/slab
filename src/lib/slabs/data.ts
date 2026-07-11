@@ -5,13 +5,14 @@
  */
 
 import { supabase } from "@/integrations/supabase/client";
-import type { Slab, SlabComp, SlabInput } from "./types";
+import type { Slab, SlabComp, SlabCompInput, SlabInput } from "./types";
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import type {
   SearchResponse,
   ValueResponse,
   HandlerErrorBody,
 } from "@/server/pricecharting/handler";
+import type { AnalyzeResult, AnalyzeErrorBody, AnalyzeInput } from "@/server/analyze-slab/handler";
 
 // The generated types predate these tables; use a loosely-typed handle.
 type AnyClient = {
@@ -41,8 +42,8 @@ function mapCreateError(error: { message?: string; code?: string; details?: stri
 
 /** The production SlabDataAccess implementation used by the intake page. */
 export const supabaseSlabDataAccess: SlabDataAccess = {
-  async checkCertification(cert: string) {
-    const { data, error } = await sb.rpc("check_slab_certification", { p_cert: cert });
+  async checkCertification(grader: string | null | undefined, cert: string) {
+    const { data, error } = await sb.rpc("check_slab_certification", { p_grader: grader ?? "", p_cert: cert });
     if (error || !data || (Array.isArray(data) && data.length === 0)) return null;
     const row = Array.isArray(data) ? data[0] : data;
     return { id: row.id as string, inventory_number: row.inventory_number as number };
@@ -89,6 +90,8 @@ export interface SlabQuery {
   duplicate_status?: string;
   minValueCents?: number | null;
   maxValueCents?: number | null;
+  /** Archived slabs are hidden from active inventory unless this is true. */
+  includeArchived?: boolean;
   sortKey?: keyof Slab;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -113,6 +116,8 @@ export async function fetchSlabs(query: SlabQuery = {}): Promise<{ rows: Slab[];
   if (query.duplicate_status) q = q.eq("duplicate_status", query.duplicate_status);
   if (query.minValueCents != null) q = q.gte("final_value_cents", query.minValueCents);
   if (query.maxValueCents != null) q = q.lte("final_value_cents", query.maxValueCents);
+  // Hide archived slabs from active inventory by default.
+  if (!query.includeArchived) q = q.is("archived_at", null);
 
   const sortKey = query.sortKey ?? "inventory_number";
   q = q.order(sortKey as string, { ascending: (query.sortDir ?? "asc") === "asc" });
@@ -184,6 +189,76 @@ export async function fetchAllComps(): Promise<SlabComp[]> {
   return (data ?? []) as SlabComp[];
 }
 
+/* ----------------------- sales-comp write path ------------------------- */
+
+export async function insertComp(slabId: string, input: SlabCompInput): Promise<SlabComp> {
+  const { data, error } = await sb
+    .from("slab_comps")
+    .insert({ ...input, slab_id: slabId })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data as SlabComp;
+}
+
+export async function updateComp(id: string, patch: Partial<SlabCompInput>): Promise<SlabComp> {
+  const { data, error } = await sb.from("slab_comps").update(patch).eq("id", id).select("*").single();
+  if (error) throw error;
+  return data as SlabComp;
+}
+
+export async function deleteComp(id: string): Promise<void> {
+  const { error } = await sb.from("slab_comps").delete().eq("id", id);
+  if (error) throw error;
+}
+
+/* -------------------------- archive / deletion ------------------------- */
+
+/** Archive a slab (preserves inventory number, comps, images, and history). */
+export async function archiveSlab(id: string): Promise<Slab> {
+  const { data, error } = await sb.rpc("archive_slab", { p_id: id });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return row as Slab;
+}
+
+export async function unarchiveSlab(id: string): Promise<Slab> {
+  const { data, error } = await sb.rpc("unarchive_slab", { p_id: id });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return row as Slab;
+}
+
+export interface HardDeleteReport {
+  row_deleted: boolean;
+  images_removed: string[];
+  /** Non-empty when some storage objects could not be removed (orphaned). */
+  image_errors: string[];
+}
+
+/**
+ * Hard-delete a TEMPORARY TEST record: removes comps + the slab row (RPC), then
+ * deletes the storage images. Reports partial-cleanup failures clearly — a
+ * failed image removal does not silently pass.
+ */
+export async function hardDeleteSlab(id: string): Promise<HardDeleteReport> {
+  const { data, error } = await sb.rpc("hard_delete_slab", { p_id: id });
+  if (error) throw error; // nothing deleted — surface to caller
+  const row = Array.isArray(data) ? data[0] : data;
+  const paths = [row?.front_image_path, row?.back_image_path].filter(
+    (p): p is string => typeof p === "string" && p.length > 0,
+  );
+
+  const image_errors: string[] = [];
+  const images_removed: string[] = [];
+  if (paths.length > 0) {
+    const { error: rmErr } = await sb.storage.from(BUCKET).remove(paths);
+    if (rmErr) image_errors.push(rmErr.message);
+    else images_removed.push(...paths);
+  }
+  return { row_deleted: true, images_removed, image_errors };
+}
+
 export async function signedImageUrl(path: string | null, expiresSeconds = 3600): Promise<string | null> {
   if (!path) return null;
   const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(path, expiresSeconds);
@@ -213,6 +288,42 @@ export async function priceChartingSearch(
   });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as SearchResponse | HandlerErrorBody;
+}
+
+/* --------------------------- Slab image analysis ----------------------- */
+
+/** Base64-encode a Blob for transport to the analyze-slab edge function. */
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Send the slab images to the server-side analyzer. Returns PROPOSED identity
+ * fields with confidence — never saved automatically; the operator confirms or
+ * edits before any PriceCharting lookup or inventory save. The AI-provider key
+ * lives only in the edge function.
+ */
+export async function analyzeSlab(
+  front: { blob: Blob; mime: string },
+  back: { blob: Blob; mime: string } | null,
+): Promise<AnalyzeResult | AnalyzeErrorBody> {
+  const body: AnalyzeInput = {
+    front_image_base64: await blobToBase64(front.blob),
+    front_mime: front.mime,
+  };
+  if (back) {
+    body.back_image_base64 = await blobToBase64(back.blob);
+    body.back_mime = back.mime;
+  }
+  const { data, error } = await sb.functions.invoke("analyze-slab", { body });
+  if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message };
+  return data as AnalyzeResult | AnalyzeErrorBody;
 }
 
 export async function priceChartingValue(

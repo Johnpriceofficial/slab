@@ -52,6 +52,18 @@ export const ACCEPTED_IMAGE_MIME = ["image/jpeg", "image/png", "image/webp", "im
 export const ACCEPTED_IMAGE_EXT = ["jpg", "jpeg", "png", "webp", "heic", "heif"];
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // 15 MB — must match the bucket limit
 
+/**
+ * Normalize + validate a filename extension for a slab image. Mirrors the SQL
+ * `valid_image_ext()` used inside create_slab: lowercases, tolerates a single
+ * leading dot, and rejects anything not in the allow-list (which also rejects
+ * path separators and traversal sequences). Returns null if unacceptable.
+ */
+export function normalizeImageExt(ext: string | null | undefined): string | null {
+  let e = (ext ?? "").trim().toLowerCase();
+  if (e.startsWith(".")) e = e.slice(1);
+  return /^(jpg|jpeg|png|webp|heic|heif)$/.test(e) ? e : null;
+}
+
 export type ColumnType = "number" | "text" | "currency" | "percent" | "date";
 
 export interface ColumnDef {

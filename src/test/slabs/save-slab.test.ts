@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { saveSlab, validateSlabInput } from "@/lib/slabs/save-slab";
+import { normalizeImageExt } from "@/lib/slabs/constants";
 import { makeMockDao, validInput, image } from "./helpers";
 
-describe("saveSlab — duplicate certification", () => {
+describe("saveSlab — duplicate certification (grader-scoped, normalized)", () => {
   it("rejects a duplicate certification and reports the existing inventory number", async () => {
-    const { dao } = makeMockDao({ existingCerts: { "000123": 7 } });
+    // Seeded by composite key GRADER:CERT (validInput's default grader is PSA).
+    const { dao } = makeMockDao({ existingCerts: { "PSA:000123": 7 } });
     const result = await saveSlab(validInput({ certification_number: "000123" }), image(), image(), dao);
     expect(result.status).toBe("duplicate");
     if (result.status === "duplicate") expect(result.existing_inventory_number).toBe(7);
@@ -17,6 +19,33 @@ describe("saveSlab — duplicate certification", () => {
     expect(first.status).toBe("success");
     expect(second.status).toBe("duplicate");
     expect(state.createdNumbers).toHaveLength(1); // only one row created
+  });
+
+  it("treats the SAME cert number under DIFFERENT graders as distinct (not a duplicate)", async () => {
+    const { dao, state } = makeMockDao();
+    const psa = await saveSlab(validInput({ grader: "PSA", certification_number: "12345678" }), image(), image(), dao);
+    const cgc = await saveSlab(validInput({ grader: "CGC", certification_number: "12345678" }), image(), image(), dao);
+    expect(psa.status).toBe("success");
+    expect(cgc.status).toBe("success");
+    expect(state.createdNumbers).toHaveLength(2);
+  });
+
+  it("treats whitespace/case-different certs under the same grader as duplicates", async () => {
+    const { dao, state } = makeMockDao();
+    const first = await saveSlab(validInput({ grader: "PSA", certification_number: "abc 123" }), image(), image(), dao);
+    const second = await saveSlab(validInput({ grader: "psa", certification_number: "ABC123" }), image(), image(), dao);
+    expect(first.status).toBe("success");
+    expect(second.status).toBe("duplicate");
+    expect(state.createdNumbers).toHaveLength(1);
+  });
+
+  it("preserves leading zeros — '000123' and '123' are different certs", async () => {
+    const { dao, state } = makeMockDao();
+    const a = await saveSlab(validInput({ grader: "PSA", certification_number: "000123" }), image(), image(), dao);
+    const b = await saveSlab(validInput({ grader: "PSA", certification_number: "123" }), image(), image(), dao);
+    expect(a.status).toBe("success");
+    expect(b.status).toBe("success");
+    expect(state.createdNumbers).toHaveLength(2);
   });
 });
 
@@ -81,6 +110,32 @@ describe("saveSlab — failure cleanup", () => {
     }
     expect(state.uploads).toEqual(["slabs/1/front.png", "slabs/1/back.png"]);
     expect(state.deletedRows).toHaveLength(0);
+  });
+});
+
+describe("image extension validation (mirrors SQL valid_image_ext)", () => {
+  it("accepts the allow-list and tolerates a leading dot / uppercase", () => {
+    expect(normalizeImageExt("JPG")).toBe("jpg");
+    expect(normalizeImageExt(".PNG")).toBe("png");
+    expect(normalizeImageExt("heic")).toBe("heic");
+  });
+  it("rejects unsupported extensions, blanks, separators, and traversal", () => {
+    for (const bad of ["gif", "", "  ", "jpg/../x", "png\\x", "../evil", "svg"]) {
+      expect(normalizeImageExt(bad)).toBeNull();
+    }
+  });
+  it("blocks a save with an unsupported extension before any DB write", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput(), image("gif"), image(), dao);
+    expect(result.status).toBe("validation_error");
+    expect(state.createdNumbers).toHaveLength(0);
+    expect(state.uploads).toHaveLength(0);
+  });
+  it("blocks a save with a path-traversal extension", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput(), { blob: new Blob(["x"]), ext: "../evil" }, image(), dao);
+    expect(result.status).toBe("validation_error");
+    expect(state.createdNumbers).toHaveLength(0);
   });
 });
 

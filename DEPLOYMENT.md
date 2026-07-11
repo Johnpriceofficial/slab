@@ -1,7 +1,7 @@
 # SlabVault — Deployment Runbook (dedicated Supabase project)
 
-You run these; they need your DB password + real PriceCharting token (secrets I
-never see). Everything is additive to a **new, empty** project.
+You run these; they need your DB password + real PriceCharting token + Anthropic
+key (secrets I never see). Everything targets a **new, empty** project.
 
 ---
 
@@ -24,7 +24,7 @@ cp .env.example .env.local
 #   VITE_SUPABASE_ANON_KEY=<anon key>
 ```
 
-## 2. The 5 commands
+## 2. The commands
 
 ```bash
 cd ~/Desktop/SlabVault
@@ -32,23 +32,29 @@ cd ~/Desktop/SlabVault
 # (1) link the CLI to the new project (prompts for the DB password)
 supabase link --project-ref <PROJECT_REF>
 
-# (2) apply all three migrations in order (admin model → tables → storage)
+# (2) apply all 9 migrations in order (admin → tables → storage →
+#     cert-normalization → constraints → rate-limits → archive →
+#     inventory-seq → hard-delete-guard)
 supabase db push
 
-# (3) set the PriceCharting token as an EDGE-FUNCTION SECRET only (never VITE_)
+# (3) set edge-function SECRETS only (never a VITE_ prefix)
 supabase secrets set PRICECHARTING_API_TOKEN="<your real PriceCharting token>"
+supabase secrets set ANTHROPIC_API_KEY="<your Anthropic key>"   # for analyze-slab
+# optional: supabase secrets set ANALYZE_MODEL="claude-sonnet-5"
 
-# (4) regenerate the Deno bundle the edge function imports
+# (4) regenerate the Deno bundles the edge functions import
 node scripts/build-pricecharting-edge-bundle.mjs
+node scripts/build-analyze-slab-edge-bundle.mjs
 
-# (5) deploy the admin-only edge function
+# (5) deploy the admin-only edge functions
 supabase functions deploy pricecharting-search
+supabase functions deploy analyze-slab
 ```
 
 ## 3. Bootstrap yourself as admin (one time)
 
 Until you're in `slab_admins`, RLS blocks everything (intentional). Sign in to
-the app once (or create a user in Auth), then in the SQL editor:
+the app at `/login` once (or create a user in Auth), then in the SQL editor:
 
 ```sql
 select id, email from auth.users;                       -- find your id
@@ -58,7 +64,7 @@ insert into public.slab_admins (user_id) values ('<your-user-id>');
 ## 4. Run the app
 
 ```bash
-bun run dev    # http://localhost:5173  → redirects to /dashboard
+bun run dev    # http://localhost:5173  → /login, then /dashboard
 ```
 
 ---
@@ -68,83 +74,102 @@ bun run dev    # http://localhost:5173  → redirects to /dashboard
 ```sql
 -- Tables present
 select table_name from information_schema.tables
-where table_schema='public' and table_name in ('slabs','slab_comps','slab_admins')
-order by table_name;                       -- expect 3 rows
+where table_schema='public'
+  and table_name in ('slabs','slab_comps','slab_admins','api_rate_limits','slab_settings')
+order by table_name;                       -- expect 5 rows
 
 -- Functions present
 select routine_name from information_schema.routines
 where routine_schema='public'
-  and routine_name in ('create_slab','next_slab_inventory_number',
-                       'check_slab_certification','is_admin','slab_set_updated_at')
-order by routine_name;                     -- expect 5 rows
+  and routine_name in ('create_slab','check_slab_certification','is_admin',
+                       'slab_set_updated_at','normalize_cert','normalize_grader',
+                       'valid_image_ext','reserve_api_request_slot',
+                       'archive_slab','unarchive_slab','hard_delete_slab')
+order by routine_name;                     -- expect 11 rows
 
--- Unique constraints on slabs (inventory_number + certification_number)
+-- Inventory-number unique constraint (the global cert unique was replaced by a
+-- grader-scoped composite unique INDEX, below — not a constraint)
 select conname from pg_constraint
-where conrelid='public.slabs'::regclass and contype='u';   -- expect 2
+where conrelid='public.slabs'::regclass and contype='u';   -- expect 1 (inventory_number)
 
--- Indexes on slabs
-select indexname from pg_indexes where schemaname='public' and tablename='slabs';
+-- Grader-scoped composite unique index on normalized (grader, cert)
+select indexname from pg_indexes
+where schemaname='public' and tablename='slabs'
+  and indexname='slabs_grader_cert_normalized_uidx';        -- expect 1 row
 
--- RLS enabled on all three tables
+-- Inventory sequence exists
+select sequencename from pg_sequences
+where schemaname='public' and sequencename='slab_inventory_seq';  -- expect 1 row
+
+-- NOT NULL identity columns
+select column_name from information_schema.columns
+where table_schema='public' and table_name='slabs' and is_nullable='NO'
+  and column_name in ('card_name','grader','grade','certification_number','verification_status')
+order by column_name;                                       -- expect 5 rows
+
+-- RLS enabled on all tables
 select relname, relrowsecurity from pg_class
-where relname in ('slabs','slab_comps','slab_admins');     -- relrowsecurity = true
+where relname in ('slabs','slab_comps','slab_admins','api_rate_limits');  -- true
 
--- Policies
-select tablename, policyname from pg_policies
-where tablename in ('slabs','slab_comps','slab_admins')
-order by tablename;
-
--- updated_at trigger
-select tgname from pg_trigger
-where tgrelid='public.slabs'::regclass and not tgisinternal;  -- slabs_set_updated_at
-
--- Storage bucket (private, 15 MB, image mimes)
+-- Storage bucket (private, 15 MB, image mimes) — unchanged
 select id, public, file_size_limit, allowed_mime_types
 from storage.buckets where id='slab-images';               -- public = false
-
--- Storage policies
-select policyname from pg_policies
-where schemaname='storage' and tablename='objects'
-  and policyname like 'slab-images%';                       -- expect 4
 ```
 
-## Race-safe / duplicate guard proof (DB level)
+## Duplicate / constraint proof (DB level)
 
 ```sql
--- Should SUCCEED, then FAIL twice on the unique guards, then clean up.
-insert into public.slabs (inventory_number, certification_number) values (999999, 'TESTDUP');
-insert into public.slabs (inventory_number, certification_number) values (999998, 'TESTDUP'); -- ERROR: duplicate certification_number
-insert into public.slabs (inventory_number, certification_number) values (999999, 'TESTX');   -- ERROR: duplicate inventory_number
-delete from public.slabs where certification_number in ('TESTDUP','TESTX');
+-- A complete row succeeds; a same-grader normalized-duplicate cert fails; a
+-- different grader with the same cert SUCCEEDS (grader-scoped). Then clean up.
+-- (Direct inserts must satisfy NOT NULL identity columns.)
+insert into public.slabs (inventory_number, card_name, grader, grade, certification_number)
+  values (999999, 'Test', 'PSA', '10', '00123');
+insert into public.slabs (inventory_number, card_name, grader, grade, certification_number)
+  values (999998, 'Test', 'PSA', '10', ' 00 123 ');  -- ERROR: normalized dup within PSA
+insert into public.slabs (inventory_number, card_name, grader, grade, certification_number)
+  values (999997, 'Test', 'CGC', '10', '00123');     -- OK: different grader
+delete from public.slabs where inventory_number in (999999, 999998, 999997);
+
+-- Durable rate-limit spacing: two reservations are ≥1s apart.
+select public.reserve_api_request_slot('demo', 1000) as a,
+       public.reserve_api_request_slot('demo', 1000) as b;   -- b - a >= 1 second
+delete from public.api_rate_limits where bucket='demo';
 ```
 
-Real concurrency (two callers → distinct sequential numbers, no duplicate) is
-exercised by the app's save flow and by `src/test/slabs/save-slab.test.ts`
-("gives concurrent creations distinct sequential numbers"). At the DB level the
-guarantee comes from the transaction advisory lock in `create_slab` plus the two
-unique constraints above.
+Real concurrency (two callers → distinct sequence numbers, no duplicate) is
+exercised by the app save flow, `src/test/slabs/save-slab.test.ts`, and the live
+integration tests in `src/test/integration/`.
 
 ## Live smoke checklist (in the app, after bootstrap)
 
-1. `/slabs/new` → upload front + back, enter identity, **cert with a leading
-   zero** (e.g. `0012345`).
-2. Type the cert → duplicate check runs; **Search PriceCharting** → candidates
-   with confidence; **confirm** a product; enter Final Value; **Save**.
-3. Confirm: row exists, both images exist in `slab-images/slabs/{n}/`, the
-   number came from the DB, the cert kept its leading zero, detail page loads,
-   prev/next work, it appears in `/slabs`, `/dashboard` totals update.
-4. **Export Inventory** → open the `.xlsx`: 3 sheets, exact column order, cert
-   stored as text (leading zero intact), currency cells, frozen header, filters.
-5. Delete the temporary slab + its images when done.
+1. Visit a protected route while signed out → redirected to `/login`. Sign in as
+   a non-admin → **Access denied**. Sign in as an admin → `/dashboard` loads.
+2. `/slabs/new` → upload front + back → **Analyze Images** → review proposals,
+   apply, and edit. Enter a **cert with a leading zero** (e.g. `0012345`).
+3. Duplicate check runs (grader-scoped); **Search PriceCharting** → confirm a
+   product; add **sold comps**; **Approve as Final Value**; **Save**.
+4. Confirm: row + both images in `slab-images/slabs/{n}/`, number from the DB
+   sequence, cert kept its leading zero, detail loads, prev/next work, appears in
+   `/slabs`, `/dashboard` totals update.
+5. **Archive** the slab → it leaves the active list (Show archived reveals it),
+   number preserved. **Unarchive** to restore.
+6. **Export Inventory** → 3 sheets, exact column order, cert stored as text,
+   currency cells, frozen header, filters.
+7. **Archive** is the standard action. Hard delete is double-gated: the RPC
+   refuses with `HARD_DELETE_DISABLED` until `update public.slab_settings set
+   allow_hard_delete = true`, and the UI button is hidden in prod builds unless
+   `VITE_ALLOW_SLAB_HARD_DELETE=true`. With both enabled → row + comps + images
+   removed; leave `allow_hard_delete=false` for real inventory.
 
 ## Security model (consistent across layers)
 
-- **Admin = a row in `public.slab_admins`.** `public.is_admin(uuid)` checks it.
-- **RLS** on `slabs` / `slab_comps` / `slab_admins`: all ops require
-  `is_admin(auth.uid())`.
-- **Storage** `slab-images`: private bucket; all object ops require
-  `is_admin(auth.uid())`; images served via short-lived signed URLs.
-- **Edge function** `pricecharting-search`: `verify_jwt=true` + `isCallerAdmin`
-  (calls the same `is_admin` RPC). The token is read only from the function env.
+- **Frontend guard** — `AuthProvider` + `ProtectedAdminRoute` gate every
+  protected route on a confirmed admin (`is_admin(auth.uid())`).
+- **Admin = a row in `public.slab_admins`.**
+- **RLS** on `slabs` / `slab_comps` / `slab_admins` / `api_rate_limits`.
+- **Storage** `slab-images`: private; all object ops require `is_admin`; served
+  via short-lived signed URLs.
+- **Edge functions** `pricecharting-search` + `analyze-slab`: `verify_jwt=true`
+  + `isCallerAdmin`. Secrets read only from the function env.
 - Anon users: blocked at every layer.
 ```

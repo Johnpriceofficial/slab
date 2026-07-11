@@ -91,8 +91,11 @@ create trigger slabs_set_updated_at
 -- ============================================================================
 -- Race-safe inventory numbering
 -- A transaction-scoped advisory lock serializes number assignment so two
--- concurrent inserts can never receive the same number, and numbering stays
--- gapless. The UNIQUE constraint on inventory_number is the final backstop.
+-- concurrent inserts can never receive the same number. The UNIQUE constraint
+-- on inventory_number is the final backstop.
+-- NOTE: a later migration (20260715000000_inventory_sequence) replaces this
+-- MAX+1 scheme with a monotonic sequence. Numbers are permanent and never
+-- reused; gaps from failed transactions are acceptable and NOT claimed gapless.
 -- ============================================================================
 create or replace function public.next_slab_inventory_number()
 returns integer

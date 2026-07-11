@@ -6,10 +6,12 @@
 
 import type { SlabDataAccess, SlabDataError } from "@/lib/slabs/save-slab";
 import type { Slab, SlabInput } from "@/lib/slabs/types";
+import { certCompositeKey } from "@/lib/slabs/normalize";
 
 export interface MockDaoOptions {
   failUpload?: "front" | "back" | null;
   createError?: SlabDataError;
+  /** Seed existing (grader, cert) → inventory number, keyed by composite `GRADER:CERT`. */
   existingCerts?: Record<string, number>;
 }
 
@@ -71,24 +73,26 @@ export function makeMockDao(opts: MockDaoOptions = {}): { dao: SlabDataAccess; s
   };
 
   const dao: SlabDataAccess = {
-    async checkCertification(cert) {
-      const n = state.certs.get(cert);
+    async checkCertification(grader, cert) {
+      const key = certCompositeKey(grader, cert);
+      const n = key ? state.certs.get(key) : undefined;
       return n !== undefined ? { id: `slab-${n}`, inventory_number: n } : null;
     },
     async createSlabRow(input, frontExt, backExt) {
       if (opts.createError) return { data: null, error: opts.createError };
-      const cert = input.certification_number ?? null;
-      if (cert && state.certs.has(cert)) {
+      // Grader-scoped, normalized composite key mirrors the DB unique index.
+      const key = certCompositeKey(input.grader, input.certification_number);
+      if (key && state.certs.has(key)) {
         return {
           data: null,
-          error: { code: "DUPLICATE_CERTIFICATION", message: "Duplicate certification.", existing_inventory_number: state.certs.get(cert) },
+          error: { code: "DUPLICATE_CERTIFICATION", message: "Duplicate certification.", existing_inventory_number: state.certs.get(key) },
         };
       }
       // Atomic assignment (single-threaded JS mirrors the DB advisory lock).
       state.counter += 1;
       const num = state.counter;
       state.createdNumbers.push(num);
-      if (cert) state.certs.set(cert, num);
+      if (key) state.certs.set(key, num);
       return { data: baseSlab(num, input, frontExt, backExt), error: null };
     },
     async uploadImage(path, _blob) {
