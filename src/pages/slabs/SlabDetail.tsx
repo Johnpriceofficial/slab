@@ -113,6 +113,7 @@ export default function SlabDetail() {
           <CardContent className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
             <Detail label="Grader" value={slab.grader} />
             <Detail label="Grade" value={slab.grade} />
+            <Detail label="Grade Label" value={slab.grade_label} />
             <Detail label="Certification #" value={slab.certification_number} mono />
             <Detail label="Set" value={slab.set_name} />
             <Detail label="Card #" value={slab.card_number} />

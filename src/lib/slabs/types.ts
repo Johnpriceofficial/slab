@@ -12,6 +12,8 @@ export interface Slab {
   replacement_value_cents: number | null;
   grader: string | null;
   grade: string | null;
+  /** Grader designation/tier, e.g. "PRISTINE", "GEM MINT" — separate from grade. */
+  grade_label: string | null;
   certification_number: string | null;
   /** DB-generated normalized columns (uniqueness only; never displayed). */
   certification_number_normalized?: string | null;
@@ -85,6 +87,7 @@ export interface SlabInput {
   variation: string | null;
   grader: string | null;
   grade: string | null;
+  grade_label: string | null;
   certification_number: string | null;
   label_description: string | null;
   label_accuracy: string | null;

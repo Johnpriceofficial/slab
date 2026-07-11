@@ -32,6 +32,20 @@ describe("analyzeSlabImages", () => {
     expect(res.body.overall_confidence).toBe(0.9);
   });
 
+  it("captures the grade designation separately (PRISTINE 10 → grade '10' + grade_label 'PRISTINE')", async () => {
+    const reply = JSON.stringify({
+      fields: {
+        grade: { value: "10", confidence: 0.98, source: "label", readable: true },
+        grade_label: { value: "PRISTINE", confidence: 0.95, source: "label", readable: true },
+      },
+    });
+    const res = await analyzeSlabImages(FRONT, deps(reply));
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(res.body.proposed.grade.value).toBe("10");
+    expect(res.body.proposed.grade_label.value).toBe("PRISTINE");
+    expect(res.body.proposed.grade_label.readable).toBe(true);
+  });
+
   it("preserves certification leading zeros as a string (even if numeric)", async () => {
     const reply = JSON.stringify({ fields: { certification_number: { value: 12345, confidence: 1, source: "label", readable: true } } });
     const res = await analyzeSlabImages(FRONT, deps(reply));

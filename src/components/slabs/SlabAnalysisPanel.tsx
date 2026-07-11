@@ -20,6 +20,7 @@ const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
   variation: "Variation",
   grader: "Grader",
   grade: "Grade",
+  grade_label: "Grade Label",
   certification_number: "Certification #",
   label_description: "Label Description",
 };

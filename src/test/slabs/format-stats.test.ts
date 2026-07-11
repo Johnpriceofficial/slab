@@ -40,6 +40,7 @@ function slab(over: Partial<Slab>): Slab {
     replacement_value_cents: null,
     grader: null,
     grade: null,
+    grade_label: null,
     certification_number: null,
     set_name: null,
     card_number: null,

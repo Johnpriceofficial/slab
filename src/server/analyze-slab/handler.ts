@@ -37,6 +37,7 @@ export const ANALYZE_FIELD_KEYS = [
   "variation",
   "grader",
   "grade",
+  "grade_label",
   "certification_number",
   "label_description",
 ] as const;
@@ -117,7 +118,11 @@ const INSTRUCTION =
   "read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/" +
   "glared to read with confidence, set readable=false for certification_number and DO NOT " +
   "guess (a wrong cert number is worse than a blank one). " +
-  "grade is a STRING (e.g. \"10\", \"9.5\"). If the label and the visible card disagree, " +
+  "grade is ONLY the numeric grade as a STRING (e.g. \"10\", \"9.5\"). grade_label is the " +
+  "grader's DESIGNATION/TIER printed with it — e.g. CGC \"PRISTINE\" or \"GEM MINT\", PSA " +
+  "\"GEM MT\", BGS \"PRISTINE\"/\"BLACK LABEL\". From a label reading \"PRISTINE 10\", grade=\"10\" " +
+  "and grade_label=\"PRISTINE\". NEVER drop the designation or fold it into grade. " +
+  "If the label and the visible card disagree, " +
   "set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.";
 
 function clamp01(n: unknown): number {

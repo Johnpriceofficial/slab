@@ -106,6 +106,7 @@ export const EXCEL_MASTER_COLUMNS: ColumnDef[] = [
   { key: "card_name", label: "Card Name", type: "text" },
   { key: "final_value_cents", label: "Final Value", type: "currency" },
   { key: "grade", label: "Grade", type: "text" },
+  { key: "grade_label", label: "Grade Label", type: "text" },
   { key: "certification_number", label: "Certification #", type: "text" },
   { key: "grader", label: "Grader", type: "text" },
   { key: "set_name", label: "Set", type: "text" },

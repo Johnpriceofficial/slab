@@ -37,6 +37,7 @@ const EMPTY_IDENTITY = {
   variation: "",
   grader: "PSA",
   grade: "",
+  grade_label: "",
   certification_number: "",
   label_description: "",
   label_accuracy: "accurate",
@@ -83,6 +84,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     variation: "variation",
     grader: "grader",
     grade: "grade",
+    grade_label: "grade_label",
     certification_number: "certification_number",
     label_description: "label_description",
   };
@@ -172,6 +174,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     variation: id.variation.trim() || null,
     grader: id.grader || null,
     grade: id.grade.trim() || null,
+    grade_label: id.grade_label.trim() || null,
     certification_number: id.certification_number.trim() || null,
     label_description: id.label_description.trim() || null,
     label_accuracy: id.label_accuracy || null,
@@ -308,6 +311,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             </Field>
             <Field label="Grade">
               <Input value={id.grade} onChange={(e) => setIdField("grade", e.target.value)} placeholder="e.g. 10, 9.5" />
+            </Field>
+            <Field label="Grade Label">
+              <Input value={id.grade_label} onChange={(e) => setIdField("grade_label", e.target.value)} placeholder="e.g. PRISTINE, GEM MINT" />
             </Field>
             {/* Certification # — text input (leading zeros preserved; never numeric). */}
             <Field label="Certification #" className="col-span-2">

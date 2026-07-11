@@ -14,6 +14,7 @@ function slab(n: number, over: Partial<Slab> = {}): Slab {
     replacement_value_cents: 15000,
     grader: "PSA",
     grade: "9",
+    grade_label: "MINT",
     certification_number: `1000${n}`,
     set_name: "Base Set",
     card_number: "4",
