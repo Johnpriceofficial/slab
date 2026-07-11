@@ -14,6 +14,21 @@
  *   - Certification numbers are preserved as text (leading zeros survive).
  *   - Unreadable fields are FLAGGED (readable=false, value=null), never guessed.
  *   - A label-vs-card mismatch surfaces as a warning, not a silent choice.
+ *   - card_number confidence below CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD triggers
+ *     an automatic SECOND, independent re-verification call (same provider, a
+ *     fresh prompt, no memory of the first reading). This is a tiered pipeline:
+ *     the cheap single-call path runs by default; the extra call only fires when
+ *     the first pass itself reports uncertainty, so confident extractions incur
+ *     no added cost or latency.
+ *       - Both passes agree            -> CONFIRMED: confidence raised, no warning.
+ *       - Passes disagree              -> NEVER guess: field is cleared
+ *         (readable=false, value=null) and a warning names both candidate
+ *         readings so the operator resolves it manually.
+ *       - Second pass also can't read it -> original low-confidence warning
+ *         stands, now noting a second pass didn't help either.
+ *     A misread digit here looks identical to a legitimate PriceCharting
+ *     no-match once it reaches the matcher, so resolving the ambiguity BEFORE
+ *     the operator searches is the whole point.
  */
 
 export type FieldSource = "front" | "back" | "label" | "card" | "unknown";
@@ -94,6 +109,16 @@ export interface AnalyzeInput {
 
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 
+/**
+ * card_number confidence at or above this is trusted as-is. Below it, we
+ * automatically fire a second, independent re-verification call rather than
+ * just warning — see the module-level doc comment for the full tiered flow.
+ */
+const CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD = 0.9;
+
+/** Confidence assigned once two independent passes agree on card_number. */
+const CARD_NUMBER_CONFIRMED_CONFIDENCE = 0.95;
+
 const SYSTEM_PROMPT =
   "You are a meticulous trading-card grading assistant. You read graded-slab " +
   "photos (e.g. PSA/BGS/CGC/SGC) and extract the card's identity. You NEVER " +
@@ -118,12 +143,36 @@ const INSTRUCTION =
   "read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/" +
   "glared to read with confidence, set readable=false for certification_number and DO NOT " +
   "guess (a wrong cert number is worse than a blank one). " +
+  "card_number is a STRING and MUST be read digit by digit against the printed numerator/" +
+  "denominator (e.g. \"016/064\"), never estimated from a quick glance. Digit pairs that are " +
+  "frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause " +
+  "of a silently wrong card number. If any digit in the numerator could plausibly be one of a " +
+  "confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for " +
+  "card_number and add a warning naming the ambiguous digit(s) — do not report high confidence " +
+  "on a guess. A wrong card number causes a downstream product-match failure that looks just " +
+  "like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse " +
+  "than flagging it. " +
   "grade is ONLY the numeric grade as a STRING (e.g. \"10\", \"9.5\"). grade_label is the " +
   "grader's DESIGNATION/TIER printed with it — e.g. CGC \"PRISTINE\" or \"GEM MINT\", PSA " +
   "\"GEM MT\", BGS \"PRISTINE\"/\"BLACK LABEL\". From a label reading \"PRISTINE 10\", grade=\"10\" " +
   "and grade_label=\"PRISTINE\". NEVER drop the designation or fold it into grade. " +
   "If the label and the visible card disagree, " +
   "set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.";
+
+const VERIFY_CARD_NUMBER_SYSTEM_PROMPT =
+  "You are independently re-verifying ONE specific field on a graded trading-card slab " +
+  "label: the card_number (numerator/denominator, e.g. \"016/064\"). Treat this as a fresh, " +
+  "independent examination — you have no memory of any prior reading, and you must not " +
+  "anchor on what a first pass might have guessed. You return ONLY strict JSON, no prose.";
+
+const VERIFY_CARD_NUMBER_INSTRUCTION =
+  "Look ONLY at the card_number printed on the slab label. Read every digit individually. " +
+  "Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the most " +
+  "common source of a wrong reading; scrutinize each digit against these confusable pairs " +
+  "before deciding. Return ONLY this exact JSON shape: " +
+  '{ "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. ' +
+  "If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, " +
+  "set readable=false and value=null — never guess the closest-looking digit.";
 
 function clamp01(n: unknown): number {
   const x = typeof n === "number" ? n : Number(n);
@@ -157,6 +206,92 @@ function stripFence(text: string): string {
   const t = text.trim();
   const fence = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return fence ? fence[1].trim() : t;
+}
+
+/**
+ * Canonicalize a card number for AGREEMENT comparison only (self-contained —
+ * deliberately duplicated rather than imported from src/lib/pricecharting/
+ * card-number.ts, since this module is bundled standalone for the Edge
+ * Function). Strips everything but digits/letters, lowercases, and drops
+ * leading zeros from each slash-separated part so "016/064" === "16/64".
+ */
+function canonicalizeCardNumber(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .split("/")
+    .map((part) => part.replace(/[^0-9a-z]/g, "").replace(/^0+(?=[0-9a-z])/, ""))
+    .join("/");
+}
+
+/**
+ * Fire the second, independent card_number re-verification call and fold the
+ * result into `proposed` + `warnings` IN PLACE. Never guesses: agreement
+ * upgrades confidence, disagreement clears the field for manual entry, and an
+ * unreadable second pass leaves the original low-confidence warning intact.
+ */
+async function reverifyCardNumber(
+  deps: AnalyzeDeps,
+  images: AnalyzeModelRequest["images"],
+  proposed: AnalyzeProposal,
+  warnings: string[],
+): Promise<void> {
+  const first = proposed.card_number;
+
+  let secondRaw: unknown;
+  try {
+    const text = await deps.callModel({
+      system: VERIFY_CARD_NUMBER_SYSTEM_PROMPT,
+      instruction: VERIFY_CARD_NUMBER_INSTRUCTION,
+      images,
+    });
+    const parsed = JSON.parse(stripFence(text)) as Record<string, unknown>;
+    secondRaw = parsed.card_number;
+  } catch {
+    // Verification call failed outright — fall back to the original single-pass
+    // warning rather than blocking the whole analysis on a second-pass hiccup.
+    warnings.push(
+      `Card number confidence is ${Math.round(first.confidence * 100)}% and the independent ` +
+        "re-verification pass failed to run — verify every digit against the physical slab " +
+        "before running PriceCharting.",
+    );
+    return;
+  }
+
+  const second = mapField(secondRaw);
+
+  if (!second.readable) {
+    // Second pass couldn't confirm it either — original warning stands, now
+    // noting that independent re-verification didn't resolve the ambiguity.
+    warnings.push(
+      `Card number confidence is ${Math.round(first.confidence * 100)}% and an independent ` +
+        "second-pass re-verification also could not read it reliably — verify every digit " +
+        "against the physical slab before running PriceCharting.",
+    );
+    return;
+  }
+
+  const firstCanon = first.value ? canonicalizeCardNumber(first.value) : null;
+  const secondCanon = canonicalizeCardNumber(second.value ?? "");
+
+  if (firstCanon !== null && firstCanon === secondCanon) {
+    // Two independent passes agree — confirmed. Raise confidence, no warning.
+    proposed.card_number = {
+      ...first,
+      confidence: Math.max(first.confidence, second.confidence, CARD_NUMBER_CONFIRMED_CONFIDENCE),
+    };
+    return;
+  }
+
+  // Passes DISAGREE. Per the never-guess rule: do not silently pick either
+  // reading. Clear the field and require manual resolution, naming both
+  // candidates so the operator isn't starting from zero.
+  proposed.card_number = { value: null, confidence: 0, source: first.source, readable: false };
+  warnings.push(
+    `Card number could not be verified: two independent readings disagree (` +
+      `"${first.value}" vs "${second.value}"). Enter the correct number manually after checking ` +
+      "the physical slab — never guessing between disagreeing reads.",
+  );
 }
 
 export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps): Promise<AnalyzeHandlerResult> {
@@ -206,7 +341,16 @@ export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps):
   if (labelMatches === false) {
     warnings.unshift("The slab label and the visible card appear inconsistent — verify identity carefully.");
   }
-  // Surface unreadable fields explicitly so the operator knows what to fill in.
+
+  // Tiered escalation: only when the first pass itself reports low confidence
+  // does a second, independent call fire. Confident extractions cost nothing
+  // extra. Mutates `proposed.card_number` and `warnings` in place.
+  if (proposed.card_number.readable && proposed.card_number.confidence < CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD) {
+    await reverifyCardNumber(deps, images, proposed, warnings);
+  }
+
+  // Surface unreadable fields explicitly so the operator knows what to fill in
+  // (computed AFTER re-verification, since that step can clear card_number).
   const unreadable = ANALYZE_FIELD_KEYS.filter((k) => !proposed[k].readable);
   if (unreadable.length > 0) {
     warnings.push(`Could not read: ${unreadable.join(", ")}. Enter these manually.`);
