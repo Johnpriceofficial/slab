@@ -1221,10 +1221,12 @@ function httpStatusFor(code) {
     case "AUTHENTICATION_ERROR":
     case "SUBSCRIPTION_REQUIRED":
       return 502;
+    // upstream/config problem — do not leak specifics to the browser
     case "RATE_LIMITED":
       return 429;
     case "RATE_LIMIT_RESERVATION_UNAVAILABLE":
       return 503;
+    // fail closed — reservation unavailable, no upstream call made
     case "MISSING_PARAMETER":
     case "INVALID_PARAMETER":
     case "VALIDATION_ERROR":
@@ -1383,6 +1385,7 @@ async function handleValue(client, input) {
   if (!product.pricecharting_id) {
     throw new PriceChartingError("PRODUCT_NOT_FOUND", `No product found for id ${productId}.`);
   }
+  void getProductById;
   const salesVolume = numberOrNull(
     raw["sales-volume"] ?? raw["sale-volume"] ?? raw["salesVolume"] ?? raw["sales_volume"]
   );

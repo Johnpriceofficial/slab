@@ -10,11 +10,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
+import { consumeDailyQuota } from "../_shared/quota.ts";
 // deno-lint-ignore no-explicit-any
 import { analyzeSlabImages } from "../_shared/analyze-slab-bundle.js";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = Deno.env.get("ANALYZE_MODEL") ?? "claude-sonnet-5";
+// Daily ceiling on paid vision calls (override with ANALYZE_DAILY_LIMIT).
+const DAILY_LIMIT = Number(Deno.env.get("ANALYZE_DAILY_LIMIT") ?? "200");
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -75,6 +78,15 @@ serve(async (req) => {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
     return json({ status: "error", error_code: "NOT_CONFIGURED", message: "Image analysis is not configured." }, 502);
+  }
+
+  // Durable daily cost ceiling — refuse (429) once the day's budget is spent,
+  // before making any paid model call.
+  if (!(await consumeDailyQuota("analyze-slab", DAILY_LIMIT))) {
+    return json(
+      { status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily image-analysis limit reached. Try again tomorrow." },
+      429,
+    );
   }
 
   let input: unknown;

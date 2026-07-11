@@ -164,6 +164,17 @@ suite("SlabVault live integration", () => {
     await admin.from("api_rate_limits").delete().eq("bucket", bucket);
   });
 
+  it("enforces a durable daily quota via consume_daily_quota", async () => {
+    const bucket = `quota-test-${stamp}`;
+    const r1 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    const r2 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    const r3 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    expect(r1.data).toBe(true);
+    expect(r2.data).toBe(true);
+    expect(r3.data).toBe(false); // 3rd call over the limit of 2 → denied, no increment
+    await admin.from("api_daily_usage").delete().eq("bucket", bucket);
+  });
+
   it("enforces storage MIME + size limits on the private bucket", async () => {
     // Unsupported MIME rejected.
     const gif = new Blob([new Uint8Array([0x47, 0x49, 0x46])], { type: "image/gif" });
