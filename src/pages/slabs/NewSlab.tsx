@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
@@ -309,32 +309,32 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <Field label="Grade">
               <Input value={id.grade} onChange={(e) => setIdField("grade", e.target.value)} placeholder="e.g. 10, 9.5" />
             </Field>
+            {/* Certification # — text input (leading zeros preserved; never numeric). */}
             <Field label="Certification #" className="col-span-2">
-              {/* Text input — leading zeros preserved; never numeric. */}
               <Input
                 value={id.certification_number}
                 onChange={(e) => setIdField("certification_number", e.target.value)}
                 inputMode="text"
                 autoComplete="off"
               />
-              {dup && (
-                <div className="mt-1 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-sm text-destructive">
-                  <AlertTriangle className="h-4 w-4 shrink-0" />
-                  <span>
-                    Already exists as Inventory #{dup.inventory_number}.{" "}
-                    {dup.id ? (
-                      <Link to={`/slabs/${dup.id}`} className="underline">
-                        Open existing record
-                      </Link>
-                    ) : (
-                      <Link to="/slabs" className="underline">
-                        Find it in inventory
-                      </Link>
-                    )}
-                  </span>
-                </div>
-              )}
             </Field>
+            {dup && (
+              <div className="col-span-2 -mt-2 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-sm text-destructive">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>
+                  Already exists as Inventory #{dup.inventory_number}.{" "}
+                  {dup.id ? (
+                    <Link to={`/slabs/${dup.id}`} className="underline">
+                      Open existing record
+                    </Link>
+                  ) : (
+                    <Link to="/slabs" className="underline">
+                      Find it in inventory
+                    </Link>
+                  )}
+                </span>
+              </div>
+            )}
             <Field label="Label Description" className="col-span-2">
               <Input value={id.label_description} onChange={(e) => setIdField("label_description", e.target.value)} />
             </Field>
@@ -405,11 +405,14 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   );
 }
 
+/** Associates the label with its single control (input/textarea/select) via a
+ *  generated id, so screen readers announce each field's name. */
 function Field({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  const id = useId();
   return (
     <div className={`space-y-1 ${className ?? ""}`}>
-      <Label className="text-xs">{label}</Label>
-      {children}
+      <Label htmlFor={id} className="text-xs">{label}</Label>
+      {isValidElement(children) ? cloneElement(children as React.ReactElement<{ id?: string }>, { id }) : children}
     </div>
   );
 }
@@ -418,14 +421,16 @@ function SelectBox({
   value,
   onChange,
   options,
+  id,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: ReadonlyArray<{ value: string; label: string }>;
+  id?: string;
 }) {
   return (
     <Select value={value} onValueChange={onChange}>
-      <SelectTrigger>
+      <SelectTrigger id={id}>
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

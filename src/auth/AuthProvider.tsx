@@ -104,8 +104,11 @@ export function AuthProvider({
       if (active) void resolveSession(data.session);
     });
     // 2. Keep in sync with every subsequent auth-state change (sign-in, sign-out,
-    //    token refresh). Re-verifies admin on each transition.
-    const { data } = client.auth.onAuthStateChange((_event, session) => {
+    //    token refresh). Re-verifies admin on each transition. Skip INITIAL_SESSION
+    //    — getSession() above already resolves the initial load, so acting on it
+    //    here would double the is_admin check on every mount.
+    const { data } = client.auth.onAuthStateChange((event, session) => {
+      if (event === "INITIAL_SESSION") return;
       if (active) void resolveSession(session);
     });
     return () => {

@@ -7,7 +7,7 @@
  * as a sold comp. The Final Value is never written without an explicit click.
  */
 
-import { useState } from "react";
+import { cloneElement, isValidElement, useId, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -236,13 +236,7 @@ function CompDialog({
           <F label="Shipping ($)"><Input value={form.shipping} onChange={(e) => set("shipping", e.target.value)} inputMode="decimal" /></F>
           <F label="Total ($, optional)"><Input value={form.total} onChange={(e) => set("total", e.target.value)} inputMode="decimal" placeholder="auto = sold + shipping" /></F>
           <F label="Exact Match">
-            <Select value={form.exact_match} onValueChange={(v) => set("exact_match", v)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="yes">Yes — exact match</SelectItem>
-                <SelectItem value="no">No — comparable</SelectItem>
-              </SelectContent>
-            </Select>
+            <ExactMatchSelect value={form.exact_match} onChange={(v) => set("exact_match", v)} />
           </F>
           <F label="Grader"><Input value={form.grader} onChange={(e) => set("grader", e.target.value)} /></F>
           <F label="Grade"><Input value={form.grade} onChange={(e) => set("grade", e.target.value)} /></F>
@@ -259,10 +253,24 @@ function CompDialog({
 }
 
 function F({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  const id = useId();
   return (
     <div className={`space-y-1 ${className ?? ""}`}>
-      <Label className="text-xs">{label}</Label>
-      {children}
+      <Label htmlFor={id} className="text-xs">{label}</Label>
+      {isValidElement(children) ? cloneElement(children as React.ReactElement<{ id?: string }>, { id }) : children}
     </div>
+  );
+}
+
+/** Yes/No exact-match select that forwards the field id to its trigger for a11y. */
+function ExactMatchSelect({ value, onChange, id }: { value: string; onChange: (v: string) => void; id?: string }) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id}><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="yes">Yes — exact match</SelectItem>
+        <SelectItem value="no">No — comparable</SelectItem>
+      </SelectContent>
+    </Select>
   );
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { cloneElement, isValidElement, useId, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -280,24 +280,26 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
 }
 
 function EditField({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  const id = useId();
   return (
     <div className={`space-y-1 ${className ?? ""}`}>
-      <Label className="text-xs">{label}</Label>
-      {children}
+      <Label htmlFor={id} className="text-xs">{label}</Label>
+      {isValidElement(children) ? cloneElement(children as React.ReactElement<{ id?: string }>, { id }) : children}
     </div>
   );
 }
 
 function EditSelect({
-  value, onChange, options,
+  value, onChange, options, id,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: ReadonlyArray<{ value: string; label: string }>;
+  id?: string;
 }) {
   return (
     <Select value={value} onValueChange={onChange}>
-      <SelectTrigger><SelectValue /></SelectTrigger>
+      <SelectTrigger id={id}><SelectValue /></SelectTrigger>
       <SelectContent>
         {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
       </SelectContent>
