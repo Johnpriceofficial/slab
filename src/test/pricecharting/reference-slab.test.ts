@@ -84,12 +84,53 @@ describe("reference slab — Blastoise & Piplup GX 016/064 (Remix Bout, Japanese
     expect(rej!.conflicts.some((c) => /character/i.test(c))).toBe(true);
   });
 
-  it("a wrong applied number (018/064) also correctly rejects #16", async () => {
+  it("a wrong applied number (018/064) does NOT hard-reject #16 when it's the only conflict — promoted for manual confirmation, never auto-selected", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/products?", { json: { products: [PRODUCTS[0]] } });
     const body = searchBody(await handlePriceChartingRequest({ ...REF, card_number: "018/064" }, deps(mock)));
-    // 018 → canonical 18, candidate #16 → mismatch → rejected.
-    expect(body.candidates.map((c) => c.product_id)).not.toContain("3470072");
-    expect(body.rejected_candidates.map((c) => c.product_id)).toContain("3470072");
+    // 018 → canonical 18, candidate #16 → mismatch, but name/set/year/language all
+    // match, so this is a number-ONLY conflict: promoted to selectable, not rejected.
+    const promoted = body.candidates.find((c) => c.product_id === "3470072");
+    expect(promoted).toBeTruthy();
+    expect(promoted!.rejected).toBe(false);
+    expect(body.rejected_candidates.map((c) => c.product_id)).not.toContain("3470072");
+    // Never silently confirmed as THE match.
+    expect(body.auto_confirmed_product_id).toBeNull();
+    expect(body.requires_confirmation).toBe(true);
+    // The mismatch stays visible, plus the promoted-candidate caveat naming the real number.
+    expect(promoted!.conflicts.some((c) => /card_number mismatch/.test(c))).toBe(true);
+    expect(promoted!.conflicts.some((c) => /Verify the number against the physical card/.test(c))).toBe(true);
+  });
+
+  it("REAL-WORLD: a wrong OCR number (015/064, wanted #15) promotes ALL FOUR same-name Remix Bout prints (#16/#69/#70/#76) as selectable — never auto-picks one, since they're indistinguishable without the number", async () => {
+    // This is the literal reported case: OCR misread "016" as "015". All four
+    // Blastoise & Piplup GX prints in this set share name/set/year/language and
+    // differ ONLY by collector number — auto-resolving via identity alone would
+    // risk silently picking the WRONG print. The correct behavior is to present
+    // all four for the operator to disambiguate by checking the physical card.
+    const mock = createMockFetch();
+    mock.enqueue("/api/products?", { json: { products: PRODUCTS } });
+    const body = searchBody(await handlePriceChartingRequest({ ...REF, card_number: "015/064" }, deps(mock)));
+
+    const candidateIds = body.candidates.map((c) => c.product_id);
+    const rejectedIds = body.rejected_candidates.map((c) => c.product_id);
+
+    // All four same-name prints promoted to selectable (none auto-confirmed).
+    for (const id of ["3470072", "3470125", "3470126", "3470133"]) {
+      expect(candidateIds).toContain(id);
+      expect(rejectedIds).not.toContain(id);
+    }
+    // The genuinely different character (Venusaur & Snivy) stays hard-rejected.
+    expect(rejectedIds).toContain("3470122");
+    expect(candidateIds).not.toContain("3470122");
+
+    // Never silently resolved to any single one of the four.
+    expect(body.auto_confirmed_product_id).toBeNull();
+    expect(body.requires_confirmation).toBe(true);
+    expect(body.warnings.some((w) => /4 candidates matched/.test(w))).toBe(true);
+
+    // Each promoted candidate's own real number is surfaced so the operator can compare.
+    const c16 = body.candidates.find((c) => c.product_id === "3470072")!;
+    expect(c16.conflicts.some((c) => /printed number is #16/.test(c))).toBe(true);
   });
 });

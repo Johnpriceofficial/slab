@@ -81,7 +81,11 @@ describe("handler — search", () => {
     }
   });
 
-  it("hard-rejects a conflicting card number (separate from selectable candidates)", async () => {
+  it("promotes a number-only-conflicting card for manual confirmation, never auto-selects it", async () => {
+    // A candidate whose ONLY conflict is card_number (name/set/year all match)
+    // is no longer hard-rejected — it's surfaced as a selectable "unverified"
+    // candidate so the operator can confirm/deny after checking the physical
+    // card, since the conflict may be an OCR misread rather than the wrong card.
     const mock = createMockFetch();
     mock.enqueue("/api/products?", { json: { products: [CARD_ROW({ id: "9", "product-name": "Charizard #11" })] } });
     const res = await handlePriceChartingRequest(
@@ -89,13 +93,31 @@ describe("handler — search", () => {
       deps(mock),
     );
     if (res.body.status === "success" && res.body.action === "search") {
-      // The wrong number is NOT a selectable candidate — it's rejected.
+      const promoted = res.body.candidates.find((c) => c.product_id === "9");
+      expect(promoted).toBeTruthy();
+      expect(promoted!.rejected).toBe(false);
+      expect(res.body.rejected_candidates.map((c) => c.product_id)).not.toContain("9");
+      expect(promoted!.conflicts.join(" ")).toMatch(/mismatch/i);
+      expect(promoted!.conflicts.join(" ")).toMatch(/Verify the number against the physical card/i);
+      // Still never silently confirmed as THE match.
+      expect(res.body.auto_confirmed_product_id).toBeNull();
+      expect(res.body.requires_confirmation).toBe(true);
+    }
+  });
+
+  it("hard-rejects a card conflicting on character/name (not just number) — never promoted", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/products?", { json: { products: [CARD_ROW({ id: "9", "product-name": "Blastoise #4" })] } });
+    const res = await handlePriceChartingRequest(
+      { action: "search", card_name: "Charizard", card_number: "4", set: "Base Set", year: 1999, grader: "PSA", grade: 9 },
+      deps(mock),
+    );
+    if (res.body.status === "success" && res.body.action === "search") {
+      // A character mismatch is a real conflict beyond just the number — stays hard-rejected.
       expect(res.body.candidates.map((c) => c.product_id)).not.toContain("9");
-      const rej = res.body.rejected_candidates[0];
-      expect(rej.product_id).toBe("9");
-      expect(rej.rejected).toBe(true);
-      expect(rej.match_status).toBe("no_match");
-      expect(rej.conflicts.join(" ")).toMatch(/mismatch/i);
+      const rej = res.body.rejected_candidates.find((c) => c.product_id === "9");
+      expect(rej).toBeTruthy();
+      expect(rej!.rejected).toBe(true);
       expect(res.body.auto_confirmed_product_id).toBeNull();
     }
   });
