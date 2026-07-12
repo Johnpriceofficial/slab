@@ -965,6 +965,9 @@ function requiresHighConfidence(item) {
   if (anyItem.variant_cover) return true;
   return false;
 }
+function conflictsAreNumberOnly(conflicts) {
+  return conflicts.length > 0 && conflicts.every((c) => c.startsWith("card_number mismatch:"));
+}
 
 // src/lib/pricecharting/money.ts
 function convertPenniesToDollars(pennies) {
@@ -1172,7 +1175,7 @@ function getValueForRequestedGrade(product, gradingCompany, grade, opts = {}) {
   const warnings = [...pick.warnings];
   if (pennies === null) {
     warnings.push(
-      `PriceCharting has no value in field "${pick.field}" (${pick.meaning}) for this product. Value is null \u2014 not substituted from another grade.`
+      `PriceCharting has no value in field "${pick.field}" (${pick.meaning}) for this product. Value is null — not substituted from another grade.`
     );
   }
   return {
@@ -1345,8 +1348,34 @@ async function handleSearch(client, input) {
     };
   };
   const eligibleScored = scored.filter((s) => !s.disqualified);
-  const rejectedScored = scored.filter((s) => s.disqualified);
-  const candidates = eligibleScored.slice(0, 5).map(toCandidate);
+  let rejectedScored = scored.filter((s) => s.disqualified);
+  let numberOnlyPromoted = [];
+  if (eligibleScored.length === 0) {
+    numberOnlyPromoted = rejectedScored.filter((s) => conflictsAreNumberOnly(s.conflicts));
+    if (numberOnlyPromoted.length > 0) {
+      const promotedIds = new Set(numberOnlyPromoted.map((s) => s.product.pricecharting_id));
+      rejectedScored = rejectedScored.filter((s) => !promotedIds.has(s.product.pricecharting_id));
+    }
+  }
+  const toPromotedCandidate = (s) => {
+    const base = toCandidate(s);
+    const actualNumber = extractHashNumber(s.product.name);
+    return {
+      ...base,
+      // Never silently confirmed — surfaced as a real candidate, not a reject.
+      confidence_score: s.score,
+      match_status: "unverified",
+      rejected: false,
+      conflicts: [
+        ...s.conflicts,
+        `Shown despite the card_number mismatch above: this is the ONLY identity conflict for this candidate (name/set/year/language all matched), which can indicate an OCR misread rather than the wrong card.${actualNumber ? ` This candidate's printed number is #${actualNumber}.` : ""} Verify the number against the physical card before selecting.`
+      ]
+    };
+  };
+  const candidates = [
+    ...eligibleScored.slice(0, 5).map(toCandidate),
+    ...numberOnlyPromoted.slice(0, 5).map(toPromotedCandidate)
+  ];
   const rejected_candidates = rejectedScored.slice(0, 5).map(toCandidate);
   const eligible = eligibleScored;
   const top = eligible[0];
@@ -1356,6 +1385,14 @@ async function handleSearch(client, input) {
   if (top && top.conflicts.length > 0) confidence = Math.max(0, confidence - 20);
   const threshold = requiresHighConfidence(item) ? 85 : 70;
   const requiresConfirmation = confidence < threshold;
+  const warnings = [
+    "Values are the Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed sale price."
+  ];
+  if (numberOnlyPromoted.length > 0) {
+    warnings.push(
+      numberOnlyPromoted.length === 1 ? "No candidate matched every identifier, but one candidate matched everything except the card number — shown above for manual confirmation. This often means an OCR misread rather than the wrong card; verify the printed number before selecting it." : `No candidate matched every identifier, but ${numberOnlyPromoted.length} candidates matched everything except the card number (this set prints multiple cards that share the same name/set/year and differ only by number) — shown above for manual confirmation. Check the physical card's printed number to pick the correct one; none has been auto-selected.`
+    );
+  }
   const body = {
     status: "success",
     action: "search",
@@ -1367,9 +1404,7 @@ async function handleSearch(client, input) {
     auto_confirmed_product_id: !requiresConfirmation && top ? top.product.pricecharting_id : null,
     candidates,
     rejected_candidates,
-    warnings: [
-      "Values are the Current PriceCharting Guide Value \u2014 not a last-sold, eBay-sold, or confirmed sale price."
-    ]
+    warnings
   };
   return { statusCode: 200, body };
 }
@@ -1407,7 +1442,7 @@ async function handleValue(client, input) {
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     warnings: [
-      "Current PriceCharting Guide Value \u2014 not a last-sold, eBay-sold, or confirmed historical sale.",
+      "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
       ...lookup.warnings
     ]
   };
