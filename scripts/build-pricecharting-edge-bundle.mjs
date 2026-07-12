@@ -24,6 +24,8 @@ await build({
   platform: "neutral", // no Node or browser assumptions; web-standard globals only
   target: "esnext",
   charset: "utf8", // pin literal UTF-8 output so bundle bytes stay stable across esbuild versions
+  minify: true, // keep the committed bundle small (large unminified bundles can exceed size limits
+  // in some deployment/commit pipelines); functionally identical output either way.
   legalComments: "none",
   banner: {
     js:
