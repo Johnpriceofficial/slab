@@ -40,7 +40,7 @@ function tokens(s: string): string[] {
 }
 
 /** Extract a `#`-prefixed card/issue number token from a product name, if any. */
-function extractHashNumber(name: string): string | null {
+export function extractHashNumber(name: string): string | null {
   const m = /#\s*([0-9]+[a-z]?)/i.exec(name);
   return m ? m[1].toLowerCase() : null;
 }
@@ -424,6 +424,27 @@ function unresolvedAssessment(missing: string[]): MatchAssessment {
     missing_information: missing,
     alternatives_considered: [],
   };
+}
+
+/**
+ * True when a scored candidate's conflicts are ENTIRELY card_number mismatches
+ * (never character/console/set). Used to distinguish "this card is definitely
+ * not it" (character/console conflict — always a hard reject) from "this could
+ * still be it if the number was misread" (number-only conflict — a candidate
+ * for degraded-confirmation, never for silent auto-selection).
+ *
+ * WHY THIS MATTERS: some sets print near-duplicate cards that share every
+ * identifier except the collector number (e.g. multiple alt-art/parallel
+ * prints of the same card in one set). For those, dropping the number
+ * constraint entirely would make MULTIPLE candidates equally "eligible" —
+ * silently picking one would be a real chance of picking the wrong print.
+ * The correct handling is therefore NOT "ignore the number and auto-resolve",
+ * it's "stop hard-rejecting solely for a number mismatch and let the operator
+ * pick from the survivors after checking the physical card" — see
+ * conflictsAreNumberOnly's caller in the server handler.
+ */
+export function conflictsAreNumberOnly(conflicts: string[]): boolean {
+  return conflicts.length > 0 && conflicts.every((c) => c.startsWith("card_number mismatch:"));
 }
 
 /** Re-exported for the confidence-gate constant, used in valuation. */

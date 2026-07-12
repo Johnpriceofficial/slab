@@ -23,7 +23,7 @@ import type { Clock } from "../../lib/pricecharting/clock";
 import type { Logger } from "../../lib/pricecharting/logger";
 import { nullLogger } from "../../lib/pricecharting/logger";
 import { searchProducts, getProductById } from "../../lib/pricecharting/api";
-import { buildSearchQuery, scoreCandidate, requiresHighConfidence } from "../../lib/pricecharting/matching";
+import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber } from "../../lib/pricecharting/matching";
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
@@ -271,10 +271,58 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
   };
 
   const eligibleScored = scored.filter((s) => !s.disqualified);
-  const rejectedScored = scored.filter((s) => s.disqualified);
-  // Selectable candidates are ELIGIBLE only. Hard-disqualified products (wrong
-  // number/character/set/language) go in a separate rejected list with reasons.
-  const candidates: CandidateResult[] = eligibleScored.slice(0, 5).map(toCandidate);
+  let rejectedScored = scored.filter((s) => s.disqualified);
+
+  // ── Number-only-conflict recovery ────────────────────────────────────────────────────────────────────
+  // A candidate disqualified SOLELY on card_number (never character/console/
+  // set) may be the right card with a misread digit — the exact failure mode
+  // that motivated analyze-slab's independent card_number re-verification.
+  // We do NOT auto-resolve this by dropping the number and picking "the"
+  // survivor: some sets print multiple near-duplicate cards sharing every
+  // identifier except the number (e.g. several alt-art prints of the same
+  // card in one set), so more than one candidate can legitimately remain.
+  // Instead: when there is NO fully-eligible candidate, promote every
+  // number-only-conflicted candidate into the SELECTABLE list (never
+  // auto-confirmed) with the mismatch kept visible as a caveat, so the
+  // operator can pick the correct print by checking the physical card's
+  // printed number — turning a dead-end rejection into an informed choice.
+  let numberOnlyPromoted: typeof scored = [];
+  if (eligibleScored.length === 0) {
+    numberOnlyPromoted = rejectedScored.filter((s) => conflictsAreNumberOnly(s.conflicts));
+    if (numberOnlyPromoted.length > 0) {
+      const promotedIds = new Set(numberOnlyPromoted.map((s) => s.product.pricecharting_id));
+      rejectedScored = rejectedScored.filter((s) => !promotedIds.has(s.product.pricecharting_id));
+    }
+  }
+
+  const toPromotedCandidate = (s: (typeof scored)[number]): CandidateResult => {
+    const base = toCandidate(s);
+    const actualNumber = extractHashNumber(s.product.name);
+    return {
+      ...base,
+      // Never silently confirmed — surfaced as a real candidate, not a reject.
+      confidence_score: s.score,
+      match_status: "unverified",
+      rejected: false,
+      conflicts: [
+        ...s.conflicts,
+        `Shown despite the card_number mismatch above: this is the ONLY identity ` +
+          `conflict for this candidate (name/set/year/language all matched), which can ` +
+          `indicate an OCR misread rather than the wrong card.${
+            actualNumber ? ` This candidate's printed number is #${actualNumber}.` : ""
+          } Verify the number against the physical card before selecting.`,
+      ],
+    };
+  };
+
+  // Selectable candidates are ELIGIBLE (never disqualified) plus any
+  // number-only-conflict candidates promoted above. Hard-disqualified products
+  // (wrong character/set/language, or a number conflict alongside another
+  // conflict) go in the separate rejected list with reasons.
+  const candidates: CandidateResult[] = [
+    ...eligibleScored.slice(0, 5).map(toCandidate),
+    ...numberOnlyPromoted.slice(0, 5).map(toPromotedCandidate),
+  ];
   const rejected_candidates: CandidateResult[] = rejectedScored.slice(0, 5).map(toCandidate);
 
   const eligible = eligibleScored;
@@ -289,6 +337,22 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
   const threshold = requiresHighConfidence(item) ? 85 : 70;
   const requiresConfirmation = confidence < threshold;
 
+  const warnings = [
+    "Values are the Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed sale price.",
+  ];
+  if (numberOnlyPromoted.length > 0) {
+    warnings.push(
+      numberOnlyPromoted.length === 1
+        ? "No candidate matched every identifier, but one candidate matched everything except " +
+            "the card number — shown above for manual confirmation. This often means an OCR " +
+            "misread rather than the wrong card; verify the printed number before selecting it."
+        : `No candidate matched every identifier, but ${numberOnlyPromoted.length} candidates matched ` +
+            "everything except the card number (this set prints multiple cards that share the same " +
+            "name/set/year and differ only by number) — shown above for manual confirmation. Check " +
+            "the physical card's printed number to pick the correct one; none has been auto-selected.",
+    );
+  }
+
   const body: SearchResponse = {
     status: "success",
     action: "search",
@@ -300,9 +364,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
     auto_confirmed_product_id: !requiresConfirmation && top ? top.product.pricecharting_id : null,
     candidates,
     rejected_candidates,
-    warnings: [
-      "Values are the Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed sale price.",
-    ],
+    warnings,
   };
   return { statusCode: 200, body };
 }
