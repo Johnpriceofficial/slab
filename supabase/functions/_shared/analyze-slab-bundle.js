@@ -18,7 +18,6 @@ var ANALYZE_FIELD_KEYS = [
   "label_description"
 ];
 var ALLOWED_MIME = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
-var CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD = 0.9;
 var CARD_NUMBER_CONFIRMED_CONFIDENCE = 0.95;
 var SYSTEM_PROMPT = "You are a meticulous trading-card grading assistant. You read graded-slab photos (e.g. PSA/BGS/CGC/SGC) and extract the card's identity. You NEVER guess: if a field is unreadable, mark it readable=false and value=null. You compare the slab LABEL against the visible CARD and report whether they match. You return ONLY strict JSON, no prose, no code fences.";
 var INSTRUCTION = `Extract these fields from the slab photos and return JSON with this exact shape:
@@ -31,7 +30,7 @@ var INSTRUCTION = `Extract these fields from the slab photos and return JSON wit
   "warnings": [ <string> ]
 }
 Fields: ${ANALYZE_FIELD_KEYS.join(", ")}.
-Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
+Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
 var VERIFY_CARD_NUMBER_SYSTEM_PROMPT = 'You are independently re-verifying ONE specific field on a graded trading-card slab label: the card_number (numerator/denominator, e.g. "016/064"). Treat this as a fresh, independent examination — you have no memory of any prior reading, and you must not anchor on what a first pass might have guessed. You return ONLY strict JSON, no prose.';
 var VERIFY_CARD_NUMBER_INSTRUCTION = 'Look ONLY at the card_number printed on the slab label. Read every digit individually. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the most common source of a wrong reading; scrutinize each digit against these confusable pairs before deciding. Return ONLY this exact JSON shape: { "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, set readable=false and value=null — never guess the closest-looking digit.';
 function clamp01(n) {
@@ -77,14 +76,14 @@ async function reverifyCardNumber(deps, images, proposed, warnings) {
     secondRaw = parsed.card_number;
   } catch {
     warnings.push(
-      `Card number confidence is ${Math.round(first.confidence * 100)}% and the independent re-verification pass failed to run — verify every digit against the physical slab before running PriceCharting.`
+      `Card number "${first.value}" (first-pass confidence ${Math.round(first.confidence * 100)}%) could not be independently re-verified (the verification call failed to run) — verify every digit against the physical slab before running PriceCharting.`
     );
     return;
   }
   const second = mapField(secondRaw);
   if (!second.readable) {
     warnings.push(
-      `Card number confidence is ${Math.round(first.confidence * 100)}% and an independent second-pass re-verification also could not read it reliably — verify every digit against the physical slab before running PriceCharting.`
+      `Card number "${first.value}" (first-pass confidence ${Math.round(first.confidence * 100)}%) could not be confirmed by an independent second-pass re-verification — verify every digit against the physical slab before running PriceCharting.`
     );
     return;
   }
@@ -139,7 +138,7 @@ async function analyzeSlabImages(input, deps) {
   if (labelMatches === false) {
     warnings.unshift("The slab label and the visible card appear inconsistent — verify identity carefully.");
   }
-  if (proposed.card_number.readable && proposed.card_number.confidence < CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD) {
+  if (proposed.card_number.readable) {
     await reverifyCardNumber(deps, images, proposed, warnings);
   }
   const unreadable = ANALYZE_FIELD_KEYS.filter((k) => !proposed[k].readable);

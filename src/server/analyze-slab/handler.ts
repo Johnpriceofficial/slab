@@ -14,18 +14,32 @@
  *   - Certification numbers are preserved as text (leading zeros survive).
  *   - Unreadable fields are FLAGGED (readable=false, value=null), never guessed.
  *   - A label-vs-card mismatch surfaces as a warning, not a silent choice.
- *   - card_number confidence below CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD triggers
- *     an automatic SECOND, independent re-verification call (same provider, a
- *     fresh prompt, no memory of the first reading). This is a tiered pipeline:
- *     the cheap single-call path runs by default; the extra call only fires when
- *     the first pass itself reports uncertainty, so confident extractions incur
- *     no added cost or latency.
+ *   - card_number ALWAYS gets an automatic SECOND, independent re-verification
+ *     call (same provider, a fresh prompt, no memory of the first reading)
+ *     whenever it's readable — regardless of the first pass's self-reported
+ *     confidence.
+ *
+ *     WHY UNCONDITIONAL, NOT CONFIDENCE-GATED: an earlier version only
+ *     escalated when confidence < 0.9. Live production data disproved that the
+ *     self-reported confidence is trustworthy enough to gate on: the model
+ *     returned card_number "015/064" at 95% confidence while its OWN warning
+ *     text said "digit '1' and '5' could be misread — verify against the
+ *     card" — a direct self-contradiction that a confidence threshold cannot
+ *     catch, because the number itself claimed to be confident. The real
+ *     card was 016/064 (confirmed against PriceCharting/TCGplayer/eBay/
+ *     Cardmarket). A fresh independent re-read reliably produced "016/064"
+ *     when tested against the same photo, so the fix is to never rely on a
+ *     single self-reported score for this field — always cross-check it
+ *     against a second, independent read.
+ *
  *       - Both passes agree            -> CONFIRMED: confidence raised, no warning.
  *       - Passes disagree              -> NEVER guess: field is cleared
  *         (readable=false, value=null) and a warning names both candidate
  *         readings so the operator resolves it manually.
- *       - Second pass also can't read it -> original low-confidence warning
- *         stands, now noting a second pass didn't help either.
+ *       - Second pass also can't read it -> original warning stands, now
+ *         noting a second pass didn't help either.
+ *       - Second-pass call itself fails  -> falls back to the original
+ *         warning rather than failing the whole analysis.
  *     A misread digit here looks identical to a legitimate PriceCharting
  *     no-match once it reaches the matcher, so resolving the ambiguity BEFORE
  *     the operator searches is the whole point.
@@ -109,13 +123,6 @@ export interface AnalyzeInput {
 
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 
-/**
- * card_number confidence at or above this is trusted as-is. Below it, we
- * automatically fire a second, independent re-verification call rather than
- * just warning — see the module-level doc comment for the full tiered flow.
- */
-const CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD = 0.9;
-
 /** Confidence assigned once two independent passes agree on card_number. */
 const CARD_NUMBER_CONFIRMED_CONFIDENCE = 0.95;
 
@@ -151,7 +158,8 @@ const INSTRUCTION =
   "card_number and add a warning naming the ambiguous digit(s) — do not report high confidence " +
   "on a guess. A wrong card number causes a downstream product-match failure that looks just " +
   "like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse " +
-  "than flagging it. " +
+  "than flagging it. This field is independently re-verified regardless of the confidence you " +
+  "report, so report your GENUINE confidence rather than inflating it. " +
   "grade is ONLY the numeric grade as a STRING (e.g. \"10\", \"9.5\"). grade_label is the " +
   "grader's DESIGNATION/TIER printed with it — e.g. CGC \"PRISTINE\" or \"GEM MINT\", PSA " +
   "\"GEM MT\", BGS \"PRISTINE\"/\"BLACK LABEL\". From a label reading \"PRISTINE 10\", grade=\"10\" " +
@@ -228,7 +236,7 @@ function canonicalizeCardNumber(raw: string): string {
  * Fire the second, independent card_number re-verification call and fold the
  * result into `proposed` + `warnings` IN PLACE. Never guesses: agreement
  * upgrades confidence, disagreement clears the field for manual entry, and an
- * unreadable second pass leaves the original low-confidence warning intact.
+ * unreadable second pass leaves the original reading + warning intact.
  */
 async function reverifyCardNumber(
   deps: AnalyzeDeps,
@@ -248,12 +256,12 @@ async function reverifyCardNumber(
     const parsed = JSON.parse(stripFence(text)) as Record<string, unknown>;
     secondRaw = parsed.card_number;
   } catch {
-    // Verification call failed outright — fall back to the original single-pass
-    // warning rather than blocking the whole analysis on a second-pass hiccup.
+    // Verification call failed outright — fall back to a plain warning rather
+    // than blocking the whole analysis on a second-pass hiccup.
     warnings.push(
-      `Card number confidence is ${Math.round(first.confidence * 100)}% and the independent ` +
-        "re-verification pass failed to run — verify every digit against the physical slab " +
-        "before running PriceCharting.",
+      `Card number "${first.value}" (first-pass confidence ${Math.round(first.confidence * 100)}%) ` +
+        "could not be independently re-verified (the verification call failed to run) — verify " +
+        "every digit against the physical slab before running PriceCharting.",
     );
     return;
   }
@@ -261,11 +269,11 @@ async function reverifyCardNumber(
   const second = mapField(secondRaw);
 
   if (!second.readable) {
-    // Second pass couldn't confirm it either — original warning stands, now
+    // Second pass couldn't confirm it either — original reading stands, now
     // noting that independent re-verification didn't resolve the ambiguity.
     warnings.push(
-      `Card number confidence is ${Math.round(first.confidence * 100)}% and an independent ` +
-        "second-pass re-verification also could not read it reliably — verify every digit " +
+      `Card number "${first.value}" (first-pass confidence ${Math.round(first.confidence * 100)}%) ` +
+        "could not be confirmed by an independent second-pass re-verification — verify every digit " +
         "against the physical slab before running PriceCharting.",
     );
     return;
@@ -284,7 +292,9 @@ async function reverifyCardNumber(
   }
 
   // Passes DISAGREE. Per the never-guess rule: do not silently pick either
-  // reading. Clear the field and require manual resolution, naming both
+  // reading — including the first pass's own self-reported confidence, which
+  // is exactly what caused the original bug (a wrong number reported at 95%
+  // confidence). Clear the field and require manual resolution, naming both
   // candidates so the operator isn't starting from zero.
   proposed.card_number = { value: null, confidence: 0, source: first.source, readable: false };
   warnings.push(
@@ -342,10 +352,11 @@ export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps):
     warnings.unshift("The slab label and the visible card appear inconsistent — verify identity carefully.");
   }
 
-  // Tiered escalation: only when the first pass itself reports low confidence
-  // does a second, independent call fire. Confident extractions cost nothing
-  // extra. Mutates `proposed.card_number` and `warnings` in place.
-  if (proposed.card_number.readable && proposed.card_number.confidence < CARD_NUMBER_CONFIDENCE_WARN_THRESHOLD) {
+  // ALWAYS independently re-verify card_number when it's readable — never gate
+  // this on the first pass's self-reported confidence (see module doc comment
+  // for the live production case that disproved that gate). Mutates
+  // `proposed.card_number` and `warnings` in place.
+  if (proposed.card_number.readable) {
     await reverifyCardNumber(deps, images, proposed, warnings);
   }
 

@@ -136,15 +136,20 @@ describe("analyzeSlabImages", () => {
     expect(res.body.error_code).toBe("ANALYSIS_PROVIDER_ERROR");
   });
 
-  // ── card_number tiered re-verification (real-world: "015/064" misread for "016/064") ──
+  // ── card_number ALWAYS-verify (real-world: "015/064" misread for "016/064" —
+  // and critically, self-reported at 95% confidence with a self-contradicting
+  // warning text, proving confidence alone can never be trusted as a gate) ──
 
   it("sends digit-by-digit / confusable-pair guidance in the FIRST-pass instruction", async () => {
     const highConfidenceReply = JSON.stringify({
       fields: { card_number: { value: "4", confidence: 0.99, source: "front", readable: true } },
     });
-    const { deps: d, calls } = seqDeps([highConfidenceReply]);
+    // Unconditional re-verification means even a high-confidence first pass gets
+    // a second call; supply an agreeing second reply so the flow completes cleanly.
+    const secondReply = JSON.stringify({ card_number: { value: "4", confidence: 0.95, readable: true } });
+    const { deps: d, calls } = seqDeps([highConfidenceReply, secondReply]);
     await analyzeSlabImages(FRONT, d);
-    expect(calls.length).toBe(1); // high confidence: no second call
+    expect(calls.length).toBe(2);
     const instruction = calls[0].instruction;
     expect(instruction).toMatch(/card_number/);
     expect(instruction).toMatch(/digit by digit/i);
@@ -152,16 +157,36 @@ describe("analyzeSlabImages", () => {
     expect(instruction).toMatch(/confidence <= 0\.6/);
   });
 
-  it("does NOT fire a second pass when card_number confidence is already high", async () => {
+  it("ALWAYS fires the second pass even when card_number confidence is already high", async () => {
     const reply = JSON.stringify({
       fields: { card_number: { value: "016/064", confidence: 0.97, source: "label", readable: true } },
     });
-    const { deps: d, calls } = seqDeps([reply]);
+    const secondReply = JSON.stringify({ card_number: { value: "016/064", confidence: 0.9, readable: true } });
+    const { deps: d, calls } = seqDeps([reply, secondReply]);
     const res = await analyzeSlabImages(FRONT, d);
     if (res.body.status !== "success") throw new Error("expected success");
-    expect(calls.length).toBe(1);
+    expect(calls.length).toBe(2); // unconditional — no confidence-based shortcut
     expect(res.body.proposed.card_number.value).toBe("016/064");
-    expect(res.body.warnings.some((w) => /Card number/.test(w))).toBe(false);
+    expect(res.body.warnings.some((w) => /disagree/.test(w))).toBe(false);
+  });
+
+  it("REGRESSION: clears card_number even when the first pass self-reports HIGH confidence (95%) but disagrees with an independent re-check — the exact live production bug", async () => {
+    // This is the literal case that broke live: model reports "015/064" at 95%
+    // confidence, with its own warning text hedging on digits '1'/'5' — yet the
+    // number itself claimed high confidence. A confidence-gated second pass
+    // would never have fired here. Unconditional re-verification is the fix.
+    const firstReply = JSON.stringify({
+      fields: { card_number: { value: "015/064", confidence: 0.95, source: "label", readable: true } },
+      warnings: ["card_number '015/064' numerator contains confusable digits (0/6/8, 1/5) — verify against the card."],
+    });
+    const secondReply = JSON.stringify({ card_number: { value: "016/064", confidence: 0.95, readable: true } });
+    const { deps: d, calls } = seqDeps([firstReply, secondReply]);
+    const res = await analyzeSlabImages(FRONT, d);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(calls.length).toBe(2);
+    expect(res.body.proposed.card_number.readable).toBe(false);
+    expect(res.body.proposed.card_number.value).toBeNull();
+    expect(res.body.warnings.some((w) => /disagree/.test(w) && /015\/064/.test(w) && /016\/064/.test(w))).toBe(true);
   });
 
   it("CONFIRMS card_number when the independent second pass agrees (canonical match)", async () => {
@@ -177,7 +202,6 @@ describe("analyzeSlabImages", () => {
     expect(res.body.proposed.card_number.readable).toBe(true);
     expect(res.body.proposed.card_number.value).toBe("016/064"); // original display value preserved
     expect(res.body.proposed.card_number.confidence).toBeGreaterThanOrEqual(0.95);
-    expect(res.body.warnings.some((w) => /Card number confidence is/.test(w))).toBe(false);
     expect(res.body.warnings.some((w) => /disagree/.test(w))).toBe(false);
   });
 
@@ -197,7 +221,7 @@ describe("analyzeSlabImages", () => {
     expect(res.body.warnings.some((w) => /Could not read.*card_number/.test(w))).toBe(true);
   });
 
-  it("keeps the low-confidence warning when the second pass also can't read it", async () => {
+  it("keeps the original reading + warns when the second pass also can't read it", async () => {
     const firstReply = JSON.stringify({
       fields: { card_number: { value: "015/064", confidence: 0.6, source: "label", readable: true } },
     });
@@ -206,11 +230,11 @@ describe("analyzeSlabImages", () => {
     const res = await analyzeSlabImages(FRONT, d);
     if (res.body.status !== "success") throw new Error("expected success");
     expect(calls.length).toBe(2);
-    // Original low-confidence reading is preserved (not cleared) since the second
-    // pass had nothing to disagree WITH — it simply couldn't confirm either way.
+    // Original reading is preserved (not cleared) since the second pass had
+    // nothing to disagree WITH — it simply couldn't confirm either way.
     expect(res.body.proposed.card_number.readable).toBe(true);
     expect(res.body.proposed.card_number.value).toBe("015/064");
-    expect(res.body.warnings.some((w) => /second-pass re-verification also could not read it/.test(w))).toBe(true);
+    expect(res.body.warnings.some((w) => /could not be confirmed by an independent second-pass re-verification/.test(w))).toBe(true);
   });
 
   it("falls back gracefully if the second-pass call itself throws", async () => {
@@ -222,6 +246,6 @@ describe("analyzeSlabImages", () => {
     if (res.body.status !== "success") throw new Error("expected success");
     expect(calls.length).toBe(2);
     expect(res.body.proposed.card_number.value).toBe("015/064"); // unchanged, not crashed
-    expect(res.body.warnings.some((w) => /re-verification pass failed to run/.test(w))).toBe(true);
+    expect(res.body.warnings.some((w) => /could not be independently re-verified/.test(w))).toBe(true);
   });
 });
