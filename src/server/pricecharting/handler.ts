@@ -29,7 +29,7 @@ import { normalizeProduct } from "../../lib/pricecharting/product";
 import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
 import { scrapeCatalogImage, scrapePublicGuidePrice } from "../../lib/pricecharting/catalog-image";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
-import type { CardItemInput, GradingCompany, RawProduct } from "../../lib/pricecharting/types";
+import type { CardItemInput, GradingCompany, Product, RawProduct } from "../../lib/pricecharting/types";
 
 /** Fields the browser is allowed to send. NO token, NO product internals. */
 export interface SlabSearchInput {
@@ -152,6 +152,9 @@ export interface CandidateResult {
   grade_field: string | null;
   guide_value_cents: number | null;
   company_specific: boolean;
+  /** Catalog artwork fetched before selection so the operator can compare candidates. */
+  candidate_image_url?: string | null;
+  candidate_image_source?: ImageSource;
   conflicts: string[];
   /** True when the candidate was hard-disqualified (shown only under "Rejected"). */
   rejected: boolean;
@@ -399,14 +402,14 @@ export async function handlePriceChartingRequest(
     if (action === "lookup") {
       return await handleLookup(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
     }
-    return await handleSearch(client, input);
+    return await handleSearch(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
   } catch (err) {
     const body = errorBody(err);
     return { statusCode: httpStatusFor(body.error_code), body };
   }
 }
 
-async function handleSearch(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+async function handleSearch(client: PriceChartingClient, input: SlabSearchInput, fetchImpl: FetchLike): Promise<HandlerResult> {
   const item = toCardInput(input);
   const query = buildSearchQuery(item);
   if (!query) {
@@ -498,6 +501,21 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
   ];
   const rejected_candidates: CandidateResult[] = rejectedScored.slice(0, 5).map(toCandidate);
 
+  // Fetch catalog artwork BEFORE selection. This lets the operator visually
+  // distinguish variants (Prize Pack, language, parallel/artwork) without first
+  // linking an unknown product. Public-page reads are independent of API rate
+  // limits and failures remain non-blocking metadata-only candidates.
+  const productsById = new Map<string, Product>(scored.map((s) => [s.product.pricecharting_id, s.product]));
+  const candidatesWithImages = await Promise.all(candidates.map(async (candidate) => {
+    const product = productsById.get(candidate.product_id);
+    const imageUrl = product ? await scrapeCatalogImage(fetchImpl, product) : null;
+    return {
+      ...candidate,
+      candidate_image_url: imageUrl,
+      candidate_image_source: imageUrl ? "official_product" as const : "none" as const,
+    };
+  }));
+
   const eligible = eligibleScored;
   const top = eligible[0];
   const runnerUp = eligible[1];
@@ -535,7 +553,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
     requires_confirmation: requiresConfirmation,
     // Never auto-confirm the first result: only surface an id when the gate clears.
     auto_confirmed_product_id: !requiresConfirmation && top ? top.product.pricecharting_id : null,
-    candidates,
+    candidates: candidatesWithImages,
     rejected_candidates,
     warnings,
   };
