@@ -23,6 +23,7 @@ import {
 } from "@/lib/slabs/constants";
 import { dollarsToCents, centsToInputString } from "@/lib/slabs/format";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
+import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { saveSlab, validateSlabInput, type SlabDataAccess } from "@/lib/slabs/save-slab";
 import { supabaseSlabDataAccess } from "@/lib/slabs/data";
 import type { SlabInput } from "@/lib/slabs/types";
@@ -156,11 +157,25 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
 
   const onSelectPc = (sel: SelectedPriceCharting) => {
     setPc(sel);
+    // Auto-derive Quick-Sale / Replacement / Confidence from the CONFIRMED guide
+    // value using the documented ratios — never leave confidence on "Manual" when
+    // the numbers actually came from PriceCharting.
+    const derived = deriveValuation({
+      guide_cents: sel.value_cents,
+      confidence_score: sel.confidence_score,
+      is_estimate: sel.is_estimate,
+      field_meaning: sel.grade_field,
+    });
     setVal((s) => ({
       ...s,
       guide: centsToInputString(sel.value_cents),
-      // Prefill final value from the guide only when the operator hasn't set one.
-      final: s.final ? s.final : centsToInputString(sel.value_cents),
+      // Only fill fields the operator hasn't already set — never clobber manual entry.
+      final: s.final ? s.final : centsToInputString(derived.suggested_final_cents),
+      quick: s.quick ? s.quick : centsToInputString(derived.quick_sale_cents),
+      replacement: s.replacement ? s.replacement : centsToInputString(derived.replacement_cents),
+      // Confidence was "manual" by default; a derived valuation replaces it.
+      confidence: s.confidence === "manual" ? derived.confidence : s.confidence,
+      notes: s.notes ? s.notes : derived.method,
     }));
   };
 

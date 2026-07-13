@@ -5,6 +5,11 @@ import { toast } from "sonner";
 import { Search, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
 import { priceChartingSearch, priceChartingValue, type PriceChartingSearchArgs } from "@/lib/slabs/data";
 import { formatCents } from "@/lib/slabs/format";
+import {
+  deriveCandidateStatus,
+  shouldShowBelowThresholdBanner,
+  type LinkTone,
+} from "@/lib/slabs/link-status";
 import type { CandidateResult, SearchResponse } from "@/server/pricecharting/handler";
 
 export interface SelectedPriceCharting {
@@ -15,6 +20,8 @@ export interface SelectedPriceCharting {
   sales_volume: number | null;
   match_status: string;
   confidence_score: number;
+  /** True when the guide value is an interpolated grade estimate, not a direct tier. */
+  is_estimate: boolean;
 }
 
 interface PriceChartingPanelProps {
@@ -23,11 +30,13 @@ interface PriceChartingPanelProps {
   onSelect: (sel: SelectedPriceCharting) => void;
 }
 
-const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  exact: "default",
-  likely: "secondary",
-  unverified: "outline",
-  no_match: "destructive",
+/** Map a single resolved link-status tone to a Badge variant. */
+const TONE_VARIANT: Record<LinkTone, "default" | "secondary" | "destructive" | "outline"> = {
+  confirmed: "default",
+  proposed: "secondary",
+  warning: "outline",
+  rejected: "destructive",
+  neutral: "outline",
 };
 
 export function PriceChartingPanel({ identity, selectedProductId, onSelect }: PriceChartingPanelProps) {
@@ -78,6 +87,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         sales_volume: res.sales_volume,
         match_status: c.match_status,
         confidence_score: c.confidence_score,
+        is_estimate: res.is_estimate,
       });
       toast.success(`Linked to ${res.product_name}`);
     } catch (e) {
@@ -87,7 +97,21 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
     }
   };
 
-  const recommendedId = result && !result.requires_confirmation ? result.auto_confirmed_product_id : null;
+  const statusCtx = result
+    ? {
+        selectedProductId,
+        autoConfirmedProductId: result.auto_confirmed_product_id,
+        requiresConfirmation: result.requires_confirmation,
+      }
+    : null;
+
+  const showBelowThreshold =
+    !!result &&
+    shouldShowBelowThresholdBanner({
+      requiresConfirmation: result.requires_confirmation,
+      selectedProductId,
+      candidateCount: result.candidates.length,
+    });
 
   return (
     <div className="space-y-3">
@@ -108,10 +132,10 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         </div>
       )}
 
-      {result && result.requires_confirmation && result.candidates.length > 0 && (
+      {showBelowThreshold && (
         <div className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800">
           <AlertTriangle className="h-4 w-4" />
-          Confidence is below the auto-confirm threshold ({result.confidence_score}). Confirm the correct product manually.
+          Confidence is below the auto-confirm threshold ({result!.confidence_score}). Confirm the correct product manually.
         </div>
       )}
 
@@ -119,7 +143,9 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         <div className="space-y-2">
           {result.candidates.map((c) => {
             const isSelected = selectedProductId === c.product_id;
-            const isRecommended = recommendedId === c.product_id;
+            // ONE resolved status per candidate — never the raw match tag alongside
+            // a stale "below threshold" banner or "Linked" button.
+            const view = deriveCandidateStatus(c, statusCtx!);
             return (
               <div
                 key={c.product_id}
@@ -129,8 +155,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{c.product_name}</span>
-                      <Badge variant={STATUS_VARIANT[c.match_status] ?? "outline"}>{c.match_status}</Badge>
-                      {isRecommended && <Badge variant="secondary">Recommended</Badge>}
+                      <Badge variant={TONE_VARIANT[view.tone]}>{view.label}</Badge>
                     </div>
                     <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-muted-foreground sm:grid-cols-4">
                       <span>ID: {c.product_id}</span>
