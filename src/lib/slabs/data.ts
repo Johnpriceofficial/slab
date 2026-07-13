@@ -49,7 +49,7 @@ export const supabaseSlabDataAccess: SlabDataAccess = {
     return { id: row.id as string, inventory_number: row.inventory_number as number };
   },
 
-  async createSlabRow(input: SlabInput, frontExt: string, backExt: string) {
+  async createSlabRow(input: SlabInput, frontExt: string, backExt: string | null) {
     const { data, error } = await sb.rpc("create_slab", {
       p: input as unknown as Record<string, unknown>,
       p_front_ext: frontExt,
