@@ -113,6 +113,38 @@ describe("saveSlab — failure cleanup", () => {
   });
 });
 
+describe("saveSlab — optional back image", () => {
+  it("succeeds with only a front image — some slabs carry all needed data on the front label alone", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput(), image(), null, dao);
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.slab.front_image_path).toBe("slabs/1/front.jpg");
+      expect(result.slab.back_image_path).toBeNull();
+    }
+    // Only the front was uploaded — no back upload attempted at all.
+    expect(state.uploads).toEqual(["slabs/1/front.jpg"]);
+  });
+
+  it("does not require a back image to pass validation", () => {
+    const errors = validateSlabInput(validInput(), true, false);
+    expect(errors).toEqual([]);
+  });
+
+  it("still cleans up correctly when the front upload fails and no back was provided", async () => {
+    const { dao, state } = makeMockDao({ failUpload: "front" });
+    const result = await saveSlab(validInput(), image(), null, dao);
+    expect(result.status).toBe("error");
+    expect(state.deletedRows).toEqual(["slab-1"]);
+    expect(state.deletedImages).toEqual(["slabs/1/front.jpg"]); // no back path to clean up
+  });
+
+  it("still rejects when the FRONT image is missing (front stays required)", () => {
+    const errors = validateSlabInput(validInput(), false, false);
+    expect(errors).toEqual(expect.arrayContaining(["Front image is required."]));
+  });
+});
+
 describe("image extension validation (mirrors SQL valid_image_ext)", () => {
   it("accepts the allow-list and tolerates a leading dot / uppercase", () => {
     expect(normalizeImageExt("JPG")).toBe("jpg");
@@ -137,10 +169,16 @@ describe("image extension validation (mirrors SQL valid_image_ext)", () => {
     expect(result.status).toBe("validation_error");
     expect(state.createdNumbers).toHaveLength(0);
   });
+  it("blocks a save with an unsupported BACK extension even though back is optional", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(validInput(), image(), image("gif"), dao);
+    expect(result.status).toBe("validation_error");
+    expect(state.createdNumbers).toHaveLength(0);
+  });
 });
 
 describe("saveSlab — validation", () => {
-  it("requires card name, grader, grade, certification, and both images", () => {
+  it("requires card name, grader, grade, certification, and the front image", () => {
     const errors = validateSlabInput(
       { ...validInput(), card_name: "", grader: "", grade: "", certification_number: "" },
       false,
@@ -153,9 +191,9 @@ describe("saveSlab — validation", () => {
         "Grade is required.",
         "Certification number is required.",
         "Front image is required.",
-        "Back image is required.",
       ]),
     );
+    expect(errors).not.toContain("Back image is required.");
   });
 
   it("blocks save on validation error before touching the database", async () => {
