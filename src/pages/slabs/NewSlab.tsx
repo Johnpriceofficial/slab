@@ -184,7 +184,6 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // A material identity change invalidates any prior visual review.
   useEffect(() => {
     setVisual(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id.card_name, id.set_name, id.card_number, id.year, id.language, id.variation, id.grader, id.grade, id.grade_label]);
 
   const variance = useMemo(
@@ -210,7 +209,6 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       product_id: pc?.product_id ?? null,
       available_values_cents: pc?.available_values_cents ?? null,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pc, val.final, val.guide, val.quick, val.replacement, val.confidence, variance, id.grader, id.grade, id.grade_label]);
 
   // The slab's own exact grade tier label, e.g. "CGC 10 Pristine".

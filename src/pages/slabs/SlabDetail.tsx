@@ -25,7 +25,7 @@ import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
 } from "@/lib/slabs/data";
-import { formatCents, centsToInputString, dollarsToCents } from "@/lib/slabs/format";
+import { centsToInputString, dollarsToCents } from "@/lib/slabs/format";
 import { VERIFICATION_STATUSES, VALUATION_CONFIDENCE, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
 import type { Slab } from "@/lib/slabs/types";
 
