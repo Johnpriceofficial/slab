@@ -211,12 +211,12 @@ suite("SlabVault live integration", () => {
 
   it("enforces storage MIME + size limits on the private bucket", async () => {
     // Unsupported MIME rejected.
-    const gif = new Blob([new Uint8Array([0x47, 0x49, 0x46])], { type: "image/gif" });
+    const gif = new Uint8Array([0x47, 0x49, 0x46]);
     const badMime = await adminClient.storage.from("slab-images").upload(`test/${stamp}/x.gif`, gif, { contentType: "image/gif" });
     expect(badMime.error).not.toBeNull();
 
     // Oversized (>15MB) rejected.
-    const big = new Blob([new Uint8Array(16 * 1024 * 1024)], { type: "image/png" });
+    const big = new Uint8Array(16 * 1024 * 1024);
     const tooBig = await adminClient.storage.from("slab-images").upload(`test/${stamp}/big.png`, big, { contentType: "image/png" });
     expect(tooBig.error).not.toBeNull();
   }, 30_000);
