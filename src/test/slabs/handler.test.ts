@@ -49,6 +49,9 @@ describe("handler — search", () => {
   it("returns candidates with guide values in integer cents", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/products?", { json: { products: [CARD_ROW({})] } });
+    mock.enqueue("/game/pokemon-base-set/charizard-4", {
+      text: '<img alt="Main Image | Charizard #4" src="https://storage.googleapis.com/images.pricecharting.com/charizard/240.jpg">',
+    });
     const res = await handlePriceChartingRequest(
       { action: "search", card_name: "Charizard", card_number: "4", set: "Base Set", year: 1999, grader: "PSA", grade: 9 },
       deps(mock),
@@ -58,6 +61,8 @@ describe("handler — search", () => {
       expect(res.body.candidates[0].product_id).toBe("6910");
       expect(res.body.candidates[0].grade_field).toBe("graded-price");
       expect(res.body.candidates[0].guide_value_cents).toBe(12500); // integer cents
+      expect(res.body.candidates[0].candidate_image_url).toContain("/charizard/240.jpg");
+      expect(res.body.candidates[0].candidate_image_source).toBe("official_product");
     }
   });
 

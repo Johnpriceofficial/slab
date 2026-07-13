@@ -35,6 +35,8 @@ describe("PriceChartingPanel identity invalidation", () => {
         match_status: "exact",
         guide_value_cents: 4250,
         grade_field: "condition-17-price",
+        candidate_image_url: "https://storage.googleapis.com/images.pricecharting.com/charmander/240.jpg",
+        candidate_image_source: "official_product",
         conflicts: [],
         breakdown: {},
         rejected: false,
@@ -49,6 +51,7 @@ describe("PriceChartingPanel identity invalidation", () => {
     const { rerender } = render(<PriceChartingPanel {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "Search PriceCharting" }));
     expect(await screen.findByText("Charmander #289/S-P")).toBeTruthy();
+    expect(screen.getByAltText("PriceCharting candidate artwork for Charmander #289/S-P")).toBeTruthy();
 
     rerender(<PriceChartingPanel {...props} identity={{ ...identity, grade_label: "PERFECT" }} />);
     await waitFor(() => expect(screen.queryByText("Charmander #289/S-P")).toBeNull());

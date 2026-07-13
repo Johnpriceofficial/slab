@@ -292,6 +292,16 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
         selected_tier_label: res.selected_tier_label,
       });
       toast.success(`Linked to ${res.product_name}`);
+      if (c.candidate_image_url) {
+        setOfferImage({
+          product_id: c.product_id,
+          url: c.candidate_image_url,
+          count: 0,
+          loading: false,
+          source: c.candidate_image_source ?? "official_product",
+        });
+        return;
+      }
       // Best-effort seller listing photo for visual (metadata + photo) confirmation.
       // Never blocks linking; absence is a normal, expected outcome.
       setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: true, source: "none" });
@@ -436,6 +446,30 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                 </div>
 
                 <CandidateDebugPanel breakdown={c.breakdown} rejected={c.rejected} />
+
+                {/* Candidate artwork is shown BEFORE selection so the operator can
+                    compare visually without linking an unknown product first. */}
+                <div className="mt-3 grid gap-3 rounded-md border bg-muted/20 p-2 sm:grid-cols-2">
+                  <div className="space-y-1 text-xs">
+                    <p className="text-muted-foreground">Your slab</p>
+                    {frontImageUrl ? (
+                      <img src={frontImageUrl} alt="Your slab front" className="h-40 w-full rounded border object-contain" />
+                    ) : (
+                      <div className="flex h-40 items-center justify-center rounded border text-muted-foreground">No slab image</div>
+                    )}
+                  </div>
+                  <div className="space-y-1 text-xs">
+                    <p className="text-muted-foreground">PriceCharting candidate · ID {c.product_id}</p>
+                    {c.candidate_image_url ? (
+                      <img src={c.candidate_image_url} alt={`PriceCharting candidate artwork for ${c.product_name}`} loading="lazy" className="h-40 w-full rounded border object-contain" />
+                    ) : (
+                      <div className="flex h-40 items-center justify-center rounded border text-center italic text-muted-foreground">
+                        Candidate image unavailable — verify metadata before selecting.
+                      </div>
+                    )}
+                    <p className="text-[10px] text-muted-foreground">Catalog artwork for pre-selection comparison; it never overrides an identity conflict.</p>
+                  </div>
+                </div>
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
                     OFFER image (a seller photo), NOT an authoritative catalog
