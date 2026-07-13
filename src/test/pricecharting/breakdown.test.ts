@@ -79,4 +79,14 @@ describe("structured scoring breakdown", () => {
     expect(wrongNum.breakdown.disqualified).toBe(true);
     expect(field(wrongNum.breakdown, "numerator").result).toBe("mismatch");
   });
+
+  it("hard-rejects a Korean catalog product for a Japanese slab", () => {
+    const s = scoreCandidate(
+      charmander({ card_name: "Alakazam", card_number: "071/063", set: "Mega Symphonia" }),
+      product("Alakazam #71", { console_or_category: "Pokemon Korean Mega Symphonia" }),
+    );
+    expect(s.breakdown.disqualified).toBe(true);
+    expect(s.breakdown.hard_conflicts.join(" ")).toMatch(/language mismatch.*japanese.*korean/i);
+    expect(field(s.breakdown, "language").hard_conflict).toBe(true);
+  });
 });
