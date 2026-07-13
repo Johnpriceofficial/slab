@@ -47,6 +47,7 @@ describe("migration contract", () => {
       expect(consolidationSql).toContain(`grant execute on function public.${signature} to service_role`);
     }
     expect(consolidationSql).toContain("revoke all on function public.rls_auto_enable() from authenticated");
+    expect(consolidationSql).toContain("if to_regprocedure('public.rls_auto_enable()') is not null then");
     expect(consolidationSql).toContain("alter function public.valid_image_ext(text) set search_path = pg_catalog");
   });
 

@@ -324,10 +324,17 @@ revoke all on function public.cgc_claim_import_run(uuid, uuid, text, jsonb, nume
 grant execute on function public.cgc_claim_import_run(uuid, uuid, text, jsonb, numeric) to service_role;
 
 -- Platform event-trigger helper is owner/internal only; it must not be exposed as
--- a REST RPC. Trigger execution does not require client EXECUTE privileges.
-revoke all on function public.rls_auto_enable() from public;
-revoke all on function public.rls_auto_enable() from anon;
-revoke all on function public.rls_auto_enable() from authenticated;
+-- a REST RPC. Managed Supabase projects provide this helper, but a fresh local
+-- stack may not, so keep the hardening conditional and migration-portable.
+do $$
+begin
+  if to_regprocedure('public.rls_auto_enable()') is not null then
+    revoke all on function public.rls_auto_enable() from public;
+    revoke all on function public.rls_auto_enable() from anon;
+    revoke all on function public.rls_auto_enable() from authenticated;
+  end if;
+end;
+$$;
 
 -- Immutable/trigger helpers are invoker functions, but pin their lookup path as
 -- well so the database advisor cannot report mutable-search-path ambiguity.
