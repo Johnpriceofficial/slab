@@ -19,6 +19,7 @@ import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
+import { hydratePriceTiers } from "@/lib/slabs/pricing-tiers";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab,
 } from "@/lib/slabs/data";
@@ -150,6 +151,10 @@ export default function SlabDetail() {
                 grade_label: slab.grade_label,
                 product_name: slab.pricecharting_product_name,
                 product_id: slab.pricecharting_product_id,
+                // Hydrate the persisted tier table so the saved slab shows the
+                // same Compare Other Grades that was available during intake.
+                // Older rows have no tiers → sparse fallback (exact tier only).
+                tiers: hydratePriceTiers(slab.pricecharting_tiers),
               })}
             />
           </CardContent>

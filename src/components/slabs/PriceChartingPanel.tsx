@@ -33,6 +33,8 @@ export interface SelectedPriceCharting {
    * manually from real data when their exact grade has no tier.
    */
   available_values_cents: Record<string, number | null>;
+  /** The raw token-free value response, kept for audit persistence. */
+  value_response: unknown;
 }
 
 interface PriceChartingPanelProps {
@@ -106,6 +108,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         confidence_score: c.confidence_score,
         is_estimate: res.is_estimate,
         available_values_cents: res.available_values_cents ?? {},
+        value_response: res,
       });
       toast.success(`Linked to ${res.product_name}`);
       // Best-effort seller listing photo for visual (metadata + photo) confirmation.

@@ -19,6 +19,7 @@
  */
 
 import type { Slab, SlabInput } from "./types";
+import type { SlabPricingWrite } from "./pricing-tiers";
 import { normalizeImageExt } from "./constants";
 
 export interface SlabImageUpload {
@@ -55,6 +56,11 @@ export interface SlabDataAccess {
   uploadImage(path: string, blob: Blob): Promise<{ error: SlabDataError | null }>;
   deleteImages(paths: string[]): Promise<void>;
   deleteSlabRow(id: string): Promise<void>;
+  /**
+   * Persist the confirmed PriceCharting tier table (stale-write guarded in the
+   * DB). Optional: non-critical enrichment, never blocks or fails a save.
+   */
+  applySlabPricing?(slabId: string, pricing: SlabPricingWrite): Promise<void>;
 }
 
 export type SaveSlabResult =
@@ -89,6 +95,7 @@ export async function saveSlab(
   front: SlabImageUpload | null,
   back: SlabImageUpload | null,
   dao: SlabDataAccess,
+  pricing?: SlabPricingWrite | null,
 ): Promise<SaveSlabResult> {
   const errors = validateSlabInput(input, !!front, !!back);
   if (errors.length > 0) return { status: "validation_error", errors };
@@ -141,6 +148,17 @@ export async function saveSlab(
     if (backUp.error) {
       await safeCleanup(dao, slab.id, [frontPath, backPath]);
       return { status: "error", message: `Back image upload failed: ${backUp.error.message}` };
+    }
+  }
+
+  // 3. Persist the confirmed PriceCharting tier table (best-effort enrichment).
+  //    A failure here NEVER fails the save — the slab is complete without it and
+  //    the detail page falls back to the sparse display.
+  if (pricing && dao.applySlabPricing) {
+    try {
+      await dao.applySlabPricing(slab.id, pricing);
+    } catch {
+      /* ignore — tier persistence is non-critical */
     }
   }
 

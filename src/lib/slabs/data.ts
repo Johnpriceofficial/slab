@@ -78,6 +78,17 @@ export const supabaseSlabDataAccess: SlabDataAccess = {
   async deleteSlabRow(id: string) {
     await sb.from("slabs").delete().eq("id", id);
   },
+
+  async applySlabPricing(slabId: string, pricing) {
+    // Stale-write guarded server-side: an older retrieved_at never overwrites newer.
+    const { error } = await sb.rpc("apply_slab_pricing", {
+      p_slab_id: slabId,
+      p_tiers: pricing.persist as unknown as Record<string, unknown>,
+      p_raw: (pricing.raw ?? null) as unknown as Record<string, unknown> | null,
+      p_priced_at: pricing.persist.retrieved_at,
+    });
+    if (error) throw new Error(error.message);
+  },
 };
 
 /* ------------------------------ read path ------------------------------ */

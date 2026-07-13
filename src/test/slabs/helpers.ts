@@ -6,6 +6,7 @@
 
 import type { SlabDataAccess, SlabDataError } from "@/lib/slabs/save-slab";
 import type { Slab, SlabInput } from "@/lib/slabs/types";
+import type { SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
 import { certCompositeKey } from "@/lib/slabs/normalize";
 
 export interface MockDaoOptions {
@@ -13,6 +14,8 @@ export interface MockDaoOptions {
   createError?: SlabDataError;
   /** Seed existing (grader, cert) → inventory number, keyed by composite `GRADER:CERT`. */
   existingCerts?: Record<string, number>;
+  /** When true, applySlabPricing throws — verifies tier persistence is non-fatal. */
+  failPricing?: boolean;
 }
 
 export interface MockDaoState {
@@ -22,6 +25,7 @@ export interface MockDaoState {
   deletedImages: string[];
   deletedRows: string[];
   createdNumbers: number[];
+  pricingWrites: Array<{ slabId: string; write: SlabPricingWrite }>;
 }
 
 function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: string | null): Slab {
@@ -71,6 +75,7 @@ export function makeMockDao(opts: MockDaoOptions = {}): { dao: SlabDataAccess; s
     deletedImages: [],
     deletedRows: [],
     createdNumbers: [],
+    pricingWrites: [],
   };
 
   const dao: SlabDataAccess = {
@@ -107,6 +112,10 @@ export function makeMockDao(opts: MockDaoOptions = {}): { dao: SlabDataAccess; s
     },
     async deleteSlabRow(id) {
       state.deletedRows.push(id);
+    },
+    async applySlabPricing(slabId, write) {
+      if (opts.failPricing) throw new Error("pricing write failed");
+      state.pricingWrites.push({ slabId, write });
     },
   };
 

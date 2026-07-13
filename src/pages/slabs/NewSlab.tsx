@@ -3,7 +3,6 @@ import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -13,6 +12,7 @@ import { AlertTriangle, Save, Loader2, Sparkles } from "lucide-react";
 import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUploader";
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
+import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { analyzeSlab } from "@/lib/slabs/data";
 import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
@@ -22,9 +22,11 @@ import {
   LABEL_ACCURACY,
   VALUATION_CONFIDENCE,
 } from "@/lib/slabs/constants";
-import { dollarsToCents, centsToInputString, formatCents } from "@/lib/slabs/format";
+import { dollarsToCents, centsToInputString } from "@/lib/slabs/format";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
+import { buildPricingModel } from "@/lib/slabs/pricing-display";
+import { buildPricingPersist, tierLabelOf, type SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
 import { saveSlab, validateSlabInput, type SlabDataAccess } from "@/lib/slabs/save-slab";
 import { supabaseSlabDataAccess } from "@/lib/slabs/data";
 import type { SlabInput } from "@/lib/slabs/types";
@@ -55,24 +57,6 @@ const EMPTY_VALUATION = {
   notes: "",
   date_valued: new Date().toISOString().slice(0, 10),
 };
-
-/** "PRISTINE" → "Pristine" for tier labels; leaves short codes/numbers intact. */
-function titleCase(s: string): string {
-  return s.replace(/\b([A-Za-z])([A-Za-z]*)\b/g, (_, a, b) => a.toUpperCase() + b.toLowerCase());
-}
-
-/** Human labels + display order for the PriceCharting card price tiers. */
-const PC_TIER_LABELS: Array<[string, string]> = [
-  ["ungraded", "Ungraded"],
-  ["grade_7_to_7_5", "Grade 7–7.5"],
-  ["grade_8_to_8_5", "Grade 8–8.5"],
-  ["grade_9_general", "Grade 9 (general)"],
-  ["grade_9_5_general", "Grade 9.5 (general)"],
-  ["psa_10", "PSA 10"],
-  ["cgc_10", "CGC 10"],
-  ["bgs_10", "BGS 10"],
-  ["sgc_10", "SGC 10"],
-];
 
 interface NewSlabPageProps {
   /** Injectable for tests; defaults to the Supabase-backed implementation. */
@@ -200,12 +184,30 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     [val.final, val.guide],
   );
 
+  // Live pricing model, rendered with the SAME SlabPricingCard the detail page
+  // uses, from the SAME canonical tiers — so both pages are pixel-identical.
+  const pricingModel = useMemo(() => {
+    if (!pc && dollarsToCents(val.guide) === null) return null;
+    return buildPricingModel({
+      final_cents: dollarsToCents(val.final),
+      guide_cents: dollarsToCents(val.guide),
+      quick_cents: dollarsToCents(val.quick),
+      replacement_cents: dollarsToCents(val.replacement),
+      valuation_confidence: val.confidence,
+      price_variance_percent: variance,
+      grader: id.grader,
+      grade: id.grade,
+      grade_label: id.grade_label,
+      product_name: pc?.product_name ?? null,
+      product_id: pc?.product_id ?? null,
+      available_values_cents: pc?.available_values_cents ?? null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pc, val.final, val.guide, val.quick, val.replacement, val.confidence, variance, id.grader, id.grade, id.grade_label]);
+
   // The slab's own exact grade tier label, e.g. "CGC 10 Pristine".
   const exactTierLabel = () =>
-    [id.grader, id.grade, titleCase(id.grade_label)]
-      .map((s) => s?.trim())
-      .filter(Boolean)
-      .join(" ") || null;
+    tierLabelOf({ grader: id.grader, grade: id.grade, grade_label: id.grade_label }) || null;
 
   const onSelectPc = (sel: SelectedPriceCharting) => {
     setPc(sel);
@@ -277,6 +279,19 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       toast.error(problems[0]);
       return;
     }
+    // Persist the confirmed PriceCharting tier table (best-effort; the save never
+    // depends on it). Built from the SAME live tiers the pricing card renders.
+    const pricingWrite: SlabPricingWrite | null = pc
+      ? {
+          persist: buildPricingPersist(
+            pc.available_values_cents,
+            { grader: id.grader, grade: id.grade, grade_label: id.grade_label },
+            new Date().toISOString(),
+          ),
+          raw: pc.value_response ?? null,
+        }
+      : null;
+
     setSaving(true);
     try {
       const result = await saveSlab(
@@ -284,6 +299,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         front ? { blob: front.file, ext: front.ext } : null,
         back ? { blob: back.file, ext: back.ext } : null,
         dao,
+        pricingWrite,
       );
       if (result.status === "success") {
         toast.success(`Saved as Inventory #${result.slab.inventory_number}`);
@@ -440,38 +456,10 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Valuation</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {/* Primary value card — the strict hierarchy: Final Value largest,
-                exact pricing basis directly beneath, then the secondary metrics. */}
-            {val.guide && (
-              <div className="col-span-2 rounded-lg border bg-primary/5 p-4 sm:col-span-4">
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <span className="text-3xl font-bold">{formatCents(dollarsToCents(val.final))}</span>
-                  <span className="text-sm text-muted-foreground">Final Value</span>
-                  {val.confidence === "verified" && (
-                    <Badge className="border-transparent bg-emerald-600 text-white hover:bg-emerald-600">
-                      Exact Match
-                    </Badge>
-                  )}
-                </div>
-                <p className="mt-1 text-sm font-medium">
-                  {exactTierLabel() ? `${exactTierLabel()} — ` : ""}
-                  {val.confidence === "verified" ? "Exact PriceCharting Tier" : "PriceCharting-based valuation"}
-                </p>
-                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-                  <Metric label="PriceCharting Guide Value" value={formatCents(dollarsToCents(val.guide))} />
-                  <Metric label="Quick-Sale Value" value={formatCents(dollarsToCents(val.quick))} />
-                  <Metric label="Replacement Value" value={formatCents(dollarsToCents(val.replacement))} />
-                  <Metric
-                    label="Valuation Confidence"
-                    value={VALUATION_CONFIDENCE.find((c) => c.value === val.confidence)?.label ?? val.confidence}
-                  />
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Price Variance: {variance === null ? "—" : `${variance}%`}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Current PriceCharting Guide Value — not a last-sold or eBay-sold price.
-                </p>
+            {/* Primary value hierarchy — the SAME component the detail page renders. */}
+            {pricingModel && (
+              <div className="col-span-2 sm:col-span-4">
+                <SlabPricingCard model={pricingModel} />
               </div>
             )}
             <Field label="Final Value ($)">
@@ -503,52 +491,6 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <Field label="Valuation Notes" className="col-span-2 sm:col-span-4">
               <Textarea value={val.notes} onChange={(e) => setValField("notes", e.target.value)} rows={2} />
             </Field>
-            <p className="col-span-2 text-xs text-muted-foreground sm:col-span-4">
-              The PriceCharting figure is the <strong>Current PriceCharting Guide Value</strong> — not a last-sold,
-              eBay-sold, confirmed, or historical sale.
-            </p>
-
-            {/* What PriceCharting ACTUALLY has for this product. Shown so a blank
-                guide value (no price for this exact grade) is an informed manual
-                decision, not a dead end. PriceCharting often carries only the
-                ungraded value — a graded slab is typically worth more, so these
-                are reference points, not the answer. */}
-            {pc && (
-              <div className="col-span-2 rounded-md border bg-muted/30 p-3 sm:col-span-4">
-                {(() => {
-                  const tiers = PC_TIER_LABELS.map(([k, label]) => [label, pc.available_values_cents[k]] as const).filter(
-                    ([, v]) => v !== null && v !== undefined,
-                  );
-                  if (tiers.length === 0) {
-                    return (
-                      <p className="text-xs text-muted-foreground">
-                        PriceCharting has <strong>no price of any kind</strong> for “{pc.product_name}”. Value this slab
-                        from sold comps or your own judgement.
-                      </p>
-                    );
-                  }
-                  return (
-                    <>
-                      <p className="mb-2 text-xs font-medium">
-                        PriceCharting values for “{pc.product_name}” (reference)
-                        {val.guide ? "" : " — no price for this exact grade; use these to value manually"}
-                      </p>
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                        {tiers.map(([label, v]) => (
-                          <span key={label} className="text-muted-foreground">
-                            {label}: <span className="font-medium text-foreground">{formatCents(v as number)}</span>
-                          </span>
-                        ))}
-                      </div>
-                      <p className="mt-2 text-[11px] text-muted-foreground">
-                        A graded slab is usually worth more than the ungraded value. These are current PriceCharting
-                        guide figures, not sold prices.
-                      </p>
-                    </>
-                  );
-                })()}
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>
@@ -562,16 +504,6 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
           Save Slab
         </Button>
       </div>
-    </div>
-  );
-}
-
-/** One labelled figure in the primary value card. */
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="font-medium">{value}</p>
     </div>
   );
 }

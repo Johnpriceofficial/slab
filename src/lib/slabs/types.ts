@@ -3,6 +3,8 @@
  * number here). Certification numbers are strings so leading zeros survive.
  */
 
+import type { PricingPersist } from "./pricing-tiers";
+
 export interface Slab {
   id: string;
   inventory_number: number;
@@ -35,6 +37,12 @@ export interface Slab {
   pricecharting_value_cents: number | null;
   pricecharting_sales_volume: number | null;
   pricecharting_match_status: string | null;
+  /** Persisted per-tier PriceCharting table (null on older rows → sparse fallback). */
+  pricecharting_tiers?: PricingPersist | null;
+  /** Raw token-free PriceCharting pricing response, kept for audit. */
+  pricecharting_raw?: unknown;
+  /** Retrieval timestamp of the stored pricing (stale-write guard key). */
+  pricecharting_priced_at?: string | null;
   price_variance_percent: number | null;
   front_image_path: string | null;
   back_image_path: string | null;
