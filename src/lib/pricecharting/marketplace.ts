@@ -11,7 +11,7 @@ import type { PriceChartingClient } from "./client";
 import { convertDollarsToPennies, convertPenniesToDollars, type Pennies } from "./money";
 import { PriceChartingError, isPriceChartingError } from "./errors";
 import { createAuditLog } from "./audit";
-import { OFFER_LIMITS } from "./config";
+import { OFFER_LIMITS, PRICECHARTING_BASE_URL } from "./config";
 import type {
   FeedbackRating,
   OfferDetails,
@@ -48,6 +48,20 @@ function boolOf(raw: unknown): boolean | null {
   return null;
 }
 
+/**
+ * Absolute-ize a PriceCharting image URL. The API docs describe `image-url` as
+ * relative (prepend the www host), but live responses have returned a full
+ * `https://storage.googleapis.com/...` URL — so handle both. Only http(s) and
+ * site-relative paths are accepted; anything else (e.g. javascript:) is dropped.
+ */
+function absoluteImageUrl(raw: unknown): string | null {
+  const s = strOf(raw);
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith("/")) return `${PRICECHARTING_BASE_URL}${s}`;
+  return null;
+}
+
 function normalizeOfferSummary(raw: Record<string, unknown>): OfferSummary {
   const price = penniesOf(raw["price"] ?? raw["price-max"] ?? raw["sale-price"]);
   const conditionId = penniesOf(raw["condition-id"]);
@@ -60,6 +74,7 @@ function normalizeOfferSummary(raw: Record<string, unknown>): OfferSummary {
     price_dollars: convertPenniesToDollars(price),
     condition_id: conditionId,
     sku: strOf(raw["sku"]),
+    image_url: absoluteImageUrl(raw["image-url"] ?? raw["image_url"]),
     raw,
   };
 }
@@ -120,6 +135,38 @@ export function listSoldMarketplaceOffers(
   filters: Omit<OfferFilters, "status"> = {},
 ): Promise<Result<OfferSummary[]>> {
   return listMarketplaceOffers(client, { ...filters, status: "sold" });
+}
+
+export interface ProductOfferImage {
+  /** A seller listing photo for this product, or null when none is available. */
+  image_url: string | null;
+  /** How many available offers exist for the product (0 → nobody is selling it). */
+  listing_count: number;
+}
+
+/**
+ * Best available seller listing photo for a product, from its AVAILABLE offers.
+ *
+ * IMPORTANT semantics (why this is a weak, clearly-labelled confirmation aid,
+ * not a canonical image): PriceCharting's Prices API returns NO catalog image.
+ * The only images it exposes are marketplace listing photos on `/api/offers`,
+ * i.e. some seller's photo of THEIR copy of this product. It is keyed to the
+ * product id, so it always depicts the same catalog product — it cannot by
+ * itself prove the operator's specific slab is that product, and it is frequently
+ * absent (0 offers → null). Callers must present it as "seller listing photo",
+ * never as proof of identity.
+ */
+export async function getBestOfferImageForProduct(
+  client: PriceChartingClient,
+  productId: string,
+): Promise<Result<ProductOfferImage>> {
+  const id = strOf(productId);
+  if (!id) return new PriceChartingError("MISSING_PARAMETER", "`product id` is required.").toJSON() as Result<never>;
+  const offers = await listMarketplaceOffers(client, { id, status: "available" });
+  if ("status" in offers && offers.status === "error") return offers;
+  const list = offers as OfferSummary[];
+  const withImage = list.find((o) => o.image_url);
+  return { image_url: withImage?.image_url ?? null, listing_count: list.length };
 }
 
 /**

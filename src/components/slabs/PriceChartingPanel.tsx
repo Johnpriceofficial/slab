@@ -3,7 +3,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Search, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
-import { priceChartingSearch, priceChartingValue, type PriceChartingSearchArgs } from "@/lib/slabs/data";
+import {
+  priceChartingSearch,
+  priceChartingValue,
+  priceChartingOfferImage,
+  type PriceChartingSearchArgs,
+} from "@/lib/slabs/data";
 import { formatCents } from "@/lib/slabs/format";
 import {
   deriveCandidateStatus,
@@ -44,6 +49,12 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [offerImage, setOfferImage] = useState<{
+    product_id: string;
+    url: string | null;
+    count: number;
+    loading: boolean;
+  } | null>(null);
 
   const runSearch = async () => {
     setLoading(true);
@@ -90,6 +101,18 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         is_estimate: res.is_estimate,
       });
       toast.success(`Linked to ${res.product_name}`);
+      // Best-effort seller listing photo for visual (metadata + photo) confirmation.
+      // Never blocks linking; absence is a normal, expected outcome.
+      setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: true });
+      priceChartingOfferImage(c.product_id)
+        .then((img) => {
+          setOfferImage(
+            img.status === "success"
+              ? { product_id: c.product_id, url: img.offer_image_url, count: img.offer_listing_count, loading: false }
+              : { product_id: c.product_id, url: null, count: 0, loading: false },
+          );
+        })
+        .catch(() => setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: false }));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to retrieve value");
     } finally {
@@ -185,6 +208,59 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
                     )}
                   </Button>
                 </div>
+
+                {/* Visual confirmation: metadata side-by-side + seller listing
+                    photo (when one exists). The photo is NOT proof of identity —
+                    it depicts the same catalog product, not necessarily this slab. */}
+                {isSelected && (
+                  <div className="mt-3 border-t pt-3">
+                    <p className="mb-2 text-xs font-medium">Confirm this is your card</p>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-0.5 text-xs">
+                        <p className="text-muted-foreground">Your card</p>
+                        <p className="font-medium">{identity.card_name || "—"}</p>
+                        <p className="text-muted-foreground">
+                          {[
+                            identity.set,
+                            identity.card_number ? `#${identity.card_number}` : null,
+                            identity.grader,
+                            identity.grade,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || "—"}
+                        </p>
+                      </div>
+                      <div className="space-y-1 text-xs">
+                        <p className="text-muted-foreground">PriceCharting: {c.product_name}</p>
+                        {offerImage && offerImage.product_id === c.product_id ? (
+                          offerImage.loading ? (
+                            <p className="flex items-center gap-1 italic text-muted-foreground">
+                              <Loader2 className="h-3 w-3 animate-spin" /> Loading listing photo…
+                            </p>
+                          ) : offerImage.url ? (
+                            <>
+                              <img
+                                src={offerImage.url}
+                                alt={`Seller listing photo for ${c.product_name}`}
+                                loading="lazy"
+                                className="max-h-40 rounded border object-contain"
+                              />
+                              <p className="text-[10px] text-muted-foreground">
+                                Seller listing photo — a copy of this product, not proof this is your exact card.
+                                Confirm by the fields on the left.
+                              </p>
+                            </>
+                          ) : (
+                            <p className="italic text-muted-foreground">
+                              No seller listing photo available for this product ({offerImage.count} active listing
+                              {offerImage.count === 1 ? "" : "s"}).
+                            </p>
+                          )
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

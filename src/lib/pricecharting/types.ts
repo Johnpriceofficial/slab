@@ -291,6 +291,8 @@ export interface OfferSummary {
   price_dollars: number | null;
   condition_id: number | null;
   sku: string | null;
+  /** Seller's listing photo, absolute URL. Null when the offer has no image. */
+  image_url: string | null;
   raw: Record<string, unknown>;
 }
 

@@ -26,12 +26,13 @@ import { searchProducts, getProductById } from "../../lib/pricecharting/api";
 import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber } from "../../lib/pricecharting/matching";
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
+import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
 import type { CardItemInput, GradingCompany, RawProduct } from "../../lib/pricecharting/types";
 
 /** Fields the browser is allowed to send. NO token, NO product internals. */
 export interface SlabSearchInput {
-  action?: "search" | "value";
+  action?: "search" | "value" | "offer_image";
   card_name?: string;
   set?: string;
   card_number?: string;
@@ -102,6 +103,21 @@ export interface ValueResponse {
   warnings: string[];
 }
 
+/**
+ * A seller listing photo for an explicitly-chosen product. This is NOT a
+ * canonical catalog image and NOT proof of identity — PriceCharting's Prices API
+ * exposes no product image, so the only image available is a marketplace
+ * seller's photo of their own copy, keyed to the product id and often absent.
+ */
+export interface OfferImageResponse {
+  status: "success";
+  action: "offer_image";
+  product_id: string;
+  offer_image_url: string | null;
+  offer_listing_count: number;
+  warnings: string[];
+}
+
 export interface HandlerErrorBody {
   status: "error";
   error_code: string;
@@ -112,7 +128,7 @@ export interface HandlerErrorBody {
 
 export interface HandlerResult {
   statusCode: number;
-  body: SearchResponse | ValueResponse | HandlerErrorBody;
+  body: SearchResponse | ValueResponse | OfferImageResponse | HandlerErrorBody;
 }
 
 /** HTTP status for a normalized error code. */
@@ -226,6 +242,9 @@ export async function handlePriceChartingRequest(
     const client = makeClient(deps);
     if (action === "value") {
       return await handleValue(client, input);
+    }
+    if (action === "offer_image") {
+      return await handleOfferImage(client, input);
     }
     return await handleSearch(client, input);
   } catch (err) {
@@ -411,6 +430,37 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
       ...lookup.warnings,
+    ],
+  };
+  return { statusCode: 200, body };
+}
+
+/**
+ * Return a seller listing photo for an explicitly-chosen product, for VISUAL
+ * (metadata + photo) confirmation. This is a best-effort aid only: the image is
+ * a marketplace seller's photo of their copy of the same catalog product, not a
+ * canonical image and not proof the operator's slab is that product. It is
+ * frequently unavailable (nobody is selling it).
+ */
+async function handleOfferImage(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+  const productId = input.product_id?.trim();
+  if (!productId) {
+    throw new PriceChartingError("MISSING_PARAMETER", "product_id is required to fetch a listing photo.");
+  }
+  const result = await getBestOfferImageForProduct(client, productId);
+  if ("status" in result && result.status === "error") {
+    return { statusCode: httpStatusFor(result.error_code), body: result };
+  }
+  const image = result as { image_url: string | null; listing_count: number };
+  const body: OfferImageResponse = {
+    status: "success",
+    action: "offer_image",
+    product_id: productId,
+    offer_image_url: image.image_url,
+    offer_listing_count: image.listing_count,
+    warnings: [
+      "Seller listing photo from the PriceCharting Marketplace — a copy of this product offered by a seller, " +
+        "not a canonical image and not proof this is your exact card. Confirm identity by the metadata fields.",
     ],
   };
   return { statusCode: 200, body };

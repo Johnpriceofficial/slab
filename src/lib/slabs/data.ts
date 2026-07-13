@@ -10,6 +10,7 @@ import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import type {
   SearchResponse,
   ValueResponse,
+  OfferImageResponse,
   HandlerErrorBody,
 } from "@/server/pricecharting/handler";
 import type { AnalyzeResult, AnalyzeErrorBody, AnalyzeInput } from "@/server/analyze-slab/handler";
@@ -336,4 +337,19 @@ export async function priceChartingValue(
   });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as ValueResponse | HandlerErrorBody;
+}
+
+/**
+ * Fetch a seller listing photo for a confirmed product, for visual (metadata +
+ * photo) confirmation. Best-effort: the image is a marketplace seller's photo of
+ * their copy of the same catalog product — often absent — never a canonical image.
+ */
+export async function priceChartingOfferImage(
+  productId: string,
+): Promise<OfferImageResponse | HandlerErrorBody> {
+  const { data, error } = await sb.functions.invoke("pricecharting-search", {
+    body: { action: "offer_image", product_id: productId },
+  });
+  if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
+  return data as OfferImageResponse | HandlerErrorBody;
 }
