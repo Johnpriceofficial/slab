@@ -189,6 +189,44 @@ function pickComicField(grade: number): FieldPick {
   return { field: null, meaning: null, companySpecific: false, warnings: [] };
 }
 
+/** Normalize a grade designation label to a canonical token. */
+export function normalizeDesignation(gradeLabel: string | null | undefined): "pristine" | "gem_mint" | "perfect" | null {
+  const l = (gradeLabel ?? "").toLowerCase();
+  if (l.includes("perfect")) return "perfect";
+  if (l.includes("pristine")) return "pristine";
+  if (l.includes("gem")) return "gem_mint";
+  return null;
+}
+
+/** Map a raw PriceCharting price field to a normalized card tier key. */
+function fieldToCardTier(field: string | null): { key: string | null; label: string | null } {
+  switch (field) {
+    case "loose-price": return { key: "ungraded", label: "Ungraded" };
+    case "cib-price": return { key: "grade_7_to_7_5", label: "Grade 7–7.5" };
+    case "new-price": return { key: "grade_8_to_8_5", label: "Grade 8–8.5" };
+    case "graded-price": return { key: "grade_9_general", label: "Grade 9 (general)" };
+    case "box-only-price": return { key: "grade_9_5_general", label: "Grade 9.5 (general)" };
+    case "manual-only-price": return { key: "psa_10", label: "PSA 10" };
+    case "bgs-10-price": return { key: "bgs_10", label: "BGS 10" };
+    case "condition-17-price": return { key: "cgc_10", label: "CGC 10" };
+    case "condition-18-price": return { key: "sgc_10", label: "SGC 10" };
+    default: return { key: null, label: null };
+  }
+}
+
+/**
+ * Does the returned tier genuinely represent the requested designation? The
+ * PriceCharting API's grade-10 tiers carry NO sub-designation, so CGC 10
+ * (condition-17-price) is treated as the ordinary/Gem-Mint tier: it is exact for
+ * a plain or Gem-Mint request, but NOT for a Pristine or Perfect slab — those are
+ * higher sub-grades the ordinary tier does not represent.
+ */
+function isDesignationExact(field: string | null, designation: ReturnType<typeof normalizeDesignation>): boolean {
+  if (designation === null) return true; // no special designation requested
+  if (designation === "gem_mint" && field === "condition-17-price") return true; // CGC 10 == Gem Mint 10
+  return false; // pristine / perfect never map to an ordinary API tier
+}
+
 /**
  * Look up the value for a requested grade. Returns `value = null` (never a
  * substituted grade) when PriceCharting does not provide the requested grade's
@@ -200,10 +238,14 @@ export function getValueForRequestedGrade(
   product: Product,
   gradingCompany: GradingCompany | undefined,
   grade: number | null | undefined,
-  opts: { category?: PriceCategory; enableEstimation?: boolean } = {},
+  opts: { category?: PriceCategory; enableEstimation?: boolean; designation?: string | null } = {},
 ): GradeLookupResult {
   const category = opts.category ?? inferPriceCategoryFromProduct(product);
   const nearby = buildAvailableValues(product, category);
+  const designation = normalizeDesignation(opts.designation);
+  const designationLabel = opts.designation?.trim() || null;
+  // Defaults for the tier fields; overridden per branch.
+  const noTier = { selected_tier_key: null, selected_tier_label: null, designation_requested: designationLabel, designation_exact: false };
 
   // Ungraded request → loose-price (the base ungraded value) for card/comic/coin.
   if (grade === null || grade === undefined) {
@@ -216,6 +258,10 @@ export function getValueForRequestedGrade(
       field_meaning: "Ungraded",
       company_specific: false,
       is_estimate: false,
+      selected_tier_key: pennies === null ? null : "ungraded",
+      selected_tier_label: "Ungraded",
+      designation_requested: designationLabel,
+      designation_exact: designation === null,
       warnings: pennies === null ? ["PriceCharting has no ungraded value for this product."] : [],
       nearby_values: nearby,
     };
@@ -233,6 +279,7 @@ export function getValueForRequestedGrade(
       field_meaning: null,
       company_specific: false,
       is_estimate: false,
+      ...noTier,
       warnings: [
         `No documented PriceCharting grade mapping exists for category "${category}". The exact-grade value is null; see nearby values for available fields.`,
       ],
@@ -252,6 +299,7 @@ export function getValueForRequestedGrade(
           field_meaning: `Interpolated estimate for grade ${grade} (between ${est.lowerLabel} and ${est.upperLabel})`,
           company_specific: false,
           is_estimate: true,
+          ...noTier, // an interpolated estimate is never an exact tier
           warnings: [
             `Grade ${grade} is not a direct PriceCharting field. This is an INTERPOLATED ESTIMATE, not an official PriceCharting value.`,
           ],
@@ -266,6 +314,7 @@ export function getValueForRequestedGrade(
       field_meaning: null,
       company_specific: false,
       is_estimate: false,
+      ...noTier,
       warnings: [
         `PriceCharting does not provide a direct value for grade ${grade}${gradingCompany ? ` (${gradingCompany})` : ""}. Value is null; see nearby available grades.`,
         ...pick.warnings,
@@ -275,10 +324,19 @@ export function getValueForRequestedGrade(
   }
 
   const pennies = px(product, pick.field);
+  const tier = fieldToCardTier(pick.field);
+  const designationExact = isDesignationExact(pick.field, designation);
   const warnings = [...pick.warnings];
   if (pennies === null) {
     warnings.push(
       `PriceCharting has no value in field "${pick.field}" (${pick.meaning}) for this product. Value is null — not substituted from another grade.`,
+    );
+  }
+  // A Pristine/Perfect slab whose value came from the ordinary tier must be told
+  // it is NOT the exact designation tier — never silently promoted to Pristine.
+  if (!designationExact && designationLabel) {
+    warnings.push(
+      `PriceCharting's ${tier.label ?? "tier"} does not distinguish "${designationLabel}". This is the ordinary ${tier.label ?? "grade"} value — a COMPATIBLE tier for your ${designationLabel} slab, not an exact ${designationLabel} price.`,
     );
   }
   return {
@@ -288,6 +346,10 @@ export function getValueForRequestedGrade(
     field_meaning: pick.meaning,
     company_specific: pick.companySpecific,
     is_estimate: false,
+    selected_tier_key: pennies === null ? null : tier.key,
+    selected_tier_label: tier.label,
+    designation_requested: designationLabel,
+    designation_exact: pennies === null ? false : designationExact,
     warnings,
     nearby_values: nearby,
   };

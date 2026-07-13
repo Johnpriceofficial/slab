@@ -297,6 +297,7 @@ export interface PriceChartingSearchArgs {
   variation?: string;
   grader?: string;
   grade?: string | number;
+  grade_label?: string;
 }
 
 /** Invoke the server-side edge function. The browser never sees the token. */
@@ -350,9 +351,10 @@ export async function priceChartingValue(
   productId: string,
   grader?: string,
   grade?: string | number,
+  grade_label?: string,
 ): Promise<ValueResponse | HandlerErrorBody> {
   const { data, error } = await sb.functions.invoke("pricecharting-search", {
-    body: { action: "value", product_id: productId, grader, grade },
+    body: { action: "value", product_id: productId, grader, grade, grade_label },
   });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as ValueResponse | HandlerErrorBody;
@@ -458,6 +460,7 @@ export async function refreshSlabPricing(slab: Slab): Promise<RefreshPricingResu
         variation: slab.variation ?? undefined,
         grader: slab.grader ?? undefined,
         grade: slab.grade ?? undefined,
+        grade_label: slab.grade_label ?? undefined,
       });
       if (res.status === "error") return { status: "error", message: res.message };
       search = res;
@@ -471,7 +474,7 @@ export async function refreshSlabPricing(slab: Slab): Promise<RefreshPricingResu
       return { status: "no_product", message: "No PriceCharting product is linked and none could be matched automatically." };
     }
 
-    const value = await priceChartingValue(resolution.product_id, slab.grader ?? undefined, slab.grade ?? undefined);
+    const value = await priceChartingValue(resolution.product_id, slab.grader ?? undefined, slab.grade ?? undefined, slab.grade_label ?? undefined);
     if (value.status === "error") return { status: "error", message: value.message };
 
     // ONE atomic, stale-guarded write: tiers + raw + the scalar mirror fields all

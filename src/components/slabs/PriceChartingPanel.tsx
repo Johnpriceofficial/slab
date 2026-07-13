@@ -39,6 +39,10 @@ export interface SelectedPriceCharting {
   available_values_cents: Record<string, number | null>;
   /** The raw token-free value response, kept for audit persistence. */
   value_response: unknown;
+  /** True only when the returned tier exactly represents the slab's grade+designation. */
+  designation_exact: boolean;
+  /** The actual tier label the value came from, e.g. "CGC 10" (never a fake "CGC 10 Pristine"). */
+  selected_tier_label: string | null;
 }
 
 interface PriceChartingPanelProps {
@@ -131,6 +135,8 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
       is_estimate: r.is_estimate,
       available_values_cents: r.available_values_cents ?? {},
       value_response: r,
+      designation_exact: r.designation_exact,
+      selected_tier_label: r.selected_tier_label,
     });
     setOfferImage({ product_id: r.product_id, url: r.offer_image_url, count: r.offer_listing_count, loading: false });
     toast.success(`Linked to ${r.product_name} (manual recovery)`);
@@ -167,7 +173,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   const confirmCandidate = async (c: CandidateResult) => {
     setConfirmingId(c.product_id);
     try {
-      const res = await priceChartingValue(c.product_id, identity.grader, identity.grade);
+      const res = await priceChartingValue(c.product_id, identity.grader, identity.grade, identity.grade_label);
       if (res.status === "error") {
         toast.error(res.message);
         return;
@@ -183,6 +189,8 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
         is_estimate: res.is_estimate,
         available_values_cents: res.available_values_cents ?? {},
         value_response: res,
+        designation_exact: res.designation_exact,
+        selected_tier_label: res.selected_tier_label,
       });
       toast.success(`Linked to ${res.product_name}`);
       // Best-effort seller listing photo for visual (metadata + photo) confirmation.

@@ -41,6 +41,8 @@ export interface SlabSearchInput {
   variation?: string;
   grader?: string;
   grade?: string | number;
+  /** Grade designation (e.g. "PRISTINE", "GEM MINT") — needed to select the right tier. */
+  grade_label?: string;
   /** Required for action "value"/"lookup": a PriceCharting product id. */
   product_id?: string;
   /** For action "lookup": a full PriceCharting product URL (id extracted if present). */
@@ -123,6 +125,12 @@ export interface ValueResponse {
   guide_value_cents: number | null;
   company_specific: boolean;
   is_estimate: boolean;
+  /** Normalized tier the value came from ("cgc_10"); NEVER a designation the API lacks. */
+  selected_tier_key: string | null;
+  selected_tier_label: string | null;
+  designation_requested: string | null;
+  /** True only when the returned tier exactly represents the requested grade+designation. */
+  designation_exact: boolean;
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
   warnings: string[];
@@ -164,6 +172,10 @@ export interface LookupResponse {
   guide_value_cents: number | null;
   company_specific: boolean;
   is_estimate: boolean;
+  selected_tier_key: string | null;
+  selected_tier_label: string | null;
+  designation_requested: string | null;
+  designation_exact: boolean;
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
   offer_image_url: string | null;
@@ -333,7 +345,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
 
   const toCandidate = (s: (typeof scored)[number]): CandidateResult => {
     // Per-candidate guide value at the requested grade (integer cents).
-    const lookup = getValueForRequestedGrade(s.product, grader, grade, { category: "card" });
+    const lookup = getValueForRequestedGrade(s.product, grader, grade, { category: "card", designation: input.grade_label });
     return {
       product_id: s.product.pricecharting_id,
       product_name: s.product.name,
@@ -469,7 +481,7 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
     raw["sales-volume"] ?? raw["sale-volume"] ?? raw["salesVolume"] ?? raw["sales_volume"],
   );
 
-  const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card" });
+  const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card", designation: input.grade_label });
   const availableCents: Record<string, number | null> = {};
   for (const [k, v] of Object.entries(lookup.nearby_values)) {
     availableCents[k] = v === null ? null : Math.round(v * 100);
@@ -485,6 +497,10 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
     guide_value_cents: lookup.value_pennies,
     company_specific: lookup.company_specific,
     is_estimate: lookup.is_estimate,
+    selected_tier_key: lookup.selected_tier_key,
+    selected_tier_label: lookup.selected_tier_label,
+    designation_requested: lookup.designation_requested,
+    designation_exact: lookup.designation_exact,
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     warnings: [
@@ -553,7 +569,7 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
   const scored = scoreCandidate(item, product); // SAME identity protections as search
   const grader = item.grading_company;
   const grade = item.grade ?? null;
-  const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card" });
+  const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card", designation: input.grade_label });
   const availableCents: Record<string, number | null> = {};
   for (const [k, v] of Object.entries(lookup.nearby_values)) availableCents[k] = v === null ? null : Math.round(v * 100);
   const salesVolume = numberOrNull(
@@ -594,6 +610,10 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
     guide_value_cents: lookup.value_pennies,
     company_specific: lookup.company_specific,
     is_estimate: lookup.is_estimate,
+    selected_tier_key: lookup.selected_tier_key,
+    selected_tier_label: lookup.selected_tier_label,
+    designation_requested: lookup.designation_requested,
+    designation_exact: lookup.designation_exact,
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     offer_image_url: offerImageUrl,

@@ -240,12 +240,16 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     // value using the documented ratios — never leave confidence on "Manual" when
     // the numbers actually came from PriceCharting. A guide value returned at the
     // slab's own grade is the exact tier → Verified.
+    // §4/§5: only treat this as the EXACT designation tier when the server
+    // confirmed the returned tier represents the slab's grade+designation. A
+    // Pristine slab valued from the ordinary CGC 10 tier is a COMPATIBLE tier,
+    // never a "Verified exact Pristine".
     const derived = deriveValuation({
       guide_cents: sel.value_cents,
       confidence_score: sel.confidence_score,
       is_estimate: sel.is_estimate,
-      field_meaning: sel.grade_field,
-      exact_tier_label: sel.value_cents !== null ? exactTierLabel() : null,
+      field_meaning: sel.selected_tier_label ?? sel.grade_field,
+      exact_tier_label: sel.value_cents !== null && sel.designation_exact ? exactTierLabel() : null,
     });
     setVal((s) => ({
       ...s,
@@ -371,6 +375,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     variation: id.variation,
     grader: id.grader,
     grade: id.grade,
+    grade_label: id.grade_label, // §2: designation reaches PriceCharting tier selection
   };
 
   return (

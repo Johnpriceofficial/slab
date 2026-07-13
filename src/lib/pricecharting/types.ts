@@ -258,6 +258,18 @@ export interface GradeLookupResult {
   field_meaning: string | null;
   company_specific: boolean;
   is_estimate: boolean;
+  /** Normalized tier the value came from, e.g. "cgc_10" (never "cgc_10_pristine" from the API). */
+  selected_tier_key: string | null;
+  /** Human label of the selected tier, e.g. "CGC 10" — NEVER decorated with a designation the API doesn't provide. */
+  selected_tier_label: string | null;
+  /** The designation the slab requested, e.g. "Pristine", or null. */
+  designation_requested: string | null;
+  /**
+   * True only when the returned tier genuinely represents the requested
+   * grade+designation. FALSE for a Pristine/Perfect slab whose value came from
+   * the ordinary CGC 10 tier — that value must NOT be labelled an exact Pristine tier.
+   */
+  designation_exact: boolean;
   warnings: string[];
   /** Nearby available grades, for context when the exact grade is missing. */
   nearby_values: AvailableValues;
