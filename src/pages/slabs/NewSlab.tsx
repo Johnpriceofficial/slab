@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useMemo, useState } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { AlertTriangle, Save, Loader2, Sparkles } from "lucide-react";
 import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUploader";
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
+import type { ImageSource } from "@/server/pricecharting/handler";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { analyzeSlab, recordPricechartingConfirmation } from "@/lib/slabs/data";
@@ -71,12 +72,24 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const [id, setId] = useState(EMPTY_IDENTITY);
   const [val, setVal] = useState(EMPTY_VALUATION);
   const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
-  const [visual, setVisual] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected"; imageUrl: string | null } | null>(null);
+  const [visual, setVisual] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected"; imageUrl: string | null; imageSource: ImageSource } | null>(null);
   const [dup, setDup] = useState<{ id: string; inventory_number: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  // §1E valuation provenance: how the current figures were derived.
+  //   - "source":  from a confirmed PriceCharting product's tier value
+  //   - "formula": computed from an operator-entered guide value
+  //   - "manual":  typed directly by the operator
+  const [valProvenance, setValProvenance] = useState<"source" | "formula" | "manual">("manual");
+  const [valStale, setValStale] = useState(false); // manual valuation kept but possibly stale
+  const [pcStale, setPcStale] = useState(false); // confirmed link staled by an identity edit
+  // Read the current provenance inside the identity-change effect without making
+  // that effect depend on (and re-run for) every provenance change.
+  const provenanceRef = useRef(valProvenance);
+  provenanceRef.current = valProvenance;
 
+  const NUMERIC_VAL_FIELDS: ReadonlyArray<keyof typeof EMPTY_VALUATION> = ["final", "quick", "replacement", "guide"];
   const setIdField = (k: keyof typeof EMPTY_IDENTITY, v: string) => setId((s) => ({ ...s, [k]: v }));
 
   // Map an analyze-slab proposal key to the identity form field it fills.
@@ -129,7 +142,15 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       setAnalyzing(false);
     }
   };
-  const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => setVal((s) => ({ ...s, [k]: v }));
+  const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => {
+    setVal((s) => ({ ...s, [k]: v }));
+    // Editing any money figure makes the valuation operator-entered (manual), so a
+    // later identity change preserves it (with a warning) instead of clearing it.
+    if (NUMERIC_VAL_FIELDS.includes(k)) {
+      setValProvenance("manual");
+      setValStale(false);
+    }
+  };
 
   // Evaluate pricing off the PriceCharting Guide Value the operator entered.
   // Because the API returns only the ungraded price, an operator will usually
@@ -154,6 +175,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       confidence: derived.confidence,
       notes: derived.method,
     }));
+    // The figures are now formula-derived from the guide value.
+    setValProvenance("formula");
+    setValStale(false);
     toast.success("Valuation evaluated from the PriceCharting Guide Value.");
   };
 
@@ -181,9 +205,21 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     };
   }, [id.certification_number, id.grader, dao]);
 
-  // A material identity change invalidates any prior visual review.
+  // A material identity change stales any prior PriceCharting confirmation and its
+  // AUTO-derived valuation. §1E: clear ONLY source/formula-derived figures; keep a
+  // manual valuation but flag it as possibly stale. The confirmed link is kept but
+  // marked stale so the confirmed-id-first flow can re-validate it — never silently
+  // dropped, never silently trusted.
   useEffect(() => {
     setVisual(null);
+    setPcStale(true); // only surfaced while a confirmed product is linked
+    if (provenanceRef.current === "manual") {
+      setValStale(true); // preserve manual figures, warn (surfaced only when figures exist)
+    } else {
+      setVal((s) => ({ ...s, guide: "", final: "", quick: "", replacement: "", confidence: "manual", notes: "" }));
+      setValProvenance("manual");
+      setValStale(false);
+    }
   }, [id.card_name, id.set_name, id.card_number, id.year, id.language, id.variation, id.grader, id.grade, id.grade_label]);
 
   const variance = useMemo(
@@ -207,6 +243,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       grade_label: id.grade_label,
       product_name: pc?.product_name ?? null,
       product_id: pc?.product_id ?? null,
+      // Only a confirmed product whose value came from the slab's exact designation
+      // tier may render as an Exact Match; otherwise the model stays Compatible.
+      designation_exact: pc?.designation_exact ?? false,
       available_values_cents: pc?.available_values_cents ?? null,
     });
   }, [pc, val.final, val.guide, val.quick, val.replacement, val.confidence, variance, id.grader, id.grade, id.grade_label]);
@@ -220,6 +259,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const rejectPc = () => {
     setPc(null);
     setVisual(null);
+    setPcStale(false);
     setVal((s) => ({
       ...s,
       guide: "",
@@ -229,6 +269,8 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       confidence: "manual",
       notes: "",
     }));
+    setValProvenance("manual");
+    setValStale(false);
     toast.info("Product unlinked (visually rejected). Its values were cleared.");
   };
 
@@ -249,18 +291,28 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       field_meaning: sel.selected_tier_label ?? sel.grade_field,
       exact_tier_label: sel.value_cents !== null && sel.designation_exact ? exactTierLabel() : null,
     });
+    // §1E: switching products REPLACES the previous product's auto-derived
+    // valuation, but a MANUAL valuation the operator typed is never clobbered.
+    const priorWasDerived = valProvenance === "source" || valProvenance === "formula";
     setVal((s) => ({
       ...s,
       guide: centsToInputString(sel.value_cents),
-      // Only fill fields the operator hasn't already set — never clobber manual entry.
-      final: s.final ? s.final : centsToInputString(derived.suggested_final_cents),
-      quick: s.quick ? s.quick : centsToInputString(derived.quick_sale_cents),
-      replacement: s.replacement ? s.replacement : centsToInputString(derived.replacement_cents),
-      // Confidence was "manual" by default; a derived valuation replaces it.
-      confidence: s.confidence === "manual" ? derived.confidence : s.confidence,
-      notes: s.notes ? s.notes : derived.method,
+      final: priorWasDerived || !s.final ? centsToInputString(derived.suggested_final_cents) : s.final,
+      quick: priorWasDerived || !s.quick ? centsToInputString(derived.quick_sale_cents) : s.quick,
+      replacement: priorWasDerived || !s.replacement ? centsToInputString(derived.replacement_cents) : s.replacement,
+      confidence: priorWasDerived || s.confidence === "manual" ? derived.confidence : s.confidence,
+      notes: priorWasDerived || !s.notes ? derived.method : s.notes,
     }));
+    // Values now come from a confirmed PriceCharting product.
+    if (priorWasDerived || !hasManualFigures()) setValProvenance("source");
+    setValStale(false);
+    setPcStale(false);
   };
+
+  // True when any money figure is currently populated (used to decide whether a
+  // fresh product selection may overwrite the figures or must preserve them).
+  const hasManualFigures = () =>
+    val.final.trim() !== "" || val.quick.trim() !== "" || val.replacement.trim() !== "";
 
   const buildInput = (): SlabInput => ({
     card_name: id.card_name.trim() || null,
@@ -339,7 +391,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
           await recordPricechartingConfirmation(result.slab.id, {
             product_id: pc.product_id,
             candidate_image_url: reviewed ? visual!.imageUrl : null,
-            candidate_image_source: "marketplace_offer",
+            candidate_image_source: reviewed ? visual!.imageSource : "none",
             candidate_image_type: "marketplace_offer_image",
             candidate_image_available: reviewed ? !!visual!.imageUrl : false,
             visual_confirmation_status: reviewed ? visual!.status : "metadata_auto_confirmed",
@@ -494,12 +546,19 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         {/* PriceCharting */}
         <Card className="lg:col-span-2">
           <CardContent className="pt-6">
+            {pc && pcStale && (
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                The identity changed after this product was confirmed, so the link is now stale. Use
+                “Re-check confirmed” to re-validate it against the current identity, or “Search again” to relink.
+              </div>
+            )}
             <PriceChartingPanel
               identity={identity}
               selectedProductId={pc?.product_id ?? null}
               onSelect={onSelectPc}
               frontImageUrl={front?.previewUrl ?? null}
-              onVisualStatus={(product_id, status, imageUrl) => setVisual({ product_id, status, imageUrl })}
+              onVisualStatus={(product_id, status, imageUrl, imageSource) => setVisual({ product_id, status, imageUrl, imageSource })}
               onReject={rejectPc}
             />
           </CardContent>
@@ -511,6 +570,13 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Valuation</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {valStale && valProvenance === "manual" && hasManualFigures() && (
+              <div className="col-span-2 flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800 sm:col-span-4">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                The identity changed after you entered this valuation manually. Your figures were kept, but they may no
+                longer match the card — re-check them.
+              </div>
+            )}
             {/* Primary value hierarchy — the SAME component the detail page renders. */}
             {pricingModel && (
               <div className="col-span-2 sm:col-span-4">

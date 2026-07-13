@@ -262,7 +262,7 @@ export function getValueForRequestedGrade(
       selected_tier_label: "Ungraded",
       designation_requested: designationLabel,
       designation_exact: designation === null,
-      warnings: pennies === null ? ["PriceCharting has no ungraded value for this product."] : [],
+      warnings: pennies === null ? ["No ungraded value is available from the connected PriceCharting source for this product (null, not $0)."] : [],
       nearby_values: nearby,
     };
   }
@@ -329,7 +329,8 @@ export function getValueForRequestedGrade(
   const warnings = [...pick.warnings];
   if (pennies === null) {
     warnings.push(
-      `PriceCharting has no value in field "${pick.field}" (${pick.meaning}) for this product. Value is null — not substituted from another grade.`,
+      `The ${pick.meaning ?? pick.field} value is unavailable from the connected PriceCharting source for this product ` +
+        `(null, not $0) — not substituted from another grade. This means unavailable from the connected source, not that no such value exists anywhere.`,
     );
   }
   // A Pristine/Perfect slab whose value came from the ordinary tier must be told

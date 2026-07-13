@@ -88,6 +88,12 @@ export default function SlabDetail() {
     );
   }
 
+  // The persisted tiers already encode which tier is the slab's exact one; the
+  // valuation is designation-exact only if that exact tier actually has a value
+  // (e.g. a Pristine slab whose exact tier is unavailable stays compatible).
+  const hydratedTiers = hydratePriceTiers(slab.pricecharting_tiers);
+  const detailDesignationExact = hydratedTiers?.find((t) => t.exact_match)?.available;
+
   return (
     <div className="container max-w-5xl py-8">
       <PageHead title={`Slab #${slab.inventory_number} · SlabVault`} noindex />
@@ -194,10 +200,11 @@ export default function SlabDetail() {
                 grade_label: slab.grade_label,
                 product_name: slab.pricecharting_product_name,
                 product_id: slab.pricecharting_product_id,
+                designation_exact: detailDesignationExact,
                 // Hydrate the persisted tier table so the saved slab shows the
                 // same Compare Other Grades that was available during intake.
                 // Older rows have no tiers → sparse fallback (exact tier only).
-                tiers: hydratePriceTiers(slab.pricecharting_tiers),
+                tiers: hydratedTiers,
               })}
             />
           </CardContent>

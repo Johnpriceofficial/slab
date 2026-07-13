@@ -57,6 +57,11 @@ export function SlabPricingCard({ model }: { model: PricingModel }) {
                 <CheckCircle2 className="mr-1 h-3 w-3" /> Exact Match
               </Badge>
             )}
+            {match_kind === "compatible" && (
+              <Badge variant="outline" className="border-amber-500 text-amber-600">
+                Compatible tier
+              </Badge>
+            )}
             {match_kind === "estimated" && (
               <Badge variant="outline" className="border-amber-500 text-amber-600">
                 Estimated
@@ -94,15 +99,20 @@ export function SlabPricingCard({ model }: { model: PricingModel }) {
                 {grade_rows.map((r) => (
                   <tr key={r.key} className={`border-b last:border-b-0 ${r.muted ? "text-muted-foreground" : ""}`}>
                     <td className="px-3 py-2">
-                      <span className={r.kind === "exact" ? "font-semibold" : ""}>{r.label}</span>
+                      <span className={r.kind === "exact" || r.kind === "compatible" ? "font-semibold" : ""}>{r.label}</span>
                       {r.kind === "exact" && (
                         <Badge className="ml-2 border-transparent bg-emerald-600 text-white hover:bg-emerald-600">
                           Exact Match
                         </Badge>
                       )}
+                      {r.kind === "compatible" && (
+                        <Badge variant="outline" className="ml-2 border-amber-500 text-amber-600">
+                          Compatible
+                        </Badge>
+                      )}
                       {r.note && <span className="ml-2 text-xs italic">{r.note}</span>}
                     </td>
-                    <td className={`px-3 py-2 text-right ${r.kind === "exact" ? "font-semibold" : ""}`}>
+                    <td className={`px-3 py-2 text-right ${r.kind === "exact" || r.kind === "compatible" ? "font-semibold" : ""}`}>
                       {formatCents(r.cents)}
                     </td>
                   </tr>
