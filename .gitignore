@@ -8,6 +8,9 @@ dist-ssr
 .DS_Store
 *.log
 npm-debug.log*
+# This is a bun project (bun.lock). Ignore any stray npm lockfile so an
+# accidental `npm install` can't pollute the tree or break CI's frozen install.
+package-lock.json
 supabase/.temp
 .vscode/*
 !.vscode/extensions.json
