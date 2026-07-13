@@ -18,8 +18,13 @@ const RESULT_STYLE: Record<FieldResult, { label: string; cls: string }> = {
   not_checked: { label: "not checked", cls: "text-muted-foreground" },
 };
 
-export function CandidateDebugPanel({ breakdown }: { breakdown: ScoreBreakdown }) {
+export function CandidateDebugPanel({ breakdown, rejected }: { breakdown: ScoreBreakdown; rejected?: boolean }) {
   const b = breakdown;
+  // The candidate's actual selectability (`rejected`) wins over the raw scoring
+  // `disqualified` — a number-only-conflict candidate can be PROMOTED for review
+  // (selectable) while its breakdown still shows the conflict that requires it.
+  const notSelectable = rejected ?? b.disqualified;
+  const promoted = b.disqualified && rejected === false;
   return (
     <details className="mt-2 rounded-md border bg-muted/20">
       <summary className="cursor-pointer px-2 py-1 text-xs text-muted-foreground">Why this match?</summary>
@@ -27,7 +32,8 @@ export function CandidateDebugPanel({ breakdown }: { breakdown: ScoreBreakdown }
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <span>Raw score: <strong>{b.raw_score}</strong></span>
           <span>Adjusted: <strong>{b.adjusted_score}</strong></span>
-          <Badge variant={b.disqualified ? "destructive" : "outline"}>{b.disqualified ? "Rejected" : "Eligible"}</Badge>
+          <Badge variant={notSelectable ? "destructive" : "outline"}>{notSelectable ? "Rejected" : "Eligible"}</Badge>
+          {promoted && <Badge variant="outline" className="border-amber-500 text-amber-600">Promoted for review</Badge>}
           {b.identity_floor_applied && <Badge variant="secondary">Identity floor → 95</Badge>}
         </div>
         {b.identity_floor_applied && b.identity_floor_reason && (

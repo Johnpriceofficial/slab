@@ -9,6 +9,7 @@ import type { Slab, SlabComp, SlabCompInput, SlabInput } from "./types";
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import { buildPricingPersist } from "./pricing-tiers";
 import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
+import { buildConfirmationPatch, confirmationEventType } from "./confirmation-patch";
 import type {
   SearchResponse,
   ValueResponse,
@@ -415,30 +416,17 @@ export interface PricechartingConfirmation {
  */
 export async function recordPricechartingConfirmation(slabId: string, c: PricechartingConfirmation): Promise<void> {
   const now = new Date().toISOString();
-  const isUser = c.visual_confirmation_status === "user_confirmed" || c.visual_confirmation_status === "user_rejected";
-  await updateSlab(slabId, {
-    candidate_image_url: c.candidate_image_url,
-    candidate_image_source: c.candidate_image_source,
-    candidate_image_type: c.candidate_image_type,
-    candidate_image_retrieved_at: c.candidate_image_url ? now : null,
-    candidate_image_available: c.candidate_image_available,
-    visual_confirmation_status: c.visual_confirmation_status,
-    visual_confirmation_method: isUser ? c.visual_confirmation_method : null,
-    visual_confirmation_at: isUser ? now : null,
-    visual_rejection_reason: c.visual_confirmation_status === "user_rejected" ? c.visual_rejection_reason : null,
-    product_confirmation_source: c.product_confirmation_source,
-    product_confirmed_at: c.product_id ? now : null,
-    scoring_version: c.scoring_version,
-  } as Partial<Slab>);
-  const eventType =
-    c.visual_confirmation_status === "user_confirmed"
-      ? "visual_confirmed"
-      : c.visual_confirmation_status === "user_rejected"
-        ? "visual_rejected"
-        : "product_confirmed";
-  await sb
-    .from("slab_pricecharting_events")
-    .insert({ slab_id: slabId, event_type: eventType, product_id: c.product_id, source: c.product_confirmation_source, detail: c as unknown as Record<string, unknown> });
+  const { data: userData } = await supabase.auth.getUser();
+  const actor = userData?.user?.id ?? null;
+  await updateSlab(slabId, buildConfirmationPatch(c, now, actor) as Partial<Slab>);
+  await sb.from("slab_pricecharting_events").insert({
+    slab_id: slabId,
+    event_type: confirmationEventType(c.visual_confirmation_status),
+    product_id: c.product_id,
+    source: c.product_confirmation_source,
+    created_by: actor,
+    detail: c as unknown as Record<string, unknown>,
+  });
 }
 
 export interface RefreshPricingResult {

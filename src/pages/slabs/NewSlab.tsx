@@ -181,6 +181,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     };
   }, [id.certification_number, id.grader, dao]);
 
+  // A material identity change invalidates any prior visual review.
+  useEffect(() => {
+    setVisual(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id.card_name, id.set_name, id.card_number, id.year, id.language, id.variation, id.grader, id.grade, id.grade_label]);
+
   const variance = useMemo(
     () => priceVariancePercent(dollarsToCents(val.final), dollarsToCents(val.guide)),
     [val.final, val.guide],
@@ -210,6 +216,23 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // The slab's own exact grade tier label, e.g. "CGC 10 Pristine".
   const exactTierLabel = () =>
     tierLabelOf({ grader: id.grader, grade: id.grade, grade_label: id.grade_label }) || null;
+
+  // Reject the linked product: unlink and clear the values it drove, so a
+  // rejected product never persists as confirmed or drives the graded Final Value.
+  const rejectPc = () => {
+    setPc(null);
+    setVisual(null);
+    setVal((s) => ({
+      ...s,
+      guide: "",
+      final: "",
+      quick: "",
+      replacement: "",
+      confidence: "manual",
+      notes: "",
+    }));
+    toast.info("Product unlinked (visually rejected). Its values were cleared.");
+  };
 
   const onSelectPc = (sel: SelectedPriceCharting) => {
     setPc(sel);
@@ -474,6 +497,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
               onSelect={onSelectPc}
               frontImageUrl={front?.previewUrl ?? null}
               onVisualStatus={(product_id, status, imageUrl) => setVisual({ product_id, status, imageUrl })}
+              onReject={rejectPc}
             />
           </CardContent>
         </Card>

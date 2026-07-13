@@ -49,6 +49,8 @@ interface PriceChartingPanelProps {
   frontImageUrl?: string | null;
   /** §4 callback when the operator visually confirms/rejects the candidate image. */
   onVisualStatus?: (productId: string, status: "user_confirmed" | "user_rejected", imageUrl: string | null) => void;
+  /** Called when the operator visually REJECTS the linked candidate — clear the link. */
+  onReject?: () => void;
 }
 
 /** Map a single resolved link-status tone to a Badge variant. */
@@ -60,7 +62,7 @@ const TONE_VARIANT: Record<LinkTone, "default" | "secondary" | "destructive" | "
   neutral: "outline",
 };
 
-export function PriceChartingPanel({ identity, selectedProductId, onSelect, frontImageUrl, onVisualStatus }: PriceChartingPanelProps) {
+export function PriceChartingPanel({ identity, selectedProductId, onSelect, frontImageUrl, onVisualStatus, onReject }: PriceChartingPanelProps) {
   const [loading, setLoading] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
@@ -83,8 +85,11 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   // If the operator edits identity fields afterward, invalidate it so a stale
   // check can't be confirmed.
   useEffect(() => {
+    // Identity changed → any prior recovery/visual review is no longer current.
     setRecovered(null);
     setRecoverError(null);
+    setVisualStatus(null);
+    setOfferImage(null);
   }, [
     identity.card_name, identity.set, identity.card_number, identity.year,
     identity.language, identity.variation, identity.grader, identity.grade,
@@ -135,6 +140,8 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
     setLoading(true);
     setError(null);
     setResult(null);
+    setVisualStatus(null); // a fresh search invalidates any prior visual review
+    setOfferImage(null);
     try {
       const res = await priceChartingSearch(identity);
       if (res.status === "error") {
@@ -286,7 +293,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                   </Button>
                 </div>
 
-                <CandidateDebugPanel breakdown={c.breakdown} />
+                <CandidateDebugPanel breakdown={c.breakdown} rejected={c.rejected} />
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
                     OFFER image (a seller photo), NOT an authoritative catalog
@@ -334,35 +341,42 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                         ) : null}
                       </div>
                     </div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
-                        onClick={() => {
-                          setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
-                          onVisualStatus?.(c.product_id, "user_confirmed", offerImage?.url ?? null);
-                        }}
-                      >
-                        Yes — same card
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_rejected" ? "destructive" : "ghost"}
-                        onClick={() => {
-                          setVisualStatus({ product_id: c.product_id, status: "user_rejected" });
-                          onVisualStatus?.(c.product_id, "user_rejected", offerImage?.url ?? null);
-                        }}
-                      >
-                        No — reject
-                      </Button>
-                      {visualStatus?.product_id === c.product_id && (
-                        <span className="text-xs text-muted-foreground">
-                          Recorded: {visualStatus.status === "user_confirmed" ? "user-confirmed" : "user-rejected"}
-                        </span>
-                      )}
-                    </div>
+                    {offerImage && offerImage.product_id === c.product_id && offerImage.url ? (
+                      <div className="mt-2 flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
+                          onClick={() => {
+                            setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
+                            onVisualStatus?.(c.product_id, "user_confirmed", offerImage.url);
+                          }}
+                        >
+                          Yes — same card
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            // Reject → record it AND clear the link so a rejected
+                            // product never drives Final Value or is stored as confirmed.
+                            onVisualStatus?.(c.product_id, "user_rejected", offerImage.url);
+                            setVisualStatus(null);
+                            onReject?.();
+                          }}
+                        >
+                          No — reject &amp; unlink
+                        </Button>
+                        {visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" && (
+                          <span className="text-xs text-muted-foreground">Recorded: user-confirmed</span>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs italic text-muted-foreground">
+                        No PriceCharting image to compare — confirm by the metadata fields only.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -400,7 +414,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                 {c.conflicts.length > 0 && (
                   <div className="mt-1 text-xs text-destructive">Reason: {c.conflicts.join("; ")}</div>
                 )}
-                <CandidateDebugPanel breakdown={c.breakdown} />
+                <CandidateDebugPanel breakdown={c.breakdown} rejected={c.rejected} />
               </div>
             ))}
             <p className="text-xs text-muted-foreground">
