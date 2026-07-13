@@ -1,6 +1,6 @@
-# SlabVault — data layer
+# GradedCardValue.com — data layer
 
-The full SlabVault documentation lives in the repository root: [`../../../SLABVAULT.md`](../../../SLABVAULT.md).
+The full GradedCardValue.com documentation lives in the repository root: [`../../../SLABVAULT.md`](../../../SLABVAULT.md).
 
 This directory (`src/lib/slabs/`) holds the framework-agnostic data layer:
 

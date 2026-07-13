@@ -1,5 +1,5 @@
 /**
- * Frontend authentication + admin gating for SlabVault.
+ * Frontend authentication + admin gating for GradedCardValue.com.
  *
  * This is DEFENSE IN DEPTH, not the only line of defence: the database RLS
  * policies and the Edge Function's `isCallerAdmin` check already prevent any

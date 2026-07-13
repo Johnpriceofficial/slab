@@ -3,7 +3,7 @@ import { useEffect } from "react";
 interface PageHeadProps {
   title: string;
   description?: string;
-  /** SlabVault is a private admin tool — pages default to noindex. */
+  /** GradedCardValue.com is a private admin tool — pages default to noindex. */
   noindex?: boolean;
 }
 

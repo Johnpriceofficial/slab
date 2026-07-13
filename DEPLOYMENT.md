@@ -1,4 +1,4 @@
-# SlabVault — Deployment Runbook (dedicated Supabase project)
+# GradedCardValue.com — Deployment Runbook (dedicated Supabase project)
 
 You run these; they need your DB password + real PriceCharting token + Anthropic
 key (secrets I never see). Everything targets a **new, empty** project.
@@ -7,7 +7,7 @@ key (secrets I never see). Everything targets a **new, empty** project.
 
 ## 0. Create the dedicated project
 
-1. https://supabase.com/dashboard → **New project** → name it `SlabVault`.
+1. https://supabase.com/dashboard → **New project** → name it `GradedCardValue`.
 2. Copy from **Project Settings → API**:
    - Project URL  → `VITE_SUPABASE_URL`
    - `anon` public key → `VITE_SUPABASE_ANON_KEY`

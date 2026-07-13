@@ -1,4 +1,4 @@
-# SlabVault — Graded Pokémon Slab Inventory
+# GradedCardValue.com — Graded Card Inventory & Valuation
 
 A one-card-at-a-time intake workflow on a standalone Vite + React + Supabase app.
 Sign in as an admin, upload a graded slab's front/back photos, optionally
@@ -200,4 +200,4 @@ within-isolate safeguard.
 Migrations and edge functions are authored and pass local typecheck/tests/build,
 but have not been applied to a live project in this environment. Run the setup
 steps above (and the integration tests in `src/test/integration/`) against a
-dedicated SlabVault project to complete verification.
+dedicated GradedCardValue.com project to complete verification.

@@ -1,4 +1,4 @@
-# SlabVault — Live Deployment (Operator-Run)
+# GradedCardValue.com — Live Deployment (Operator-Run)
 
 **You run these steps. Secrets never enter the AI conversation and are never
 committed.** The scripts refuse to touch the `MCVR N8N` project or any
@@ -10,7 +10,7 @@ Hard-delete stays **disabled** end to end. Archival is the standard action.
 
 ## 1. Create a dedicated Supabase project
 
-In the Supabase dashboard: **New project → name it `SlabVault`** (empty). Choose
+In the Supabase dashboard: **New project → name it `GradedCardValue`** (empty). Choose
 an org, region, and a strong database password. Do **not** reuse any existing
 project.
 

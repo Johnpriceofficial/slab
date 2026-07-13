@@ -36,9 +36,9 @@ export default function SlabDashboard() {
 
   return (
     <div className="container max-w-6xl py-8">
-      <PageHead title="Dashboard · SlabVault" noindex />
+      <PageHead title="Dashboard · GradedCardValue.com" noindex />
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">SlabVault Dashboard</h1>
+        <h1 className="text-2xl font-bold">Graded Card Value Dashboard</h1>
         <div className="flex gap-2">
           <Button variant="outline" onClick={handleExport} disabled={exporting}>
             {exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}

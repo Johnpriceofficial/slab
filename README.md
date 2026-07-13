@@ -1,6 +1,6 @@
-# SlabVault
+# GradedCardValue.com
 
-Standalone graded-Pokémon-slab inventory app. Sign in as an admin, then, one card
+Secure graded-card identification, verification, valuation, and inventory app. Sign in as an admin, then, one card
 at a time: upload a front photo (back is optional — some slabs carry every needed
 field on the front label alone) in any common image format (HEIC included,
 auto-converted), optionally **analyze** them with AI to
@@ -54,7 +54,7 @@ To share a clean copy of the source (tracked files only — no `.git` history, n
 `.env*`, no `node_modules`, no build output, and secret-scanned):
 
 ```bash
-scripts/clean-export.sh            # → slabvault-export.zip
+scripts/clean-export.sh            # → graded-card-value-export.zip
 ```
 
 ### Supabase
@@ -92,7 +92,7 @@ supabase functions deploy analyze-slab
 - Admin-only via a frontend route guard **plus** RLS + edge-function admin
   checks + a private `slab-images` bucket.
 
-See `SLABVAULT.md` for the full architecture, security model, and verification.
+See `SLABVAULT.md` for the full architecture, security model, and verification. The legacy filename is retained to avoid breaking existing repository references.
 
 ## Auth
 

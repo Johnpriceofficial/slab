@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Produce a CLEAN, shareable export of SlabVault.
+# Produce a CLEAN, shareable export of GradedCardValue.com.
 #
 # It uses `git archive`, so ONLY tracked files are included — the .git history,
 # any .env* secrets, node_modules, the build output (dist/), and caches (.vite/,
@@ -9,11 +9,11 @@
 # (b) carry no secret-looking strings, before it is left in place. This is the fix
 # for a hand-rolled zip that previously swept in .git/ and .env.local.
 #
-# Usage: scripts/clean-export.sh [output.zip]     (default: slabvault-export.zip)
+# Usage: scripts/clean-export.sh [output.zip]     (default: graded-card-value-export.zip)
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-OUT="${1:-slabvault-export.zip}"
+OUT="${1:-graded-card-value-export.zip}"
 
 # 1. Only export a clean commit — never a dirty tree that might hold an uncommitted
 #    secret. (git archive itself only reads HEAD, but this keeps the export honest.)

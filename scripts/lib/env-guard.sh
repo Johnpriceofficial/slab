@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# SlabVault — shared environment guards for the live operator scripts.
+# GradedCardValue.com — shared environment guards for the live operator scripts.
 # SOURCE this file (do not execute). It NEVER prints secret values and NEVER
 # enables shell tracing. On any violation it prints a redacted reason and exits
 # non-zero, aborting the sourcing script.
@@ -63,7 +63,7 @@ guard_dedicated_project() {
   combined="$(_eg_lower "$ref $url")"
   for s in "${SLABVAULT_FORBIDDEN_SUBSTRINGS[@]}"; do
     case "$combined" in
-      *"$s"*) _eg_fail "Refusing: target ($ref_var/$url_var) contains forbidden substring '$s' — must be a dedicated SlabVault project." ;;
+      *"$s"*) _eg_fail "Refusing: target ($ref_var/$url_var) contains forbidden substring '$s' — must be a dedicated GradedCardValue.com project." ;;
     esac
   done
 }

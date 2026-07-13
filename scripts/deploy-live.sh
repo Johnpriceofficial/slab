@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# SlabVault — operator-run live deploy to a DEDICATED SlabVault project.
+# GradedCardValue.com — operator-run live deploy to a dedicated project.
 #
 # Secrets stay on the operator's machine and in the environment; this script
 # never echoes them, never enables tracing, and never writes them to a tracked
@@ -19,7 +19,7 @@ cd "$ROOT"
 
 # --- 0. refuse unless a dedicated project ref is explicitly set -------------
 if [ -z "${SLABVAULT_PROJECT_REF:-}" ]; then
-  printf 'ERROR: %s\n' "SLABVAULT_PROJECT_REF must be set (a dedicated SlabVault project)." >&2
+  printf 'ERROR: %s\n' "SLABVAULT_PROJECT_REF must be set (a dedicated GradedCardValue.com project)." >&2
   exit 1
 fi
 
@@ -36,7 +36,7 @@ check_url_matches_ref SLABVAULT_SUPABASE_URL SLABVAULT_PROJECT_REF
 
 # --- 1. database password (prompt securely if not already supplied) ---------
 if [ -z "${SLABVAULT_DB_PASSWORD:-}" ]; then
-  read -r -s -p "SlabVault database password: " SLABVAULT_DB_PASSWORD
+  read -r -s -p "GradedCardValue.com database password: " SLABVAULT_DB_PASSWORD
   printf '\n'
 fi
 if [ -z "$SLABVAULT_DB_PASSWORD" ]; then
@@ -92,7 +92,7 @@ run_step() {
   fi
 }
 
-printf 'Deploying to the dedicated SlabVault project (ref redacted)…\n'
+printf 'Deploying to the dedicated GradedCardValue.com project (ref redacted)…\n'
 run_step "supabase link"                     supabase link --project-ref "$SLABVAULT_PROJECT_REF" --yes
 run_step "supabase db push (migrations)"     supabase db push --yes
 run_step "set PRICECHARTING_API_TOKEN secret" supabase secrets set --env-file "$PC_FILE"

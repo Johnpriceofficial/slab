@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# SlabVault — operator-run live verification against a DEDICATED test project.
+# GradedCardValue.com — operator-run live verification against a dedicated test project.
 #
 # Runs the eight live integration tests (must RUN, not skip), the full suite,
 # typecheck, production build, both edge bundles, both deno checks, and a
@@ -41,7 +41,7 @@ run_check() {
   rm -f "$log"
 }
 
-printf '== SlabVault live verification ==\n'
+printf '== GradedCardValue.com live verification ==\n'
 
 # --- 1. integration tests: must RUN all eight, zero skipped, zero failed -----
 INT_LOG="$(mktemp)"

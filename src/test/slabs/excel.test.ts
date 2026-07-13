@@ -153,7 +153,7 @@ describe("excel — edge cases", () => {
 });
 
 describe("excel — filename", () => {
-  it("uses SlabVault_Master_Inventory_YYYY-MM-DD.xlsx", () => {
-    expect(workbookFilename(new Date(2026, 6, 10))).toBe("SlabVault_Master_Inventory_2026-07-10.xlsx");
+  it("uses GradedCardValue_Master_Inventory_YYYY-MM-DD.xlsx", () => {
+    expect(workbookFilename(new Date(2026, 6, 10))).toBe("GradedCardValue_Master_Inventory_2026-07-10.xlsx");
   });
 });
