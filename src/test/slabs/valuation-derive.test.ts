@@ -31,9 +31,16 @@ describe("deriveValuation", () => {
   it("derives quick-sale and replacement from the DOCUMENTED percentages of the guide", () => {
     const d = deriveValuation({ guide_cents: 10000, confidence_score: 96, field_meaning: "CGC 10" });
     expect(d.guide_cents).toBe(10000);
-    expect(d.quick_sale_cents).toBe(Math.round(10000 * QUICK_SALE_PERCENTAGE)); // 8500
-    expect(d.replacement_cents).toBe(Math.round(10000 * REPLACEMENT_VALUE_PERCENTAGE)); // 12000
+    expect(d.quick_sale_cents).toBe(Math.round(10000 * QUICK_SALE_PERCENTAGE)); // 8000
+    expect(d.replacement_cents).toBe(Math.round(10000 * REPLACEMENT_VALUE_PERCENTAGE)); // 11000
     expect(d.suggested_final_cents).toBe(10000); // final == guide → 0% variance
+  });
+
+  it("matches the worked Charmander example (guide $42.50 → quick $34.00, replacement $46.75)", () => {
+    const d = deriveValuation({ guide_cents: 4250, confidence_score: 96, field_meaning: "CGC 10" });
+    expect(d.quick_sale_cents).toBe(3400); // $42.50 × 80%
+    expect(d.replacement_cents).toBe(4675); // $42.50 × 110%
+    expect(d.suggested_final_cents).toBe(4250);
   });
 
   it("NEVER labels an auto-derived valuation 'manual'", () => {
@@ -41,8 +48,8 @@ describe("deriveValuation", () => {
     expect(d.confidence).not.toBe("manual");
     expect(d.confidence).toBe("high");
     expect(d.method).toMatch(/Auto-derived from the confirmed PriceCharting value \(PSA 10\)/);
-    expect(d.method).toMatch(/Quick-Sale = 85% of guide/);
-    expect(d.method).toMatch(/Replacement = 120% of guide/);
+    expect(d.method).toMatch(/Quick-Sale = 80% of guide/);
+    expect(d.method).toMatch(/Replacement = 110% of guide/);
   });
 
   it("labels an interpolated estimate as such and caps confidence at 'probable'", () => {
@@ -64,7 +71,7 @@ describe("deriveValuation", () => {
 
   it("rounds fractional cents deterministically", () => {
     const d = deriveValuation({ guide_cents: 999, confidence_score: 80 });
-    expect(d.quick_sale_cents).toBe(Math.round(999 * 0.85)); // 849
-    expect(d.replacement_cents).toBe(Math.round(999 * 1.2)); // 1199
+    expect(d.quick_sale_cents).toBe(Math.round(999 * 0.8)); // 799
+    expect(d.replacement_cents).toBe(Math.round(999 * 1.1)); // 1099
   });
 });

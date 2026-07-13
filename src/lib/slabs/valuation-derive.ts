@@ -32,8 +32,8 @@ export type ValuationConfidence = "exact" | "high" | "probable" | "low" | "manua
  *
  * Change these two constants to retune every auto-derived valuation in one place.
  */
-export const QUICK_SALE_PERCENTAGE = 0.85; // 85% of guide
-export const REPLACEMENT_VALUE_PERCENTAGE = 1.2; // 120% of guide
+export const QUICK_SALE_PERCENTAGE = 0.8; // 80% of guide
+export const REPLACEMENT_VALUE_PERCENTAGE = 1.1; // 110% of guide
 
 /** Inputs describing the confirmed PriceCharting match the valuation derives from. */
 export interface ValuationDeriveInput {
