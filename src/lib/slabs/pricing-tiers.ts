@@ -45,6 +45,11 @@ export interface SlabPricingWrite {
   persist: PricingPersist;
   /** Raw token-free PriceCharting pricing response, stored for audit only. */
   raw?: unknown;
+  /**
+   * Scalar PriceCharting mirror fields to update ATOMICALLY with the tiers (set
+   * on refresh; omitted on the initial save, where create_slab already set them).
+   */
+  scalars?: import("./pricing-refresh").RefreshScalars;
 }
 
 export interface TierIdentity {

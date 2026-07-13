@@ -116,6 +116,7 @@ export function makeMockDao(opts: MockDaoOptions = {}): { dao: SlabDataAccess; s
     async applySlabPricing(slabId, write) {
       if (opts.failPricing) throw new Error("pricing write failed");
       state.pricingWrites.push({ slabId, write });
+      return true;
     },
   };
 

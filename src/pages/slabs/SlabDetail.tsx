@@ -14,14 +14,14 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { LoadingState } from "@/components/shared/LoadingState";
-import { ChevronLeft, ChevronRight, Pencil, ImageOff } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2 } from "lucide-react";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import { hydratePriceTiers } from "@/lib/slabs/pricing-tiers";
 import {
-  fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab,
+  fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
 } from "@/lib/slabs/data";
 import { formatCents, centsToInputString, dollarsToCents } from "@/lib/slabs/format";
 import { VERIFICATION_STATUSES, VALUATION_CONFIDENCE, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
@@ -51,6 +51,30 @@ export default function SlabDetail() {
     }),
     enabled: !!slab,
   });
+
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefreshPricing = async (current: Slab) => {
+    setRefreshing(true);
+    try {
+      const res = await refreshSlabPricing(current);
+      if (res.status === "applied") {
+        toast.success(`Pricing refreshed${res.product_name ? ` from ${res.product_name}` : ""}.`);
+        queryClient.invalidateQueries({ queryKey: ["slab", id] });
+      } else if (res.status === "stale") {
+        toast.info(res.message ?? "Newer pricing already applied — nothing changed.");
+        queryClient.invalidateQueries({ queryKey: ["slab", id] });
+      } else if (res.status === "needs_confirmation") {
+        toast.warning(res.message ?? "No confident match — confirm the product in intake first.");
+      } else if (res.status === "no_product") {
+        toast.info(res.message ?? "No PriceCharting product is linked to this slab.");
+      } else {
+        toast.error(res.message ?? "Refresh failed.");
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   if (isLoading) return <div className="container py-12"><LoadingState message="Loading slab..." /></div>;
   if (!slab) {
@@ -133,9 +157,26 @@ export default function SlabDetail() {
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle>Valuation</CardTitle>
-            <span className="text-xs text-muted-foreground">
-              Date Valued: {slab.date_valued ? slab.date_valued.slice(0, 10) : "—"}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-muted-foreground">
+                Date Valued: {slab.date_valued ? slab.date_valued.slice(0, 10) : "—"}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={refreshing}
+                onClick={() => handleRefreshPricing(slab)}
+                title="Re-fetch the current PriceCharting tier table for this slab"
+              >
+                {refreshing ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-1 h-4 w-4" />
+                )}
+                Refresh pricing
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             <SlabPricingCard

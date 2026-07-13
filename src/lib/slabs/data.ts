@@ -7,6 +7,8 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Slab, SlabComp, SlabCompInput, SlabInput } from "./types";
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
+import { buildPricingPersist } from "./pricing-tiers";
+import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
 import type {
   SearchResponse,
   ValueResponse,
@@ -80,14 +82,18 @@ export const supabaseSlabDataAccess: SlabDataAccess = {
   },
 
   async applySlabPricing(slabId: string, pricing) {
-    // Stale-write guarded server-side: an older retrieved_at never overwrites newer.
-    const { error } = await sb.rpc("apply_slab_pricing", {
+    // Stale-write guarded server-side: an older retrieved_at never overwrites
+    // newer. Tiers AND scalar mirror fields commit atomically under the one
+    // guard. Returns true when the write was applied, false when stale-rejected.
+    const { data, error } = await sb.rpc("apply_slab_pricing", {
       p_slab_id: slabId,
       p_tiers: pricing.persist as unknown as Record<string, unknown>,
       p_raw: (pricing.raw ?? null) as unknown as Record<string, unknown> | null,
       p_priced_at: pricing.persist.retrieved_at,
+      p_scalars: (pricing.scalars ?? null) as unknown as Record<string, unknown> | null,
     });
     if (error) throw new Error(error.message);
+    return data === true;
   },
 };
 
@@ -363,4 +369,68 @@ export async function priceChartingOfferImage(
   });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as OfferImageResponse | HandlerErrorBody;
+}
+
+export interface RefreshPricingResult {
+  status: "applied" | "stale" | "needs_confirmation" | "no_product" | "error";
+  guide_cents?: number | null;
+  product_name?: string | null;
+  message?: string;
+}
+
+/**
+ * Re-fetch and persist PriceCharting pricing for an EXISTING slab, so a card
+ * saved before tier persistence (or one whose market moved) shows the full,
+ * current grade table. Re-values the already-confirmed product directly; with no
+ * stored product it accepts only an auto-confirmed search, else defers to manual
+ * confirmation. Persists the refreshed tiers (stale-guarded server-side) and the
+ * scalar PriceCharting fields — WITHOUT overwriting a hand-entered graded guide
+ * or the operator's approved Final/Quick/Replacement values.
+ */
+export async function refreshSlabPricing(slab: Slab): Promise<RefreshPricingResult> {
+  try {
+    let search: SearchResponse | null = null;
+    if (!slab.pricecharting_product_id) {
+      const res = await priceChartingSearch({
+        card_name: slab.card_name ?? undefined,
+        set: slab.set_name ?? undefined,
+        card_number: slab.card_number ?? undefined,
+        year: slab.year ?? undefined,
+        language: slab.language ?? undefined,
+        variation: slab.variation ?? undefined,
+        grader: slab.grader ?? undefined,
+        grade: slab.grade ?? undefined,
+      });
+      if (res.status === "error") return { status: "error", message: res.message };
+      search = res;
+    }
+
+    const resolution = resolveRefreshProduct(slab.pricecharting_product_id, slab.pricecharting_match_status, search);
+    if (resolution.kind === "needs_confirmation") {
+      return { status: "needs_confirmation", message: "No confident match — confirm the product in the intake screen first." };
+    }
+    if (resolution.kind === "no_product") {
+      return { status: "no_product", message: "No PriceCharting product is linked and none could be matched automatically." };
+    }
+
+    const value = await priceChartingValue(resolution.product_id, slab.grader ?? undefined, slab.grade ?? undefined);
+    if (value.status === "error") return { status: "error", message: value.message };
+
+    // ONE atomic, stale-guarded write: tiers + raw + the scalar mirror fields all
+    // commit together under the retrieved_at guard. A concurrent newer refresh can
+    // never be half-clobbered, and a stale one is rejected wholesale (applied=false).
+    const persist = buildPricingPersist(
+      value.available_values_cents ?? null,
+      { grader: slab.grader, grade: slab.grade, grade_label: slab.grade_label },
+      new Date().toISOString(),
+    );
+    const scalars = buildRefreshScalars(slab, value, resolution.match_status);
+    const applied = await supabaseSlabDataAccess.applySlabPricing!(slab.id, { persist, raw: value, scalars });
+    if (!applied) {
+      return { status: "stale", message: "A newer pricing update already applied — nothing was changed." };
+    }
+    return { status: "applied", guide_cents: value.guide_value_cents, product_name: value.product_name };
+  } catch (e) {
+    return { status: "error", message: e instanceof Error ? e.message : "Refresh failed." };
+  }
 }

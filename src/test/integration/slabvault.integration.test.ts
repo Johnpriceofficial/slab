@@ -213,4 +213,59 @@ suite("SlabVault live integration", () => {
     expect(gone).toBeNull();
     // (already deleted — don't double-clean)
   });
+
+  it("apply_slab_pricing: atomic tiers+scalars, stale guard, and hand-entered-guide preservation", async () => {
+    // A slab with a hand-entered graded guide of $42.50.
+    const created = await createSlab(adminClient, { certification_number: `PC${stamp}`, final_value_cents: 4250 });
+    expect(created.error).toBeNull();
+    const id = created.data.id as string;
+    createdSlabIds.push(id);
+
+    const tiers = (retrieved_at: string) => ({
+      source: "PriceCharting",
+      retrieved_at,
+      tiers: [{ tier: "ungraded", label: "Ungraded", grader: null, grade: null, designation: null, value_cents: 413, available: true, exact_match: false, source: "PriceCharting" }],
+    });
+    const t1 = new Date().toISOString();
+
+    // 1. Happy path (proves the old `boolean > integer` bug is gone): applied=true,
+    //    columns written atomically.
+    const applied1 = await adminClient.rpc("apply_slab_pricing", {
+      p_slab_id: id, p_tiers: tiers(t1), p_raw: { ok: true }, p_priced_at: t1,
+      p_scalars: { product_id: "5427932", product_name: "Charmander #289/S-P", grade_field: "condition-17-price", sales_volume: 3, match_status: "exact", apply_value: true, value_cents: 5000, variance: -15 },
+    });
+    expect(applied1.error).toBeNull();
+    expect(applied1.data).toBe(true);
+    const { data: row1 } = await admin.from("slabs").select("pricecharting_value_cents, pricecharting_product_id, price_variance_percent, pricecharting_tiers").eq("id", id).single();
+    expect(row1.pricecharting_value_cents).toBe(5000);
+    expect(row1.pricecharting_product_id).toBe("5427932");
+    expect(Number(row1.price_variance_percent)).toBe(-15);
+    expect(row1.pricecharting_tiers.tiers[0].value_cents).toBe(413);
+
+    // 2. Stale guard: an OLDER retrieved_at is rejected wholesale — no scalar clobber.
+    const older = new Date(Date.parse(t1) - 60_000).toISOString();
+    const applied2 = await adminClient.rpc("apply_slab_pricing", {
+      p_slab_id: id, p_tiers: tiers(older), p_raw: null, p_priced_at: older,
+      p_scalars: { product_id: "OLD", product_name: "stale", grade_field: null, sales_volume: null, match_status: "likely", apply_value: true, value_cents: 9999, variance: 0 },
+    });
+    expect(applied2.data).toBe(false);
+    const { data: row2 } = await admin.from("slabs").select("pricecharting_value_cents, pricecharting_product_id").eq("id", id).single();
+    expect(row2.pricecharting_value_cents).toBe(5000); // unchanged
+    expect(row2.pricecharting_product_id).toBe("5427932"); // scalar NOT clobbered by the stale write
+
+    // 3. apply_value=false PRESERVES the guide while still refreshing provenance.
+    const t3 = new Date(Date.parse(t1) + 60_000).toISOString();
+    const applied3 = await adminClient.rpc("apply_slab_pricing", {
+      p_slab_id: id, p_tiers: tiers(t3), p_raw: null, p_priced_at: t3,
+      p_scalars: { product_id: "5427932", product_name: "Refreshed Name", grade_field: null, sales_volume: null, match_status: "likely", apply_value: false, value_cents: null, variance: null },
+    });
+    expect(applied3.data).toBe(true);
+    const { data: row3 } = await admin.from("slabs").select("pricecharting_value_cents, pricecharting_product_name").eq("id", id).single();
+    expect(row3.pricecharting_value_cents).toBe(5000); // guide preserved (apply_value=false)
+    expect(row3.pricecharting_product_name).toBe("Refreshed Name"); // provenance refreshed
+
+    // 4. Non-admin is rejected.
+    const denied = await userClient.rpc("apply_slab_pricing", { p_slab_id: id, p_tiers: tiers(new Date().toISOString()), p_raw: null, p_priced_at: new Date().toISOString(), p_scalars: null });
+    expect(denied.error).not.toBeNull();
+  });
 });

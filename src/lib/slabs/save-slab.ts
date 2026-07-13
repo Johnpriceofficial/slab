@@ -59,8 +59,9 @@ export interface SlabDataAccess {
   /**
    * Persist the confirmed PriceCharting tier table (stale-write guarded in the
    * DB). Optional: non-critical enrichment, never blocks or fails a save.
+   * Resolves to whether the write was applied (false when stale-rejected).
    */
-  applySlabPricing?(slabId: string, pricing: SlabPricingWrite): Promise<void>;
+  applySlabPricing?(slabId: string, pricing: SlabPricingWrite): Promise<boolean>;
 }
 
 export type SaveSlabResult =
