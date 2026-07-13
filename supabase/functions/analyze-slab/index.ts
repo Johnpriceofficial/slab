@@ -7,7 +7,6 @@
 // Regenerate the bundle after changing the handler:
 //   node scripts/build-analyze-slab-edge-bundle.mjs
 
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
 import { consumeDailyQuota } from "../_shared/quota.ts";
@@ -66,7 +65,7 @@ function makeAnthropicCaller(apiKey: string) {
   };
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json({ status: "error", error_code: "INVALID_PARAMETER", message: "POST required" }, 405);
 

@@ -19,6 +19,10 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install (frozen lockfile)
         run: bun install --frozen-lockfile
 
@@ -33,6 +37,12 @@ jobs:
 
       - name: Production build
         run: bun run build
+
+      - name: Deno-check edge functions
+        run: >-
+          deno check --no-config --node-modules-dir=manual --no-remote
+          supabase/functions/analyze-slab/index.ts
+          supabase/functions/pricecharting-search/index.ts
 
       - name: Rebuild edge bundles (must match committed output)
         run: |

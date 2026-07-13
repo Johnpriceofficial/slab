@@ -8,7 +8,6 @@
 // Regenerate the bundle after changing the handler/library:
 //   node scripts/build-pricecharting-edge-bundle.mjs
 
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
 import { makePriceChartingReserver } from "../_shared/rate-limit.ts";
@@ -22,7 +21,7 @@ function json(body: unknown, status: number): Response {
   });
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json({ status: "error", error_code: "INVALID_PARAMETER", message: "POST required" }, 405);
 
