@@ -394,6 +394,53 @@ export async function priceChartingLookup(
   return data as LookupResponse | HandlerErrorBody;
 }
 
+/** §4 Visual-confirmation + product-confirmation-source fields to persist on a slab. */
+export interface PricechartingConfirmation {
+  product_id: string | null;
+  candidate_image_url: string | null;
+  candidate_image_source: string | null; // 'marketplace_offer'
+  candidate_image_type: string | null; // 'marketplace_offer_image'
+  candidate_image_available: boolean;
+  visual_confirmation_status: string; // not_available|not_reviewed|user_confirmed|user_rejected|metadata_auto_confirmed
+  visual_confirmation_method: string | null; // 'side_by_side'
+  visual_rejection_reason: string | null;
+  product_confirmation_source: string | null; // search_auto|search_manual|manual_product_id|manual_product_url
+  scoring_version: number | null;
+}
+
+/**
+ * Persist §4 confirmation state AND append an immutable audit event. The slab
+ * columns hold current state; the event table is append-only so history is never
+ * silently rewritten (metadata_auto_confirmed is never stored as user_confirmed).
+ */
+export async function recordPricechartingConfirmation(slabId: string, c: PricechartingConfirmation): Promise<void> {
+  const now = new Date().toISOString();
+  const isUser = c.visual_confirmation_status === "user_confirmed" || c.visual_confirmation_status === "user_rejected";
+  await updateSlab(slabId, {
+    candidate_image_url: c.candidate_image_url,
+    candidate_image_source: c.candidate_image_source,
+    candidate_image_type: c.candidate_image_type,
+    candidate_image_retrieved_at: c.candidate_image_url ? now : null,
+    candidate_image_available: c.candidate_image_available,
+    visual_confirmation_status: c.visual_confirmation_status,
+    visual_confirmation_method: isUser ? c.visual_confirmation_method : null,
+    visual_confirmation_at: isUser ? now : null,
+    visual_rejection_reason: c.visual_confirmation_status === "user_rejected" ? c.visual_rejection_reason : null,
+    product_confirmation_source: c.product_confirmation_source,
+    product_confirmed_at: c.product_id ? now : null,
+    scoring_version: c.scoring_version,
+  } as Partial<Slab>);
+  const eventType =
+    c.visual_confirmation_status === "user_confirmed"
+      ? "visual_confirmed"
+      : c.visual_confirmation_status === "user_rejected"
+        ? "visual_rejected"
+        : "product_confirmed";
+  await sb
+    .from("slab_pricecharting_events")
+    .insert({ slab_id: slabId, event_type: eventType, product_id: c.product_id, source: c.product_confirmation_source, detail: c as unknown as Record<string, unknown> });
+}
+
 export interface RefreshPricingResult {
   status: "applied" | "stale" | "needs_confirmation" | "no_product" | "error";
   guide_cents?: number | null;

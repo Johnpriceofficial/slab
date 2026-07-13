@@ -12,6 +12,7 @@ import {
   type PriceChartingSearchArgs,
 } from "@/lib/slabs/data";
 import type { LookupResponse } from "@/server/pricecharting/handler";
+import { CandidateDebugPanel } from "@/components/slabs/CandidateDebugPanel";
 import { formatCents } from "@/lib/slabs/format";
 import {
   deriveCandidateStatus,
@@ -44,6 +45,10 @@ interface PriceChartingPanelProps {
   identity: PriceChartingSearchArgs;
   selectedProductId: string | null;
   onSelect: (sel: SelectedPriceCharting) => void;
+  /** Slab front image URL for §3 side-by-side visual confirmation (optional). */
+  frontImageUrl?: string | null;
+  /** §4 callback when the operator visually confirms/rejects the candidate image. */
+  onVisualStatus?: (productId: string, status: "user_confirmed" | "user_rejected", imageUrl: string | null) => void;
 }
 
 /** Map a single resolved link-status tone to a Badge variant. */
@@ -55,7 +60,7 @@ const TONE_VARIANT: Record<LinkTone, "default" | "secondary" | "destructive" | "
   neutral: "outline",
 };
 
-export function PriceChartingPanel({ identity, selectedProductId, onSelect }: PriceChartingPanelProps) {
+export function PriceChartingPanel({ identity, selectedProductId, onSelect, frontImageUrl, onVisualStatus }: PriceChartingPanelProps) {
   const [loading, setLoading] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
@@ -72,6 +77,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
   const [recovered, setRecovered] = useState<LookupResponse | null>(null);
   const [recoveredInput, setRecoveredInput] = useState(""); // the input the lookup validated
   const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [visualStatus, setVisualStatus] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected" } | null>(null);
 
   // A recovered result was identity-checked against the identity AT LOOKUP TIME.
   // If the operator edits identity fields afterward, invalidate it so a stale
@@ -280,55 +286,82 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
                   </Button>
                 </div>
 
-                {/* Visual confirmation: metadata side-by-side + seller listing
-                    photo (when one exists). The photo is NOT proof of identity —
-                    it depicts the same catalog product, not necessarily this slab. */}
+                <CandidateDebugPanel breakdown={c.breakdown} />
+
+                {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
+                    OFFER image (a seller photo), NOT an authoritative catalog
+                    image — it's supporting evidence and never overrides metadata. */}
                 {isSelected && (
                   <div className="mt-3 border-t pt-3">
-                    <p className="mb-2 text-xs font-medium">Confirm this is your card</p>
+                    <p className="mb-2 text-xs font-medium">
+                      Does the PriceCharting image show the same exact card and artwork as your slab?
+                    </p>
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-0.5 text-xs">
-                        <p className="text-muted-foreground">Your card</p>
+                      <div className="space-y-1 text-xs">
+                        <p className="text-muted-foreground">Your slab</p>
+                        {frontImageUrl ? (
+                          <img src={frontImageUrl} alt="Your slab front" className="max-h-40 rounded border object-contain" />
+                        ) : (
+                          <p className="italic text-muted-foreground">No slab image.</p>
+                        )}
                         <p className="font-medium">{identity.card_name || "—"}</p>
                         <p className="text-muted-foreground">
-                          {[
-                            identity.set,
-                            identity.card_number ? `#${identity.card_number}` : null,
-                            identity.grader,
-                            identity.grade,
-                          ]
+                          {[identity.set, identity.card_number ? `#${identity.card_number}` : null, identity.grader, identity.grade]
                             .filter(Boolean)
                             .join(" · ") || "—"}
                         </p>
                       </div>
                       <div className="space-y-1 text-xs">
-                        <p className="text-muted-foreground">PriceCharting: {c.product_name}</p>
+                        <p className="text-muted-foreground">
+                          PriceCharting: {c.product_name} · ID {c.product_id}
+                        </p>
                         {offerImage && offerImage.product_id === c.product_id ? (
                           offerImage.loading ? (
                             <p className="flex items-center gap-1 italic text-muted-foreground">
-                              <Loader2 className="h-3 w-3 animate-spin" /> Loading listing photo…
+                              <Loader2 className="h-3 w-3 animate-spin" /> Loading image…
                             </p>
                           ) : offerImage.url ? (
                             <>
-                              <img
-                                src={offerImage.url}
-                                alt={`Seller listing photo for ${c.product_name}`}
-                                loading="lazy"
-                                className="max-h-40 rounded border object-contain"
-                              />
+                              <img src={offerImage.url} alt={`Marketplace offer image for ${c.product_name}`} loading="lazy" className="max-h-40 rounded border object-contain" />
                               <p className="text-[10px] text-muted-foreground">
-                                Seller listing photo — a copy of this product, not proof this is your exact card.
-                                Confirm by the fields on the left.
+                                <strong>Marketplace offer image</strong> (a seller's photo) — supporting evidence, not an
+                                official catalog image, and it never overrides a metadata conflict.
                               </p>
                             </>
                           ) : (
-                            <p className="italic text-muted-foreground">
-                              No seller listing photo available for this product ({offerImage.count} active listing
-                              {offerImage.count === 1 ? "" : "s"}).
-                            </p>
+                            <p className="italic text-muted-foreground">PriceCharting image unavailable.</p>
                           )
                         ) : null}
                       </div>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
+                        onClick={() => {
+                          setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
+                          onVisualStatus?.(c.product_id, "user_confirmed", offerImage?.url ?? null);
+                        }}
+                      >
+                        Yes — same card
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_rejected" ? "destructive" : "ghost"}
+                        onClick={() => {
+                          setVisualStatus({ product_id: c.product_id, status: "user_rejected" });
+                          onVisualStatus?.(c.product_id, "user_rejected", offerImage?.url ?? null);
+                        }}
+                      >
+                        No — reject
+                      </Button>
+                      {visualStatus?.product_id === c.product_id && (
+                        <span className="text-xs text-muted-foreground">
+                          Recorded: {visualStatus.status === "user_confirmed" ? "user-confirmed" : "user-rejected"}
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}
@@ -367,6 +400,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
                 {c.conflicts.length > 0 && (
                   <div className="mt-1 text-xs text-destructive">Reason: {c.conflicts.join("; ")}</div>
                 )}
+                <CandidateDebugPanel breakdown={c.breakdown} />
               </div>
             ))}
             <p className="text-xs text-muted-foreground">

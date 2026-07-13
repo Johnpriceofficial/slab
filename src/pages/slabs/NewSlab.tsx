@@ -13,7 +13,8 @@ import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUplo
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
-import { analyzeSlab } from "@/lib/slabs/data";
+import { analyzeSlab, recordPricechartingConfirmation } from "@/lib/slabs/data";
+import { SCORING_VERSION } from "@/lib/pricecharting/matching";
 import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
   GRADERS,
@@ -70,6 +71,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const [id, setId] = useState(EMPTY_IDENTITY);
   const [val, setVal] = useState(EMPTY_VALUATION);
   const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
+  const [visual, setVisual] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected"; imageUrl: string | null } | null>(null);
   const [dup, setDup] = useState<{ id: string; inventory_number: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
@@ -302,6 +304,26 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         pricingWrite,
       );
       if (result.status === "success") {
+        // §4 persist confirmation state + audit event (best-effort, non-fatal).
+        if (pc) {
+          const reviewed = visual && visual.product_id === pc.product_id;
+          const source =
+            pc.match_status === "manual_product_id" || pc.match_status === "manual_product_url"
+              ? pc.match_status
+              : "search_manual";
+          await recordPricechartingConfirmation(result.slab.id, {
+            product_id: pc.product_id,
+            candidate_image_url: reviewed ? visual!.imageUrl : null,
+            candidate_image_source: "marketplace_offer",
+            candidate_image_type: "marketplace_offer_image",
+            candidate_image_available: reviewed ? !!visual!.imageUrl : false,
+            visual_confirmation_status: reviewed ? visual!.status : "metadata_auto_confirmed",
+            visual_confirmation_method: reviewed ? "side_by_side" : null,
+            visual_rejection_reason: null,
+            product_confirmation_source: source,
+            scoring_version: SCORING_VERSION,
+          }).catch(() => {});
+        }
         toast.success(`Saved as Inventory #${result.slab.inventory_number}`);
         navigate(`/slabs/${result.slab.id}`);
       } else if (result.status === "duplicate") {
@@ -446,7 +468,13 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         {/* PriceCharting */}
         <Card className="lg:col-span-2">
           <CardContent className="pt-6">
-            <PriceChartingPanel identity={identity} selectedProductId={pc?.product_id ?? null} onSelect={onSelectPc} />
+            <PriceChartingPanel
+              identity={identity}
+              selectedProductId={pc?.product_id ?? null}
+              onSelect={onSelectPc}
+              frontImageUrl={front?.previewUrl ?? null}
+              onVisualStatus={(product_id, status, imageUrl) => setVisual({ product_id, status, imageUrl })}
+            />
           </CardContent>
         </Card>
 

@@ -43,6 +43,20 @@ export interface Slab {
   pricecharting_raw?: unknown;
   /** Retrieval timestamp of the stored pricing (stale-write guard key). */
   pricecharting_priced_at?: string | null;
+  // §4 visual-confirmation storage (all nullable / additive).
+  candidate_image_url?: string | null;
+  candidate_image_source?: string | null;
+  candidate_image_type?: string | null;
+  candidate_image_retrieved_at?: string | null;
+  candidate_image_available?: boolean | null;
+  visual_confirmation_status?: string | null;
+  visual_confirmation_method?: string | null;
+  visual_confirmation_at?: string | null;
+  visual_confirmation_by?: string | null;
+  visual_rejection_reason?: string | null;
+  product_confirmation_source?: string | null;
+  product_confirmed_at?: string | null;
+  scoring_version?: number | null;
   price_variance_percent: number | null;
   front_image_path: string | null;
   back_image_path: string | null;
