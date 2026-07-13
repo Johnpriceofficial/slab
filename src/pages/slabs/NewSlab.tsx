@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -54,6 +55,11 @@ const EMPTY_VALUATION = {
   notes: "",
   date_valued: new Date().toISOString().slice(0, 10),
 };
+
+/** "PRISTINE" → "Pristine" for tier labels; leaves short codes/numbers intact. */
+function titleCase(s: string): string {
+  return s.replace(/\b([A-Za-z])([A-Za-z]*)\b/g, (_, a, b) => a.toUpperCase() + b.toLowerCase());
+}
 
 /** Human labels + display order for the PriceCharting card price tiers. */
 const PC_TIER_LABELS: Array<[string, string]> = [
@@ -139,6 +145,32 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   };
   const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => setVal((s) => ({ ...s, [k]: v }));
 
+  // Evaluate pricing off the PriceCharting Guide Value the operator entered.
+  // Because the API returns only the ungraded price, an operator will usually
+  // read the exact graded tier off the PriceCharting site and type it here; this
+  // treats it as the exact tier for the slab's grade (Verified) and fills the rest.
+  const applyGuideValuation = () => {
+    const guideCents = dollarsToCents(val.guide);
+    if (guideCents === null) {
+      toast.error("Enter the PriceCharting Guide Value first.");
+      return;
+    }
+    const derived = deriveValuation({
+      guide_cents: guideCents,
+      confidence_score: pc?.confidence_score ?? null,
+      exact_tier_label: exactTierLabel(),
+    });
+    setVal((s) => ({
+      ...s,
+      final: centsToInputString(derived.suggested_final_cents),
+      quick: centsToInputString(derived.quick_sale_cents),
+      replacement: centsToInputString(derived.replacement_cents),
+      confidence: derived.confidence,
+      notes: derived.method,
+    }));
+    toast.success("Valuation evaluated from the PriceCharting Guide Value.");
+  };
+
   // ── Live duplicate certification check (debounced, grader-scoped) ────────
   useEffect(() => {
     const cert = id.certification_number.trim();
@@ -168,16 +200,25 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     [val.final, val.guide],
   );
 
+  // The slab's own exact grade tier label, e.g. "CGC 10 Pristine".
+  const exactTierLabel = () =>
+    [id.grader, id.grade, titleCase(id.grade_label)]
+      .map((s) => s?.trim())
+      .filter(Boolean)
+      .join(" ") || null;
+
   const onSelectPc = (sel: SelectedPriceCharting) => {
     setPc(sel);
     // Auto-derive Quick-Sale / Replacement / Confidence from the CONFIRMED guide
     // value using the documented ratios — never leave confidence on "Manual" when
-    // the numbers actually came from PriceCharting.
+    // the numbers actually came from PriceCharting. A guide value returned at the
+    // slab's own grade is the exact tier → Verified.
     const derived = deriveValuation({
       guide_cents: sel.value_cents,
       confidence_score: sel.confidence_score,
       is_estimate: sel.is_estimate,
       field_meaning: sel.grade_field,
+      exact_tier_label: sel.value_cents !== null ? exactTierLabel() : null,
     });
     setVal((s) => ({
       ...s,
@@ -399,6 +440,40 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Valuation</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* Primary value card — the strict hierarchy: Final Value largest,
+                exact pricing basis directly beneath, then the secondary metrics. */}
+            {val.guide && (
+              <div className="col-span-2 rounded-lg border bg-primary/5 p-4 sm:col-span-4">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-3xl font-bold">{formatCents(dollarsToCents(val.final))}</span>
+                  <span className="text-sm text-muted-foreground">Final Value</span>
+                  {val.confidence === "verified" && (
+                    <Badge className="border-transparent bg-emerald-600 text-white hover:bg-emerald-600">
+                      Exact Match
+                    </Badge>
+                  )}
+                </div>
+                <p className="mt-1 text-sm font-medium">
+                  {exactTierLabel() ? `${exactTierLabel()} — ` : ""}
+                  {val.confidence === "verified" ? "Exact PriceCharting Tier" : "PriceCharting-based valuation"}
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
+                  <Metric label="PriceCharting Guide Value" value={formatCents(dollarsToCents(val.guide))} />
+                  <Metric label="Quick-Sale Value" value={formatCents(dollarsToCents(val.quick))} />
+                  <Metric label="Replacement Value" value={formatCents(dollarsToCents(val.replacement))} />
+                  <Metric
+                    label="Valuation Confidence"
+                    value={VALUATION_CONFIDENCE.find((c) => c.value === val.confidence)?.label ?? val.confidence}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Price Variance: {variance === null ? "—" : `${variance}%`}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Current PriceCharting Guide Value — not a last-sold or eBay-sold price.
+                </p>
+              </div>
+            )}
             <Field label="Final Value ($)">
               <Input value={val.final} onChange={(e) => setValField("final", e.target.value)} inputMode="decimal" />
             </Field>
@@ -411,6 +486,11 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <Field label="PriceCharting Guide Value ($)">
               <Input value={val.guide} onChange={(e) => setValField("guide", e.target.value)} inputMode="decimal" />
             </Field>
+            <div className="col-span-2 flex items-end sm:col-span-4">
+              <Button type="button" variant="secondary" size="sm" onClick={applyGuideValuation} disabled={!val.guide}>
+                Evaluate from PriceCharting Guide Value → Final / Quick-Sale (80%) / Replacement (110%)
+              </Button>
+            </div>
             <Field label="Valuation Confidence">
               <SelectBox value={val.confidence} onChange={(v) => setValField("confidence", v)} options={VALUATION_CONFIDENCE} />
             </Field>
@@ -482,6 +562,16 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
           Save Slab
         </Button>
       </div>
+    </div>
+  );
+}
+
+/** One labelled figure in the primary value card. */
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="font-medium">{value}</p>
     </div>
   );
 }

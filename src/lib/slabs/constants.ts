@@ -26,6 +26,7 @@ export const LABEL_ACCURACY = [
 ] as const;
 
 export const VALUATION_CONFIDENCE = [
+  { value: "verified", label: "Verified" },
   { value: "exact", label: "Exact" },
   { value: "high", label: "High" },
   { value: "probable", label: "Probable" },

@@ -43,6 +43,23 @@ describe("deriveValuation", () => {
     expect(d.suggested_final_cents).toBe(4250);
   });
 
+  it("treats an exact-tier guide as a Verified exact graded-price match", () => {
+    // The Charmander flagship: operator enters the CGC 10 Pristine guide tier.
+    const d = deriveValuation({ guide_cents: 4250, confidence_score: 65, exact_tier_label: "CGC 10 Pristine" });
+    expect(d.confidence).toBe("verified"); // NOT the 65-score 'low'
+    expect(d.suggested_final_cents).toBe(4250); // Final = guide → 0% variance
+    expect(d.quick_sale_cents).toBe(3400);
+    expect(d.replacement_cents).toBe(4675);
+    expect(d.method).toMatch(/Exact graded-price match — CGC 10 Pristine/);
+    expect(d.is_estimate).toBe(false);
+  });
+
+  it("does not upgrade an INTERPOLATED value to Verified even if a tier label is passed", () => {
+    const d = deriveValuation({ guide_cents: 4250, confidence_score: 96, is_estimate: true, exact_tier_label: "CGC 10" });
+    expect(d.confidence).toBe("probable"); // estimate cap wins; not 'verified'
+    expect(d.method).toMatch(/interpolated grade estimate/);
+  });
+
   it("NEVER labels an auto-derived valuation 'manual'", () => {
     const d = deriveValuation({ guide_cents: 5000, confidence_score: 90, field_meaning: "PSA 10" });
     expect(d.confidence).not.toBe("manual");

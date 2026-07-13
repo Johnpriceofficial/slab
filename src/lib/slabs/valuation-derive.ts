@@ -18,7 +18,7 @@
  * "manual" is the only non-derived value — every other level means the figure
  * was derived from a scored PriceCharting match.
  */
-export type ValuationConfidence = "exact" | "high" | "probable" | "low" | "manual";
+export type ValuationConfidence = "verified" | "exact" | "high" | "probable" | "low" | "manual";
 
 /**
  * DOCUMENTED valuation ratios, applied to the Current PriceCharting Guide Value.
@@ -45,6 +45,14 @@ export interface ValuationDeriveInput {
   is_estimate?: boolean;
   /** Human label of the price tier used (e.g. "CGC 10", "General Grade 9"). */
   field_meaning?: string | null;
+  /**
+   * When set, the guide value IS the exact PriceCharting tier for the slab's own
+   * grade (e.g. "CGC 10 Pristine"), whether provided by the API or entered by the
+   * operator from the PriceCharting site. This makes it a Verified exact-tier
+   * match — confidence "verified", method "Exact graded-price match" — regardless
+   * of any identity-match score. Ignored when the guide is null.
+   */
+  exact_tier_label?: string | null;
 }
 
 export interface DerivedValuation {
@@ -111,10 +119,28 @@ export function deriveValuation(input: ValuationDeriveInput): DerivedValuation {
 
   const quick = pct(guide_cents, QUICK_SALE_PERCENTAGE);
   const replacement = pct(guide_cents, REPLACEMENT_VALUE_PERCENTAGE);
-  const confidence = mapMatchConfidenceToValuationConfidence(confidence_score, isEstimate);
   const quickPctLabel = `${Math.round(QUICK_SALE_PERCENTAGE * 100)}%`;
   const replPctLabel = `${Math.round(REPLACEMENT_VALUE_PERCENTAGE * 100)}%`;
+  const exactTier = input.exact_tier_label?.trim();
 
+  // Exact-tier guide (API tier for the slab's grade, or the operator's entry of
+  // the site figure for that grade) → Verified exact graded-price match.
+  if (exactTier && !isEstimate) {
+    return {
+      guide_cents,
+      quick_sale_cents: quick,
+      replacement_cents: replacement,
+      suggested_final_cents: guide_cents,
+      confidence: "verified",
+      is_estimate: false,
+      method:
+        `Exact graded-price match — ${exactTier} guide tier. ` +
+        `Final = guide (0% variance until edited); ` +
+        `Quick-Sale = ${quickPctLabel} of Final; Replacement = ${replPctLabel} of Final.`,
+    };
+  }
+
+  const confidence = mapMatchConfidenceToValuationConfidence(confidence_score, isEstimate);
   const basis = isEstimate
     ? `interpolated grade estimate${tier ? ` (${tier})` : ""}`
     : `confirmed PriceCharting value${tier ? ` (${tier})` : ""}`;
