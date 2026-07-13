@@ -24,7 +24,7 @@ export interface MockDaoState {
   createdNumbers: number[];
 }
 
-function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: string): Slab {
+function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: string | null): Slab {
   return {
     id: `slab-${num}`,
     inventory_number: num,
@@ -55,7 +55,7 @@ function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: stri
     pricecharting_match_status: input.pricecharting_match_status,
     price_variance_percent: input.price_variance_percent,
     front_image_path: `slabs/${num}/front.${frontExt}`,
-    back_image_path: `slabs/${num}/back.${backExt}`,
+    back_image_path: backExt ? `slabs/${num}/back.${backExt}` : null,
     notes: input.notes,
     date_valued: input.date_valued,
     created_at: "2026-07-10T00:00:00Z",
