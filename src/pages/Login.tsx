@@ -1,5 +1,5 @@
 /**
- * Email/password sign-in for GradedCardValue.com admins.
+ * Email/password sign-in for GradedCardValue.com customers and admins.
  *
  * On a successful sign-in the AuthProvider re-verifies admin status; once the
  * status becomes "admin" this page redirects to wherever the user was headed
@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Navigate, useLocation } from "react-router-dom";
+import { Link, Navigate, useLocation, useSearchParams } from "react-router-dom";
 import { PageHead } from "@/components/seo/PageHead";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ interface LocationState {
 export default function Login() {
   const { status, signIn } = useAuth();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -35,12 +36,9 @@ export default function Login() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email, password]);
 
-  const dest = (location.state as LocationState | null)?.from || "/dashboard";
+  const dest = (location.state as LocationState | null)?.from || "/scan-card";
 
-  // Already a confirmed admin → skip the form.
-  if (status === "admin") return <Navigate to={dest} replace />;
-  // Authenticated non-admin → send to the guard's explicit Access Denied page.
-  if (status === "not_admin") return <Navigate to={dest} replace />;
+  if (status === "admin" || status === "customer") return <Navigate to={dest} replace />;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -60,6 +58,11 @@ export default function Login() {
           <CardTitle>Sign in to GradedCardValue.com</CardTitle>
         </CardHeader>
         <CardContent>
+          {searchParams.get("confirmed") === "1" && (
+            <p className="mb-4 rounded-md border border-green-600/30 bg-green-600/5 p-3 text-sm text-green-700">
+              Email confirmed. You can sign in now.
+            </p>
+          )}
           <form onSubmit={onSubmit} className="space-y-4">
             <div className="space-y-1">
               <Label htmlFor="email" className="text-xs">
@@ -97,9 +100,11 @@ export default function Login() {
               Sign in
             </Button>
           </form>
-          <p className="mt-4 text-xs text-muted-foreground">
-            GradedCardValue.com is an admin-only graded-card inventory and valuation tool. Access is restricted to authorized accounts.
-          </p>
+          <div className="mt-4 flex items-center justify-between text-sm">
+            <Link className="text-primary hover:underline" to="/forgot-password">Forgot password?</Link>
+            <Link className="font-medium text-primary hover:underline" to="/signup">Create account</Link>
+          </div>
+          <p className="mt-4 text-xs text-muted-foreground">Each account receives a private card inventory. Your scans are not shared with other customers.</p>
         </CardContent>
       </Card>
     </div>

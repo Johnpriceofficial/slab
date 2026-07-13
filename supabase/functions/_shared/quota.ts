@@ -21,3 +21,23 @@ export async function consumeDailyQuota(bucket: string, limit: number): Promise<
     return true;
   }
 }
+
+/**
+ * Consume a per-user allowance for public customer traffic. Unlike the legacy
+ * admin quota, this fails CLOSED when the database counter is unavailable so a
+ * provider outage cannot turn into unbounded OpenAI spend.
+ */
+export async function consumeUserDailyQuota(userId: string, bucket: string, hardLimit: number): Promise<boolean> {
+  try {
+    const admin = createClient(SUPABASE_URL, SERVICE_KEY);
+    const { data, error } = await admin.rpc("consume_user_daily_quota", {
+      p_user_id: userId,
+      p_bucket: bucket,
+      p_hard_limit: hardLimit,
+    });
+    if (error) return false;
+    return data === true;
+  } catch {
+    return false;
+  }
+}

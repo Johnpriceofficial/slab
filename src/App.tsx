@@ -7,8 +7,12 @@ import { LoadingState } from "@/components/shared/LoadingState";
 import { Button } from "@/components/ui/button";
 import { AuthProvider, useAuth } from "@/auth/AuthProvider";
 import { ProtectedAdminRoute } from "@/components/auth/ProtectedAdminRoute";
+import { ProtectedUserRoute } from "@/components/auth/ProtectedUserRoute";
 
 const Login = lazy(() => import("./pages/Login"));
+const Signup = lazy(() => import("./pages/Signup"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
 const SlabDashboard = lazy(() => import("./pages/slabs/SlabDashboard"));
 const SlabList = lazy(() => import("./pages/slabs/SlabList"));
 const NewSlab = lazy(() => import("./pages/slabs/NewSlab"));
@@ -21,20 +25,20 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 60_000 } },
 });
 
-/** Chrome shown around every protected page: a header with a sign-out control. */
-function AdminHeader() {
-  const { user, signOut } = useAuth();
+/** Shared customer chrome; administrative links only render for admins. */
+function AppHeader() {
+  const { status, user, signOut } = useAuth();
   return (
     <header className="border-b bg-background">
       <div className="container flex min-h-14 flex-wrap items-center justify-between gap-2 py-2">
-        <Link to="/dashboard" className="font-semibold">
+        <Link to={status === "admin" ? "/dashboard" : "/scan-card"} className="font-semibold">
           GradedCardValue.com
         </Link>
         <nav className="order-3 flex w-full items-center justify-center gap-1 border-t pt-2 sm:order-none sm:w-auto sm:border-0 sm:pt-0" aria-label="Main navigation">
           <Button variant="ghost" size="sm" asChild><Link to="/scan-card"><Camera /> Scan Card</Link></Button>
-          <Button variant="ghost" size="sm" asChild><Link to="/dashboard"><LayoutDashboard /> Dashboard</Link></Button>
           <Button variant="ghost" size="sm" asChild><Link to="/cards"><Images /> Cards</Link></Button>
-          <Button variant="ghost" size="sm" asChild><Link to="/slabs"><PackageSearch /> Slabs</Link></Button>
+          {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/dashboard"><LayoutDashboard /> Dashboard</Link></Button>}
+          {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/slabs"><PackageSearch /> Slabs</Link></Button>}
         </nav>
         <div className="flex items-center gap-3 text-sm">
           {user?.email && <span className="text-muted-foreground">{user.email}</span>}
@@ -51,9 +55,18 @@ function AdminHeader() {
 function ProtectedAdminLayout() {
   return (
     <ProtectedAdminRoute>
-      <AdminHeader />
+      <AppHeader />
       <Outlet />
     </ProtectedAdminRoute>
+  );
+}
+
+function ProtectedUserLayout() {
+  return (
+    <ProtectedUserRoute>
+      <AppHeader />
+      <Outlet />
+    </ProtectedUserRoute>
   );
 }
 
@@ -66,17 +79,22 @@ export default function App() {
           <Suspense fallback={<div className="container py-12"><LoadingState message="Loading…" /></div>}>
             <Routes>
               <Route path="/login" element={<Login />} />
-              <Route element={<ProtectedAdminLayout />}>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<SlabDashboard />} />
-                <Route path="/slabs" element={<SlabList />} />
-                <Route path="/slabs/new" element={<NewSlab />} />
-                <Route path="/slabs/:id" element={<SlabDetail />} />
+              <Route path="/signup" element={<Signup />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/" element={<Navigate to="/scan-card" replace />} />
+              <Route element={<ProtectedUserLayout />}>
                 <Route path="/scan-card" element={<ScanCard />} />
                 <Route path="/cards" element={<CardList />} />
                 <Route path="/cards/:id" element={<CardDetail />} />
               </Route>
-              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              <Route element={<ProtectedAdminLayout />}>
+                <Route path="/dashboard" element={<SlabDashboard />} />
+                <Route path="/slabs" element={<SlabList />} />
+                <Route path="/slabs/new" element={<NewSlab />} />
+                <Route path="/slabs/:id" element={<SlabDetail />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/scan-card" replace />} />
             </Routes>
           </Suspense>
         </BrowserRouter>

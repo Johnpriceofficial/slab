@@ -4,8 +4,8 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2.110.2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
-import { consumeDailyQuota } from "../_shared/quota.ts";
+import { forbiddenResponse, getCallerUser, unauthorizedResponse } from "../_shared/auth.ts";
+import { consumeUserDailyQuota } from "../_shared/quota.ts";
 import {
   CARD_SCAN_SCHEMA_VERSION,
   classifyCardScan,
@@ -18,6 +18,8 @@ import {
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
 const MODEL = Deno.env.get("OPENAI_SCAN_MODEL") ?? Deno.env.get("OPENAI_ANALYZE_MODEL") ?? "gpt-5.6-terra";
+// Hard ceiling across all customer plans. Each profile's lower plan allowance
+// is applied atomically by consume_user_daily_quota.
 const DAILY_LIMIT = Number(Deno.env.get("SCAN_DAILY_LIMIT") ?? "300");
 const MAX_BYTES = 10 * 1024 * 1024;
 const BUCKET = "card-scans";
@@ -136,9 +138,10 @@ function isJpeg(bytes: Uint8Array): boolean {
   return bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 }
 
-async function duplicatesFor(admin: ReturnType<typeof createClient>, extraction: CardScanExtraction) {
+async function duplicatesFor(admin: ReturnType<typeof createClient>, userId: string, extraction: CardScanExtraction) {
   const { data, error } = await admin.from("cards")
     .select("id,card_name,set_name,card_number,created_at")
+    .eq("created_by", userId)
     .eq("card_name_normalized", normalizeIdentity(extraction.card_name))
     .eq("set_name_normalized", normalizeIdentity(extraction.set_name))
     .eq("card_number_normalized", normalizeCardNumber(extraction.card_number))
@@ -178,7 +181,7 @@ async function createReview(admin: ReturnType<typeof createClient>, userId: stri
 async function processCapture(req: Request, userId: string, admin: ReturnType<typeof createClient>): Promise<Response> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
   if (!apiKey) return json({ status: "error", error_code: "NOT_CONFIGURED", message: "OpenAI card scanning is not configured." }, 502);
-  if (!(await consumeDailyQuota("scan-card-openai", DAILY_LIMIT))) {
+  if (!(await consumeUserDailyQuota(userId, "scan-card-openai", DAILY_LIMIT))) {
     return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily card-scan limit reached. Try again tomorrow." }, 429);
   }
 
@@ -216,7 +219,7 @@ async function processCapture(req: Request, userId: string, admin: ReturnType<ty
   try {
     const result = await analyzeCard(apiKey, bytes);
     const extraction = result.extraction;
-    const duplicates = await duplicatesFor(admin, extraction);
+    const duplicates = await duplicatesFor(admin, userId, extraction);
     const hasRequiredIdentity = [extraction.card_name, extraction.set_name, extraction.card_number]
       .every((value) => value.trim().length > 0);
     const decision = hasRequiredIdentity ? classifyCardScan(extraction.confidence, duplicates.length) : "needs_review";
@@ -390,7 +393,7 @@ async function handleAction(body: Record<string, unknown>, userId: string, admin
     if (!extraction) return json({ status: "error", error_code: "INVALID_CORRECTION", message: "Card name, set, and number are required." }, 400);
     const { data: existing } = await admin.from("cards").select("id").eq("source_scan_id", scanId).maybeSingle();
     if (existing) return json({ status: "added", scan_id: scanId, card: existing, extraction });
-    const duplicates = await duplicatesFor(admin, extraction);
+    const duplicates = await duplicatesFor(admin, userId, extraction);
     if (duplicates.length > 0 && body.add_anyway !== true) {
       return json({ status: "possible_duplicate", scan_id: scanId, extraction, duplicates });
     }
@@ -408,10 +411,18 @@ async function handleAction(body: Record<string, unknown>, userId: string, admin
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json({ status: "error", error_code: "METHOD_NOT_ALLOWED", message: "POST required." }, 405);
-  const { user, isAdmin } = await isCallerAdmin(req);
+  const user = await getCallerUser(req);
   if (!user) return unauthorizedResponse(corsHeaders);
-  if (!isAdmin) return json({ status: "error", error_code: "NOT_AUTHORIZED", message: "Admin access required." }, 403);
+  if (!user.email_confirmed_at) return forbiddenResponse(corsHeaders, "Verify your email before using the scanner.");
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const { data: profile, error: profileError } = await admin.from("customer_profiles")
+    .select("account_status")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (profileError) return json({ status: "error", error_code: "ACCOUNT_LOOKUP_FAILED", message: "Account status could not be verified." }, 503);
+  if (!profile || profile.account_status !== "active") {
+    return forbiddenResponse(corsHeaders, "This customer account is not active.");
+  }
 
   try {
     const contentType = req.headers.get("content-type") ?? "";

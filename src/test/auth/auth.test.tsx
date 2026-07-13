@@ -10,8 +10,9 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth, type AuthClient } from "@/auth/AuthProvider";
 import { ProtectedAdminRoute } from "@/components/auth/ProtectedAdminRoute";
+import { ProtectedUserRoute } from "@/components/auth/ProtectedUserRoute";
 
-type Session = { user: { id: string; email?: string | null } } | null;
+type Session = { user: { id: string; email?: string | null; email_confirmed_at?: string | null } } | null;
 
 interface FakeOpts {
   initialSession?: Session;
@@ -31,6 +32,9 @@ function makeClient(opts: FakeOpts = {}) {
         return { data: { subscription: { unsubscribe: () => {} } } };
       },
       signInWithPassword: async () => ({ error: opts.signInError ? { message: opts.signInError } : null }),
+      signUp: async () => ({ data: { session: null }, error: null }),
+      resetPasswordForEmail: async () => ({ error: null }),
+      updateUser: async () => ({ error: null }),
       signOut: async () => ({ error: null }),
     },
     rpc: async (_fn, args) => {
@@ -66,6 +70,7 @@ function renderRoutes(client: AuthClient, entry = "/dashboard") {
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
           <Route path="/login" element={<div>LOGIN PAGE</div>} />
+          <Route path="/scan-card" element={<ProtectedUserRoute><div>CUSTOMER SCANNER</div></ProtectedUserRoute>} />
           <Route
             path="/dashboard"
             element={
@@ -97,22 +102,29 @@ describe("AuthProvider status machine", () => {
     expect(screen.getByTestId("email")).toHaveTextContent("admin@slabvault.test");
   });
 
-  it("authenticated non-admin → not_admin", async () => {
+  it("authenticated non-admin → customer", async () => {
     const { client } = makeClient({ initialSession: userSession, adminIds: [] });
     renderProbe(client);
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("not_admin"));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("customer"));
   });
 
-  it("failed/invalid admin verification fails closed → not_admin", async () => {
+  it("failed/invalid admin verification remains a customer, never an admin", async () => {
     const { client } = makeClient({ initialSession: adminSession, adminIds: ["admin-1"], rpcErrors: true });
     renderProbe(client);
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("not_admin"));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("customer"));
+  });
+
+  it("unconfirmed email → unverified", async () => {
+    const unverified: Session = { user: { id: "user-3", email: "new@example.test", email_confirmed_at: null } };
+    const { client } = makeClient({ initialSession: unverified });
+    renderProbe(client);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("unverified"));
   });
 
   it("session refresh re-verifies admin and can promote", async () => {
     const { client, admins, emit } = makeClient({ initialSession: userSession, adminIds: [] });
     renderProbe(client);
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("not_admin"));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("customer"));
     // Account is granted admin, then a refreshed session arrives.
     admins.add("user-2");
     emit(userSession);
@@ -155,5 +167,11 @@ describe("ProtectedAdminRoute", () => {
     renderRoutes(client);
     expect(await screen.findByText("Access denied")).toBeInTheDocument();
     expect(screen.queryByText("SECRET DASHBOARD")).not.toBeInTheDocument();
+  });
+
+  it("authenticated customer can open the scanner route", async () => {
+    const { client } = makeClient({ initialSession: userSession, adminIds: [] });
+    renderRoutes(client, "/scan-card");
+    expect(await screen.findByText("CUSTOMER SCANNER")).toBeInTheDocument();
   });
 });

@@ -69,4 +69,25 @@ describe("live card scanner", () => {
     expect(app).toContain('path="/cards"');
     expect(app).toContain('path="/cards/:id"');
   });
+
+  it("isolates duplicate checks and quota consumption by authenticated owner", () => {
+    const edge = readFileSync("supabase/functions/scan-card/index.ts", "utf8");
+    const quota = readFileSync("supabase/functions/_shared/quota.ts", "utf8");
+    expect(edge).toContain('.eq("created_by", userId)');
+    expect(edge).toContain("consumeUserDailyQuota(userId");
+    expect(edge).toContain("getCallerUser(req)");
+    expect(edge).toContain("user.email_confirmed_at");
+    expect(edge).not.toContain("isCallerAdmin(req)");
+    expect(quota).toContain('admin.rpc("consume_user_daily_quota"');
+  });
+
+  it("defines public customer profiles, owner-only reads, and service-only quota RPC", () => {
+    const migration = readFileSync("supabase/migrations/20260802000000_public_customer_accounts.sql", "utf8");
+    expect(migration).toContain("create table public.customer_profiles");
+    expect(migration).toContain("create table public.api_user_daily_usage");
+    expect(migration).toContain("created_by = (select auth.uid())");
+    expect(migration).toContain('and (storage.foldername(name))[1] = (select auth.uid())::text');
+    expect(migration).toContain("revoke all on function public.consume_user_daily_quota(uuid, text, integer) from public, anon, authenticated");
+    expect(migration).toContain("grant execute on function public.consume_user_daily_quota(uuid, text, integer) to service_role");
+  });
 });

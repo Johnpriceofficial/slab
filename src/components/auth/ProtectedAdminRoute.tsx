@@ -3,8 +3,7 @@
  *
  *  loading    → a spinner (never flash protected content while deciding)
  *  signed_out → redirect to /login (remembering where they were headed)
- *  not_admin  → an explicit Access Denied page (NOT a silent redirect, so an
- *               authenticated non-admin gets a clear reason)
+ *  customer   → an explicit Access Denied page
  *  admin      → the protected content
  *
  * This complements — never replaces — the backend RLS + Edge Function admin
@@ -32,17 +31,18 @@ export function ProtectedAdminRoute({ children }: { children: React.ReactNode })
     return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   }
 
-  if (status === "not_admin") {
+  if (status === "customer" || status === "unverified") {
     return (
       <div className="container max-w-md py-20 text-center">
         <h1 className="mb-2 text-2xl font-bold">Access denied</h1>
         <p className="mb-6 text-sm text-muted-foreground">
           You are signed in as <span className="font-medium">{user?.email ?? "an unknown account"}</span>, but this
-          account is not authorized for GradedCardValue.com. Ask an administrator to grant your account access.
+          account can use the card scanner, but it is not authorized for administrative slab or marketplace tools.
         </p>
-        <Button variant="outline" onClick={() => void signOut()}>
-          Sign out
-        </Button>
+        <div className="flex justify-center gap-2">
+          {status === "customer" && <Button asChild><a href="/scan-card">Open scanner</a></Button>}
+          <Button variant="outline" onClick={() => void signOut()}>Sign out</Button>
+        </div>
       </div>
     );
   }

@@ -1,25 +1,24 @@
 /**
- * Frontend authentication + admin gating for GradedCardValue.com.
+ * Frontend authentication for GradedCardValue.com customers and admins.
  *
  * This is DEFENSE IN DEPTH, not the only line of defence: the database RLS
- * policies and the Edge Function's `isCallerAdmin` check already prevent any
- * non-admin from reading or writing data. This provider adds the missing
- * frontend pieces — a real session, an explicit admin verification via
- * `is_admin(auth.uid())`, and the state a route guard needs so the app is
- * usable and protected routes can't render for the wrong user.
+ * policies and Edge Functions remain authoritative. This provider owns the
+ * browser session, exposes customer account actions, and separately resolves
+ * the immutable app-metadata admin role.
  *
  * Auth status is a small state machine:
  *   loading    — initial session read / admin check in flight
  *   signed_out — no Supabase session
- *   not_admin  — authenticated, but not in the slab_admins allowlist
+ *   unverified — authenticated session whose email is not confirmed
+ *   customer   — verified authenticated customer
  *   admin      — authenticated AND confirmed admin (the only state that may
- *                render protected content)
+ *                render administrative slab/marketplace content)
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
-export type AuthStatus = "loading" | "signed_out" | "not_admin" | "admin";
+export type AuthStatus = "loading" | "signed_out" | "unverified" | "customer" | "admin";
 
 export interface AuthUser {
   id: string;
@@ -27,7 +26,7 @@ export interface AuthUser {
 }
 
 /** A Supabase auth session, narrowed to the fields this provider reads. */
-export type AuthSession = { user: { id: string; email?: string | null } } | null;
+export type AuthSession = { user: { id: string; email?: string | null; email_confirmed_at?: string | null } } | null;
 
 /**
  * The slice of the Supabase client this provider needs. The real `supabase`
@@ -40,6 +39,12 @@ export interface AuthClient {
       cb: (event: string, session: AuthSession) => void,
     ): { data: { subscription: { unsubscribe(): void } } };
     signInWithPassword(creds: { email: string; password: string }): Promise<{ error: { message: string } | null }>;
+    signUp(input: { email: string; password: string; options?: { emailRedirectTo?: string } }): Promise<{
+      data: { session: AuthSession };
+      error: { message: string } | null;
+    }>;
+    resetPasswordForEmail(email: string, options?: { redirectTo?: string }): Promise<{ error: { message: string } | null }>;
+    updateUser(input: { password: string }): Promise<{ error: { message: string } | null }>;
     signOut(): Promise<{ error: { message: string } | null }>;
   };
   rpc(fn: string, args: Record<string, unknown>): Promise<{ data: unknown; error: unknown }>;
@@ -50,6 +55,9 @@ export interface AuthContextValue {
   user: AuthUser | null;
   /** Attempt an email/password sign-in. Resolves with an error message or null. */
   signIn(email: string, password: string): Promise<string | null>;
+  signUp(email: string, password: string): Promise<{ error: string | null; needsVerification: boolean }>;
+  requestPasswordReset(email: string): Promise<string | null>;
+  updatePassword(password: string): Promise<string | null>;
   signOut(): Promise<void>;
 }
 
@@ -79,7 +87,7 @@ export function AuthProvider({
   const generation = useRef(0);
 
   const resolveSession = useCallback(
-    async (session: { user: { id: string; email?: string | null } } | null) => {
+    async (session: { user: { id: string; email?: string | null; email_confirmed_at?: string | null } } | null) => {
       const gen = ++generation.current;
       if (!session?.user) {
         setUser(null);
@@ -88,11 +96,15 @@ export function AuthProvider({
       }
       const nextUser: AuthUser = { id: session.user.id, email: session.user.email ?? null };
       setUser(nextUser);
+      if (session.user.email_confirmed_at === null) {
+        setStatus("unverified");
+        return;
+      }
       setStatus("loading");
       const isAdmin = await checkAdmin(client, session.user.id);
       // A newer auth event superseded this check — discard the stale result.
       if (gen !== generation.current) return;
-      setStatus(isAdmin ? "admin" : "not_admin");
+      setStatus(isAdmin ? "admin" : "customer");
     },
     [client],
   );
@@ -134,9 +146,26 @@ export function AuthProvider({
     setStatus("signed_out");
   }, [client]);
 
+  const signUp = useCallback(async (email: string, password: string) => {
+    const emailRedirectTo = typeof window === "undefined" ? undefined : `${window.location.origin}/login?confirmed=1`;
+    const { data, error } = await client.auth.signUp({ email, password, options: { emailRedirectTo } });
+    return { error: error?.message ?? null, needsVerification: !error && !data.session };
+  }, [client]);
+
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const redirectTo = typeof window === "undefined" ? undefined : `${window.location.origin}/reset-password`;
+    const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo });
+    return error?.message ?? null;
+  }, [client]);
+
+  const updatePassword = useCallback(async (password: string) => {
+    const { error } = await client.auth.updateUser({ password });
+    return error?.message ?? null;
+  }, [client]);
+
   const value = useMemo<AuthContextValue>(
-    () => ({ status, user, signIn, signOut }),
-    [status, user, signIn, signOut],
+    () => ({ status, user, signIn, signUp, requestPasswordReset, updatePassword, signOut }),
+    [status, user, signIn, signUp, requestPasswordReset, updatePassword, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
