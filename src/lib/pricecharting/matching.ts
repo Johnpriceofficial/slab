@@ -419,6 +419,17 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
     }
 
     let charHard = false;
+    let languageHard = false;
+    if (id.key === "language") {
+      const known = ["japanese", "korean", "english", "chinese"];
+      const wantedLanguage = known.find((l) => normalizeText(id.value).includes(l));
+      const candidateLanguage = known.find((l) => hay.includes(l));
+      if (wantedLanguage && candidateLanguage && wantedLanguage !== candidateLanguage) {
+        hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateLanguage}`);
+        disqualified = true;
+        languageHard = true;
+      }
+    }
     if (id.key === "card_name") {
       const cm = characterMatch(id.value, product.name);
       if (cm.wanted.length > 0 && !cm.ok) {
@@ -448,7 +459,7 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       normalized_requested_value: normalizeText(id.value),
       normalized_candidate_value: hay,
       result: charHard ? "mismatch" : coverage >= 0.99 ? "exact" : coverage > 0 ? "partial" : "missing",
-      hard_conflict: charHard,
+      hard_conflict: charHard || languageHard,
       points_possible: id.weight,
       points_awarded: fieldAward,
       explanation:

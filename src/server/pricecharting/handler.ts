@@ -27,7 +27,7 @@ import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreN
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
-import { scrapeCatalogImage } from "../../lib/pricecharting/catalog-image";
+import { scrapeCatalogImage, scrapePublicGuidePrice } from "../../lib/pricecharting/catalog-image";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
 import type { CardItemInput, GradingCompany, RawProduct } from "../../lib/pricecharting/types";
 
@@ -181,6 +181,7 @@ export interface ValueResponse {
   console_or_category: string | null;
   grade_field: string | null;
   guide_value_cents: number | null;
+  price_source: "api" | "public_product_page" | "unavailable";
   company_specific: boolean;
   is_estimate: boolean;
   /** Normalized tier the value came from ("cgc_10"); NEVER a designation the API lacks. */
@@ -247,6 +248,7 @@ export interface LookupResponse {
   number_exact_full: boolean;
   grade_field: string | null;
   guide_value_cents: number | null;
+  price_source: "api" | "public_product_page" | "unavailable";
   company_specific: boolean;
   is_estimate: boolean;
   selected_tier_key: string | null;
@@ -389,7 +391,7 @@ export async function handlePriceChartingRequest(
   try {
     const client = makeClient(deps);
     if (action === "value") {
-      return await handleValue(client, input);
+      return await handleValue(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
     }
     if (action === "offer_image") {
       return await handleOfferImage(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
@@ -540,7 +542,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
   return { statusCode: 200, body };
 }
 
-async function handleValue(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+async function handleValue(client: PriceChartingClient, input: SlabSearchInput, fetchImpl: FetchLike): Promise<HandlerResult> {
   const productId = input.product_id?.trim();
   if (!productId) {
     throw new PriceChartingError("MISSING_PARAMETER", "product_id is required to retrieve a verified value.");
@@ -562,10 +564,14 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
   );
 
   const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card", designation: input.grade_label });
+  const publicPick = lookup.value_pennies === null
+    ? await scrapePublicGuidePrice(fetchImpl, product, grader, grade, input.grade_label)
+    : null;
   const availableCents: Record<string, number | null> = {};
   for (const [k, v] of Object.entries(lookup.nearby_values)) {
     availableCents[k] = v === null ? null : Math.round(v * 100);
   }
+  if (publicPick) availableCents[publicPick.tier_key] = publicPick.value_cents;
 
   const body: ValueResponse = {
     status: "success",
@@ -573,20 +579,22 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
     product_id: product.pricecharting_id,
     product_name: product.name,
     console_or_category: product.console_or_category,
-    grade_field: lookup.field_used,
-    guide_value_cents: lookup.value_pennies,
+    grade_field: publicPick?.field ?? lookup.field_used,
+    guide_value_cents: publicPick?.value_cents ?? lookup.value_pennies,
+    price_source: publicPick ? "public_product_page" : lookup.value_pennies !== null ? "api" : "unavailable",
     company_specific: lookup.company_specific,
     is_estimate: lookup.is_estimate,
-    selected_tier_key: lookup.selected_tier_key,
-    selected_tier_label: lookup.selected_tier_label,
+    selected_tier_key: publicPick?.tier_key ?? lookup.selected_tier_key,
+    selected_tier_label: publicPick?.tier_label ?? lookup.selected_tier_label,
     designation_requested: lookup.designation_requested,
-    designation_exact: lookup.designation_exact,
-    tier_availability: lookup.value_pennies === null ? "tier_unavailable" : "available",
+    designation_exact: publicPick?.designation_exact ?? lookup.designation_exact,
+    tier_availability: publicPick || lookup.value_pennies !== null ? "available" : "tier_unavailable",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
-      ...lookup.warnings,
+      ...(publicPick ? ["The API omitted this requested tier; SlabVault synchronized the current guide from the confirmed PriceCharting public product page."] : []),
+      ...lookup.warnings.filter((w) => !publicPick || !/unavailable from the connected PriceCharting source/i.test(w)),
     ],
   };
   return { statusCode: 200, body };
@@ -703,8 +711,12 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput,
   const grader = item.grading_company;
   const grade = item.grade ?? null;
   const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card", designation: input.grade_label });
+  const publicPick = lookup.value_pennies === null
+    ? await scrapePublicGuidePrice(fetchImpl, product, grader, grade, input.grade_label)
+    : null;
   const availableCents: Record<string, number | null> = {};
   for (const [k, v] of Object.entries(lookup.nearby_values)) availableCents[k] = v === null ? null : Math.round(v * 100);
+  if (publicPick) availableCents[publicPick.tier_key] = publicPick.value_cents;
   const salesVolume = numberOrNull(
     raw["sales-volume"] ?? raw["sale-volume"] ?? raw["salesVolume"] ?? raw["sales_volume"],
   );
@@ -745,15 +757,16 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput,
     conflicts: scored.conflicts,
     character_exact: scored.characterExact,
     number_exact_full: scored.numberExactFull,
-    grade_field: lookup.field_used,
-    guide_value_cents: lookup.value_pennies,
+    grade_field: publicPick?.field ?? lookup.field_used,
+    guide_value_cents: publicPick?.value_cents ?? lookup.value_pennies,
+    price_source: publicPick ? "public_product_page" : lookup.value_pennies !== null ? "api" : "unavailable",
     company_specific: lookup.company_specific,
     is_estimate: lookup.is_estimate,
-    selected_tier_key: lookup.selected_tier_key,
-    selected_tier_label: lookup.selected_tier_label,
+    selected_tier_key: publicPick?.tier_key ?? lookup.selected_tier_key,
+    selected_tier_label: publicPick?.tier_label ?? lookup.selected_tier_label,
     designation_requested: lookup.designation_requested,
-    designation_exact: lookup.designation_exact,
-    tier_availability: lookup.value_pennies === null ? "tier_unavailable" : "available",
+    designation_exact: publicPick?.designation_exact ?? lookup.designation_exact,
+    tier_availability: publicPick || lookup.value_pennies !== null ? "available" : "tier_unavailable",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     offer_image_url: offerImageUrl,
@@ -763,10 +776,11 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput,
     breakdown: scored.breakdown,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
+      ...(publicPick ? ["The API omitted this requested tier; SlabVault synchronized the current guide from the confirmed PriceCharting public product page."] : []),
       ...(scored.disqualified
         ? [`This product HARD-CONFLICTS with the slab identity (${scored.conflicts.join("; ")}) — do not link without review.`]
         : []),
-      ...lookup.warnings,
+      ...lookup.warnings.filter((w) => !publicPick || !/unavailable from the connected PriceCharting source/i.test(w)),
     ],
   };
   return { statusCode: 200, body };

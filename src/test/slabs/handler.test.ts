@@ -151,6 +151,20 @@ describe("handler — value", () => {
     expect(res.statusCode).toBe(400);
     expect(res.body.status).toBe("error");
   });
+
+  it("syncs a missing API Grade 9 tier from the confirmed public product page", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/product?", { json: CARD_ROW({ id: "10085339", "product-name": "Alakazam #71", "console-name": "Pokemon Japanese Mega Symphonia", "graded-price": undefined }) });
+    mock.enqueue("/game/pokemon-japanese-mega-symphonia/alakazam-71", { text: "<h2>Full Price Guide</h2> Grade 9 $16.01 Grade 9.5 $18.00" });
+    const res = await handlePriceChartingRequest({ action: "value", product_id: "10085339", grader: "CGC", grade: 9, grade_label: "MINT" }, deps(mock));
+    if (res.body.status === "success" && res.body.action === "value") {
+      expect(res.body.guide_value_cents).toBe(1601);
+      expect(res.body.grade_field).toBe("graded-price");
+      expect(res.body.price_source).toBe("public_product_page");
+      expect(res.body.designation_exact).toBe(false);
+      expect(res.body.available_values_cents.grade_9_general).toBe(1601);
+    } else throw new Error("expected value response");
+  });
 });
 
 describe("handler — token safety", () => {

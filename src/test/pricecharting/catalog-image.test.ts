@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProductPageUrl, extractCatalogImage } from "@/lib/pricecharting/catalog-image";
+import { buildProductPageUrl, extractCatalogImage, extractPublicGuidePrice } from "@/lib/pricecharting/catalog-image";
 import type { Product } from "@/lib/pricecharting/types";
 
 const product: Product = {
@@ -40,5 +40,17 @@ describe("PriceCharting public-page catalog image fallback", () => {
 
   it("rejects images from untrusted hosts", () => {
     expect(extractCatalogImage('<meta property="og:image" content="https://evil.example/card.jpg">')).toBeNull();
+  });
+
+  it("extracts a compatible Grade 9 guide and an exact CGC Pristine guide", () => {
+    const html = `<section><h2>Full Price Guide</h2>
+      Grade 9 $16.01 Grade 9.5 $18.00 CGC 10 $20.50 PSA 10 $47.04 CGC 10 Pristine $24.99
+    </section>`;
+    expect(extractPublicGuidePrice(html, "CGC", 9, "MINT")).toMatchObject({
+      value_cents: 1601, field: "graded-price", tier_key: "grade_9_general", designation_exact: false,
+    });
+    expect(extractPublicGuidePrice(html, "CGC", 10, "PRISTINE")).toMatchObject({
+      value_cents: 2499, field: "public-cgc-10-pristine", tier_key: "cgc_10_pristine", designation_exact: true,
+    });
   });
 });
