@@ -27,6 +27,7 @@ import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreN
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
+import { scrapeCatalogImage } from "../../lib/pricecharting/catalog-image";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
 import type { CardItemInput, GradingCompany, RawProduct } from "../../lib/pricecharting/types";
 
@@ -391,10 +392,10 @@ export async function handlePriceChartingRequest(
       return await handleValue(client, input);
     }
     if (action === "offer_image") {
-      return await handleOfferImage(client, input);
+      return await handleOfferImage(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
     }
     if (action === "lookup") {
-      return await handleLookup(client, input);
+      return await handleLookup(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
     }
     return await handleSearch(client, input);
   } catch (err) {
@@ -598,7 +599,7 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
  * canonical image and not proof the operator's slab is that product. It is
  * frequently unavailable (nobody is selling it).
  */
-async function handleOfferImage(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+async function handleOfferImage(client: PriceChartingClient, input: SlabSearchInput, fetchImpl: FetchLike): Promise<HandlerResult> {
   const productId = input.product_id?.trim();
   if (!productId) {
     throw new PriceChartingError("MISSING_PARAMETER", "product_id is required to fetch a listing photo.");
@@ -608,16 +609,28 @@ async function handleOfferImage(client: PriceChartingClient, input: SlabSearchIn
     return { statusCode: httpStatusFor(result.error_code), body: result };
   }
   const image = result as { image_url: string | null; listing_count: number };
+  let imageUrl = image.image_url;
+  let imageSource: ImageSource = imageUrl ? "marketplace_offer" : "none";
+  if (!imageUrl) {
+    try {
+      const raw = await client.request<RawProduct>({ endpoint: "product", method: "GET", params: { id: productId } });
+      imageUrl = await scrapeCatalogImage(fetchImpl, normalizeProduct(raw));
+      if (imageUrl) imageSource = "official_product";
+    } catch {
+      /* Public-page fallback is best-effort. */
+    }
+  }
   const body: OfferImageResponse = {
     status: "success",
     action: "offer_image",
     product_id: productId,
-    offer_image_url: image.image_url,
+    offer_image_url: imageUrl,
     offer_listing_count: image.listing_count,
-    image_source: image.image_url ? "marketplace_offer" : "none",
+    image_source: imageSource,
     warnings: [
-      "Seller listing photo from the PriceCharting Marketplace — a copy of this product offered by a seller, " +
-        "not a canonical image and not proof this is your exact card. Confirm identity by the metadata fields.",
+      imageSource === "official_product"
+        ? "Catalog card image scraped from the confirmed PriceCharting product page — it shows the raw card artwork, not your graded slab. Confirm identity by metadata too."
+        : "Seller listing photo from the PriceCharting Marketplace — a copy of this product offered by a seller, not a canonical image and not proof this is your exact card. Confirm identity by the metadata fields.",
     ],
   };
   return { statusCode: 200, body };
@@ -654,7 +667,7 @@ async function resolveSlugToId(
   return match?.pricecharting_id ?? null;
 }
 
-async function handleLookup(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+async function handleLookup(client: PriceChartingClient, input: SlabSearchInput, fetchImpl: FetchLike): Promise<HandlerResult> {
   // A numeric id resolves directly; a canonical slug URL is resolved via the API
   // (no scraping) by querying the slug words and matching the product's own slug.
   let id = parseProductId(input);
@@ -698,15 +711,21 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
 
   let offerImageUrl: string | null = null;
   let offerListingCount = 0;
+  let imageSource: ImageSource = "none";
   try {
     const img = await getBestOfferImageForProduct(client, id);
     if (!("status" in img) || img.status !== "error") {
       const i = img as { image_url: string | null; listing_count: number };
       offerImageUrl = i.image_url;
       offerListingCount = i.listing_count;
+      if (offerImageUrl) imageSource = "marketplace_offer";
     }
   } catch {
     /* image is best-effort; never fails the lookup */
+  }
+  if (!offerImageUrl) {
+    offerImageUrl = await scrapeCatalogImage(fetchImpl, product);
+    if (offerImageUrl) imageSource = "official_product";
   }
 
   const threshold = requiresHighConfidence(item) ? 85 : 70;
@@ -739,7 +758,7 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
     available_values_cents: availableCents,
     offer_image_url: offerImageUrl,
     offer_listing_count: offerListingCount,
-    image_source: offerImageUrl ? "marketplace_offer" : "none",
+    image_source: imageSource,
     requires_confirmation: requiresConfirmation,
     breakdown: scored.breakdown,
     warnings: [

@@ -471,10 +471,13 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                             </p>
                           ) : offerImage.url ? (
                             <>
-                              <img src={offerImage.url} alt={`Marketplace offer image for ${c.product_name}`} loading="lazy" className="max-h-40 rounded border object-contain" />
+                              <img src={offerImage.url} alt={`PriceCharting image for ${c.product_name}`} loading="lazy" className="max-h-40 rounded border object-contain" />
                               <p className="text-[10px] text-muted-foreground">
-                                <strong>Marketplace offer image</strong> (a seller's photo) — supporting evidence, not an
-                                official catalog image, and it never overrides a metadata conflict.
+                                {offerImage.source === "official_product" ? (
+                                  <><strong>PriceCharting catalog image</strong> (scraped fallback) — raw card artwork, not your graded slab.</>
+                                ) : (
+                                  <><strong>Marketplace offer image</strong> (a seller's photo) — supporting evidence, not an official catalog image.</>
+                                )} It never overrides a metadata conflict.
                               </p>
                             </>
                           ) : (
@@ -484,12 +487,11 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                       </div>
                     </div>
                     {!(offerImage && offerImage.product_id === c.product_id && offerImage.url) && (
-                      // No marketplace photo from the connected source → the visual
+                      // No image from the connected source or public-page fallback → the visual
                       // "Yes — same exact artwork" affordance is disabled entirely.
                       <p className="mt-2 text-xs italic text-muted-foreground">
                         Visual confirmation unavailable — no product image is available from the connected PriceCharting
-                        source (the Prices API exposes no official catalog image, and no marketplace seller photo was
-                        found). Confirm by the metadata fields only.
+                        source or public product page. Confirm by the metadata fields only.
                       </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -653,7 +655,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
               {recovered.offer_image_url ? (
                 <img
                   src={recovered.offer_image_url}
-                  alt={`Seller listing photo for ${recovered.product_name}`}
+                  alt={`PriceCharting product image for ${recovered.product_name}`}
                   loading="lazy"
                   className="mt-2 max-h-40 rounded border object-contain"
                 />

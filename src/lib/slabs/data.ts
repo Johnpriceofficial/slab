@@ -363,9 +363,8 @@ export async function priceChartingValue(
 }
 
 /**
- * Fetch a seller listing photo for a confirmed product, for visual (metadata +
- * photo) confirmation. Best-effort: the image is a marketplace seller's photo of
- * their copy of the same catalog product — often absent — never a canonical image.
+ * Fetch an image for a confirmed product. Uses a marketplace seller photo first,
+ * then a best-effort catalog-image scrape of the public product page.
  */
 export async function priceChartingOfferImage(
   productId: string,
@@ -403,8 +402,8 @@ export async function priceChartingLookup(
 export interface PricechartingConfirmation {
   product_id: string | null;
   candidate_image_url: string | null;
-  candidate_image_source: string | null; // 'marketplace_offer'
-  candidate_image_type: string | null; // 'marketplace_offer_image'
+  candidate_image_source: string | null; // 'official_product'|'marketplace_offer'
+  candidate_image_type: string | null; // 'catalog_product_image'|'marketplace_offer_image'
   candidate_image_available: boolean;
   visual_confirmation_status: string; // not_available|not_reviewed|user_confirmed|user_rejected|metadata_auto_confirmed
   visual_confirmation_method: string | null; // 'side_by_side'
