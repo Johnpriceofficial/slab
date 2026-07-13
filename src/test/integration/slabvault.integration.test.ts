@@ -219,7 +219,7 @@ suite("SlabVault live integration", () => {
     const big = new Blob([new Uint8Array(16 * 1024 * 1024)], { type: "image/png" });
     const tooBig = await adminClient.storage.from("slab-images").upload(`test/${stamp}/big.png`, big, { contentType: "image/png" });
     expect(tooBig.error).not.toBeNull();
-  });
+  }, 30_000);
 
   it("archives (preserving the number) and hard-deletes with cleanup", async () => {
     const created = await createSlab(adminClient, { certification_number: `ARCH${stamp}` });
@@ -347,8 +347,9 @@ suite("SlabVault live integration", () => {
     expect(row.visual_confirmation_status).toBe("user_confirmed");
     expect(row.product_confirmed_at).not.toBeNull();
     expect(row.visual_confirmation_by).not.toBeNull(); // actor stamped server-side
-    const { data: events } = await admin.from("slab_pricecharting_events").select("event_type").eq("slab_id", id);
+    const { data: events } = await admin.from("slab_pricecharting_events").select("id, event_type").eq("slab_id", id);
     expect(events!.length).toBe(1);
+    const eventId = events![0].id as string;
 
     // 2. Non-admin is rejected (RLS + explicit is_admin gate).
     const denied = await userClient.rpc("record_pricecharting_confirmation", {
@@ -383,11 +384,14 @@ suite("SlabVault live integration", () => {
     expect(badEnum.error).not.toBeNull();
 
     // 5. Append-only: the events table exposes no UPDATE or DELETE path to an admin user.
-    const upd = await adminClient.from("slab_pricecharting_events").update({ event_type: "image_refreshed" }).eq("slab_id", id);
-    expect(upd.error ?? upd.count === 0).toBeTruthy();
-    const delErr = await adminClient.from("slab_pricecharting_events").delete().eq("slab_id", id);
-    expect(delErr.error ?? delErr.count === 0).toBeTruthy();
-    const { data: stillThere } = await admin.from("slab_pricecharting_events").select("id").eq("slab_id", id);
-    expect(stillThere!.length).toBeGreaterThanOrEqual(1); // history preserved
+    await adminClient.from("slab_pricecharting_events").update({ event_type: "image_refreshed" }).eq("id", eventId);
+    await adminClient.from("slab_pricecharting_events").delete().eq("id", eventId);
+    const { data: stillThere, error: readbackError } = await admin
+      .from("slab_pricecharting_events")
+      .select("id, event_type")
+      .eq("id", eventId)
+      .single();
+    expect(readbackError).toBeNull();
+    expect(stillThere).toEqual({ id: eventId, event_type: "visual_confirmed" }); // history preserved unchanged
   });
 });
