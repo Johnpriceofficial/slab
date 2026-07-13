@@ -17,10 +17,11 @@
 
 import { formatCents } from "./format";
 import { QUICK_SALE_PERCENTAGE, REPLACEMENT_VALUE_PERCENTAGE } from "./valuation-derive";
-import { VALUATION_CONFIDENCE } from "./constants";
-import { buildPriceTiers, tierLabelOf, titleCase, type PriceTier } from "./pricing-tiers";
+import { VALUATION_CONFIDENCE, canonicalConfidence } from "./constants";
+import { buildPriceTiers, graderTenKey, tierLabelOf, titleCase, type PriceTier } from "./pricing-tiers";
+import { normalizeDesignation } from "@/lib/pricecharting/grade-mapping";
 
-export type PricingMatchKind = "exact" | "estimated" | "manual" | "unavailable";
+export type PricingMatchKind = "exact" | "compatible" | "estimated" | "manual" | "unavailable";
 
 export interface PricingInputs {
   final_cents: number | null;
@@ -35,6 +36,15 @@ export interface PricingInputs {
   product_name: string | null;
   product_id: string | null;
   /**
+   * Whether the guide value came from the slab's EXACT designation tier. When the
+   * slab carries a Pristine/Perfect designation but the value came from the
+   * ordinary grade-10 tier (the connected API has no Pristine field), this is
+   * false and the valuation is presented as COMPATIBLE, never exact/verified.
+   * Undefined is treated as "not explicitly exact" — a Pristine/Perfect slab then
+   * defaults to compatible, never a false exact promotion.
+   */
+  designation_exact?: boolean;
+  /**
    * Canonical persisted/live tiers (preferred). When omitted, tiers are built
    * from `available_values_cents`.
    */
@@ -48,7 +58,7 @@ export interface PricingInputs {
   comparison_tier_label?: string | null;
 }
 
-export type GradeRowKind = "exact" | "raw_reference" | "comparison" | "grade";
+export type GradeRowKind = "exact" | "compatible" | "raw_reference" | "comparison" | "grade";
 
 export interface GradeRow {
   key: string;
@@ -81,14 +91,28 @@ export interface PricingModel {
 const DISCLAIMER = "Current PriceCharting Guide Value — not a last-sold or eBay-sold price.";
 
 function confidenceLabel(v: string | null): string {
-  if (!v) return "—";
-  return VALUATION_CONFIDENCE.find((c) => c.value === v)?.label ?? titleCase(v);
+  const canonical = canonicalConfidence(v);
+  if (!canonical) return "—";
+  return VALUATION_CONFIDENCE.find((c) => c.value === canonical)?.label ?? titleCase(canonical);
 }
 
 /** Classify a canonical tier into a display row. */
-function rowForTier(t: PriceTier, exactLabel: string): GradeRow {
+function rowForTier(t: PriceTier, exactLabel: string, compatibleKey: string | null): GradeRow {
   if (t.exact_match) {
     return { key: t.tier, label: exactLabel || t.label, cents: t.value_cents, kind: "exact", note: null, muted: false };
+  }
+  if (compatibleKey && t.tier === compatibleKey) {
+    // The slab's own grader+grade tier standing in for a designation the API does
+    // not distinguish (e.g. ordinary CGC 10 for a CGC 10 Pristine slab). It is a
+    // COMPATIBLE basis, never the exact tier — and never labelled Pristine.
+    return {
+      key: t.tier,
+      label: t.label,
+      cents: t.value_cents,
+      kind: "compatible",
+      note: "Compatible tier — designation not distinguished",
+      muted: false,
+    };
   }
   if (t.tier === "ungraded") {
     return {
@@ -107,21 +131,31 @@ function rowForTier(t: PriceTier, exactLabel: string): GradeRow {
   return { key: t.tier, label: t.label, cents: t.value_cents, kind: "grade", note: null, muted: true };
 }
 
-function buildGradeRows(i: PricingInputs, tiers: PriceTier[] | null, tierLabel: string): GradeRow[] {
+function buildGradeRows(
+  i: PricingInputs,
+  tiers: PriceTier[] | null,
+  tierLabel: string,
+  matchKind: PricingMatchKind,
+): GradeRow[] {
+  // For a compatible valuation, the value came from the slab's ordinary grade-10
+  // tier — highlight THAT tier as the compatible basis (not the exact tier).
+  const compatibleKey = matchKind === "compatible" ? graderTenKey(i.grader, i.grade) : null;
+
   const rows: GradeRow[] = (tiers ?? [])
     .filter((t) => t.available) // only real values; never fabricate a $0/absent row
-    .map((t) => rowForTier(t, tierLabel));
+    .map((t) => rowForTier(t, tierLabel, compatibleKey));
 
-  // Ensure the slab's own exact tier always appears, even when no per-tier data
+  // Ensure the slab's own basis tier always appears, even when no per-tier data
   // was supplied (a detail page that stored only the guide value).
-  const hasExact = rows.some((r) => r.kind === "exact");
-  if (!hasExact && i.guide_cents !== null && !i.comparison_tier_label) {
+  const hasBasis = rows.some((r) => r.kind === "exact" || r.kind === "compatible");
+  if (!hasBasis && i.guide_cents !== null && !i.comparison_tier_label) {
+    const compatible = matchKind === "compatible";
     rows.unshift({
-      key: "exact_tier",
-      label: tierLabel || "This grade",
+      key: compatible ? "compatible_tier" : "exact_tier",
+      label: compatible ? tierLabelOf({ grader: i.grader, grade: i.grade, grade_label: null }) || "This grade" : tierLabel || "This grade",
       cents: i.guide_cents,
-      kind: "exact",
-      note: null,
+      kind: compatible ? "compatible" : "exact",
+      note: compatible ? "Compatible tier — designation not distinguished" : null,
       muted: false,
     });
   }
@@ -130,33 +164,47 @@ function buildGradeRows(i: PricingInputs, tiers: PriceTier[] | null, tierLabel: 
 
 export function buildPricingModel(i: PricingInputs): PricingModel {
   const tierLabel = tierLabelOf({ grader: i.grader, grade: i.grade, grade_label: i.grade_label });
+  const ordinaryTierLabel = tierLabelOf({ grader: i.grader, grade: i.grade, grade_label: null }) || "the ordinary grade";
   const tiers = i.tiers ?? (i.available_values_cents ? buildPriceTiers(i.available_values_cents, i) : null);
+
+  // A Pristine/Perfect slab whose value came from the ordinary grade-10 tier is
+  // COMPATIBLE, never exact — unless the caller proves the value came from a
+  // distinct exact tier (designation_exact === true).
+  const desig = normalizeDesignation(i.grade_label);
+  const designationNotDistinguished =
+    (desig === "pristine" || desig === "perfect") && i.designation_exact !== true;
 
   let match_kind: PricingMatchKind;
   if (i.guide_cents === null && i.final_cents === null) match_kind = "unavailable";
-  else if (i.guide_cents !== null) match_kind = i.comparison_tier_label ? "estimated" : "exact";
+  else if (i.guide_cents !== null)
+    match_kind = i.comparison_tier_label ? "estimated" : designationNotDistinguished ? "compatible" : "exact";
   else match_kind = "manual";
 
   const exact_match = match_kind === "exact";
   const unavailable = match_kind === "unavailable";
+  const designationNote = i.grade_label?.trim() ? ` (${titleCase(i.grade_label)} not distinguished)` : "";
 
   const basis_label =
     match_kind === "exact"
       ? `${tierLabel} — Exact PriceCharting Tier`
-      : match_kind === "estimated"
-        ? `${tierLabel} — Estimated from ${i.comparison_tier_label}`
-        : match_kind === "manual"
-          ? "Manual valuation"
-          : "Guide value unavailable";
+      : match_kind === "compatible"
+        ? `${tierLabel} — Compatible ${ordinaryTierLabel} value${designationNote}`
+        : match_kind === "estimated"
+          ? `${tierLabel} — Estimated from ${i.comparison_tier_label}`
+          : match_kind === "manual"
+            ? "Manual valuation"
+            : "Guide value unavailable";
 
   const method_label =
     match_kind === "exact"
       ? "Exact graded-price match"
-      : match_kind === "estimated"
-        ? `Estimated from ${i.comparison_tier_label} (nearest available tier)`
-        : match_kind === "manual"
-          ? "Manual valuation"
-          : "Guide value unavailable";
+      : match_kind === "compatible"
+        ? `Compatible tier — ${ordinaryTierLabel}${designationNote}`
+        : match_kind === "estimated"
+          ? `Estimated from ${i.comparison_tier_label} (nearest available tier)`
+          : match_kind === "manual"
+            ? "Manual valuation"
+            : "Guide value unavailable";
 
   const quickPct = `${Math.round(QUICK_SALE_PERCENTAGE * 100)}%`;
   const replPct = `${Math.round(REPLACEMENT_VALUE_PERCENTAGE * 100)}%`;
@@ -170,6 +218,13 @@ export function buildPricingModel(i: PricingInputs): PricingModel {
       `${product}Final Value uses the exact ${tierLabel} guide tier of ${formatCents(i.guide_cents)}. ` +
       `Quick-Sale Value is ${quickPct} of Final Value, and Replacement Value is ${replPct} of Final Value. ` +
       `PriceCharting's guide is a current estimated value and is not a confirmed last-sold transaction.`;
+  } else if (match_kind === "compatible") {
+    note =
+      `${product}The connected PriceCharting source does not distinguish ${tierLabel} from ordinary ` +
+      `${ordinaryTierLabel}, so Final Value uses the COMPATIBLE ${ordinaryTierLabel} guide value of ` +
+      `${formatCents(i.guide_cents)} — an approximate figure for your ${tierLabel} slab, not an exact ` +
+      `${tierLabel} price. Confidence is reduced accordingly. PriceCharting's guide is a current estimated ` +
+      `value, not a confirmed last-sold transaction.`;
   } else if (match_kind === "estimated") {
     note =
       `${product}No exact ${tierLabel} tier was available, so the value is ESTIMATED from ${i.comparison_tier_label} ` +
@@ -195,11 +250,17 @@ export function buildPricingModel(i: PricingInputs): PricingModel {
     guide_cents: i.guide_cents,
     quick_cents: i.quick_cents,
     replacement_cents: i.replacement_cents,
-    confidence_label: unavailable ? "—" : confidenceLabel(i.valuation_confidence),
+    // A compatible/approximate basis can never read as "Verified" — that status
+    // is reserved for an exact-tier match. Downgrade defensively for display.
+    confidence_label: unavailable
+      ? "—"
+      : match_kind === "compatible" && i.valuation_confidence === "verified"
+        ? confidenceLabel("high")
+        : confidenceLabel(i.valuation_confidence),
     variance_percent: i.price_variance_percent,
     method_label,
     note,
     disclaimer: DISCLAIMER,
-    grade_rows: buildGradeRows(i, tiers, tierLabel),
+    grade_rows: buildGradeRows(i, tiers, tierLabel, match_kind),
   };
 }

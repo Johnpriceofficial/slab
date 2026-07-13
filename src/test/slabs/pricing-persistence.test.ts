@@ -4,7 +4,7 @@ import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import { buildPricingPersist, type SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
 import { makeMockDao, validInput, image } from "./helpers";
 
-const ID = { grader: "CGC", grade: "10", grade_label: "PRISTINE" };
+const ID = { grader: "CGC", grade: "10", grade_label: null };
 const AVAILABLE = { cgc_10: 4250, ungraded: 413, psa_10: 6658, grade_9_general: 2174 };
 
 function pricingWrite(): SlabPricingWrite {
@@ -46,9 +46,9 @@ describe("shared component — intake and detail render from identical models", 
     price_variance_percent: 0,
     grader: "CGC",
     grade: "10",
-    grade_label: "PRISTINE",
-    product_name: "Charmander #289/S-P",
-    product_id: "5427932",
+    grade_label: null,
+    product_name: "Rayquaza VMAX #047",
+    product_id: "3472875",
   };
 
   it("the intake model (live available values) equals the detail model (persisted tiers)", () => {
@@ -60,7 +60,7 @@ describe("shared component — intake and detail render from identical models", 
     // Same inputs → byte-identical model → pixel-identical render.
     expect(detail).toEqual(intake);
     const exact = detail.grade_rows.find((r) => r.kind === "exact")!;
-    expect(exact.label).toBe("CGC 10 Pristine");
+    expect(exact.label).toBe("CGC 10");
     expect(detail.grade_rows.find((r) => r.key === "ungraded")!.note).toBe("Raw-card reference only");
     expect(detail.grade_rows.find((r) => r.key === "psa_10")!.note).toBe("Comparison only");
   });

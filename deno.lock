@@ -38,6 +38,7 @@
         "npm:eslint@^9.17.0",
         "npm:exceljs@^4.4.0",
         "npm:globals@^15.14.0",
+        "npm:heic2any@^0.0.4",
         "npm:jsdom@^20.0.3",
         "npm:lucide-react@0.462",
         "npm:postcss@^8.5.6",

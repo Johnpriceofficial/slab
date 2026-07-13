@@ -116,8 +116,8 @@ Sign in at **`/login`**, then open **`/dashboard`** or **`/slabs/new`**.
 
 ## Run tests / typecheck / build
 ```
-bun run test          # 163 tests
-bun run typecheck     # slab / server / pricecharting code is clean
+bun run test          # 378 tests (367 pass; 11 env-gated live integration skipped)
+bun run typecheck     # 0 errors
 bun run build         # production build succeeds
 ```
 

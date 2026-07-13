@@ -9,7 +9,7 @@ import type { Slab, SlabComp, SlabCompInput, SlabInput } from "./types";
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import { buildPricingPersist } from "./pricing-tiers";
 import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
-import { buildConfirmationPatch, confirmationEventType } from "./confirmation-patch";
+import { buildConfirmationPatch, confirmationEventType, isRetryableConfirmationError } from "./confirmation-patch";
 import type {
   SearchResponse,
   ValueResponse,
@@ -406,29 +406,54 @@ export interface PricechartingConfirmation {
   candidate_image_available: boolean;
   visual_confirmation_status: string; // not_available|not_reviewed|user_confirmed|user_rejected|metadata_auto_confirmed
   visual_confirmation_method: string | null; // 'side_by_side'
+  /** Structured rejection reason (see VISUAL_REJECTION_REASONS), or null. */
   visual_rejection_reason: string | null;
+  /** Free-text operator note accompanying the structured rejection reason. */
+  visual_rejection_note: string | null;
   product_confirmation_source: string | null; // search_auto|search_manual|manual_product_id|manual_product_url
   scoring_version: number | null;
 }
 
+export type ConfirmationResult =
+  | { status: "success" }
+  | { status: "error"; message: string; retryable: boolean };
+
 /**
- * Persist §4 confirmation state AND append an immutable audit event. The slab
- * columns hold current state; the event table is append-only so history is never
- * silently rewritten (metadata_auto_confirmed is never stored as user_confirmed).
+ * Persist §4 confirmation state AND append an immutable audit event ATOMICALLY,
+ * via a single SECURITY DEFINER RPC. Both the slab-state update and the append-only
+ * audit insert happen in one transaction — either both land or neither does, so the
+ * current state and the history can never diverge. The event table is append-only
+ * (no UPDATE/DELETE policy) so history is never rewritten, and a visually REJECTED
+ * product is never stamped as confirmed (enforced by buildConfirmationPatch).
+ *
+ * Errors are RETURNED (never swallowed) so the caller can surface a retryable UI.
  */
-export async function recordPricechartingConfirmation(slabId: string, c: PricechartingConfirmation): Promise<void> {
+export async function recordPricechartingConfirmation(
+  slabId: string,
+  c: PricechartingConfirmation,
+): Promise<ConfirmationResult> {
   const now = new Date().toISOString();
-  const { data: userData } = await supabase.auth.getUser();
-  const actor = userData?.user?.id ?? null;
-  await updateSlab(slabId, buildConfirmationPatch(c, now, actor) as Partial<Slab>);
-  await sb.from("slab_pricecharting_events").insert({
-    slab_id: slabId,
+  const patch = buildConfirmationPatch(c, now, null); // actor is server-derived in the RPC
+  const event = {
     event_type: confirmationEventType(c.visual_confirmation_status),
     product_id: c.product_id,
     source: c.product_confirmation_source,
-    created_by: actor,
     detail: c as unknown as Record<string, unknown>,
+  };
+  const { error } = await sb.rpc("record_pricecharting_confirmation", {
+    p_slab_id: slabId,
+    p_patch: patch,
+    p_event: event,
   });
+  if (error) {
+    // Network / transient errors are retryable; a constraint or auth failure is not.
+    return {
+      status: "error",
+      message: error.message ?? "Failed to record confirmation",
+      retryable: isRetryableConfirmationError(error.message),
+    };
+  }
+  return { status: "success" };
 }
 
 export interface RefreshPricingResult {

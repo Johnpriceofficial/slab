@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { handlePriceChartingRequest, parseProductId, type HandlerDeps } from "@/server/pricecharting/handler";
+import { handlePriceChartingRequest, parseProductId, parseProductSlug, type HandlerDeps } from "@/server/pricecharting/handler";
 import { createMockFetch, RecordingClock } from "../pricecharting/helpers";
 
 const TOKEN = "SECRET-pricecharting-token-DO-NOT-LEAK-1234567890";
@@ -82,19 +82,79 @@ describe("handler — lookup (manual recovery / confirmed-id-first)", () => {
     }
   });
 
-  it("400s a URL with no extractable id (slug-only), never contacting PriceCharting", async () => {
-    const mock = createMockFetch();
-    const res = await handlePriceChartingRequest({ action: "lookup", product_url: "https://www.pricecharting.com/game/pokemon-japanese-promo/charmander-289s-p", ...IDENTITY }, deps(mock));
-    expect(res.statusCode).toBe(400);
-    expect(res.body.status).toBe("error");
-    expect(mock.calls.length).toBe(0);
-  });
-
   it("reports PRODUCT_NOT_FOUND for a nonexistent id", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/product?", { json: { status: "success" } }); // no id/name → normalizeProduct yields empty
     const res = await handlePriceChartingRequest({ action: "lookup", product_id: "123456", ...IDENTITY }, deps(mock));
     expect(res.statusCode).toBe(404);
     if (res.body.status === "error") expect(res.body.error_code).toBe("PRODUCT_NOT_FOUND");
+  });
+});
+
+describe("parseProductSlug — canonical PriceCharting product URLs (no id)", () => {
+  it("parses a /game/<console>/<product> slug into a query + product slug", () => {
+    const s = parseProductSlug("https://www.pricecharting.com/game/pokemon-japanese-promo/charmander-289s-p");
+    expect(s).toEqual({ query: "pokemon japanese promo charmander 289s p", productSlug: "charmander-289s-p" });
+  });
+  it("rejects non-PriceCharting hosts, non-slug paths, and bare numbers", () => {
+    expect(parseProductSlug("https://evil.example.com/game/x/charmander-289")).toBeNull();
+    expect(parseProductSlug("https://www.pricecharting.com/offer?id=5427932")).toBeNull(); // handled by parseProductId
+    expect(parseProductSlug("https://www.pricecharting.com/game/pokemon/12345")).toBeNull(); // numeric segment, not a slug
+    expect(parseProductSlug("")).toBeNull();
+  });
+});
+
+describe("handler — lookup by canonical slug URL (resolved via API, never scraped)", () => {
+  const SLUG_URL = "https://www.pricecharting.com/game/pokemon-japanese-promo/charmander-289s-p";
+
+  it("resolves the slug to its product id via a search, then validates identity", async () => {
+    const mock = createMockFetch();
+    // 1) slug query → search returns the product whose slug matches
+    mock.enqueue("/api/products?", { json: { products: [CHARMANDER] } });
+    // 2) resolved id → product fetch
+    mock.enqueue("/api/product?", { json: { status: "success", ...CHARMANDER } });
+    // 3) best-effort offer image
+    mock.enqueue("/api/offers?", { json: { offers: [] } });
+    const res = await handlePriceChartingRequest({ action: "lookup", product_url: SLUG_URL, ...IDENTITY }, deps(mock));
+    expect(res.statusCode).toBe(200);
+    if (res.body.status === "success" && res.body.action === "lookup") {
+      expect(res.body.product_id).toBe("5427932"); // resolved from the slug, not lifted from the URL
+      expect(res.body.disqualified).toBe(false);
+    } else {
+      throw new Error("expected a lookup success body");
+    }
+  });
+
+  it("still enforces identity — a wrong-character product the slug resolves to is disqualified", async () => {
+    const mock = createMockFetch();
+    const WRONG = { id: "999", "product-name": "Pikachu #289/S-P", "console-name": "Pokemon Japanese Promo" };
+    // The slug query returns a product whose slug matches the (wrong) URL slug.
+    mock.enqueue("/api/products?", { json: { products: [{ ...WRONG, "product-name": "Charmander #289/S-P" }] } });
+    // But the exact product fetched is a different (wrong-character) card.
+    mock.enqueue("/api/product?", { json: { status: "success", ...WRONG } });
+    mock.enqueue("/api/offers?", { json: { offers: [] } });
+    const res = await handlePriceChartingRequest({ action: "lookup", product_url: SLUG_URL, ...IDENTITY }, deps(mock));
+    if (res.body.status === "success" && res.body.action === "lookup") {
+      expect(res.body.disqualified).toBe(true);
+      expect(res.body.requires_confirmation).toBe(true);
+    } else {
+      throw new Error("expected a lookup success body");
+    }
+  });
+
+  it("refuses (PRODUCT_NOT_FOUND) when no returned product's slug matches — never guesses", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/products?", { json: { products: [{ id: "111", "product-name": "Blastoise #009", "console-name": "Pokemon Base" }] } });
+    const res = await handlePriceChartingRequest({ action: "lookup", product_url: SLUG_URL, ...IDENTITY }, deps(mock));
+    expect(res.statusCode).toBe(404);
+    if (res.body.status === "error") expect(res.body.error_code).toBe("PRODUCT_NOT_FOUND");
+  });
+
+  it("400s a non-PriceCharting URL without contacting the API", async () => {
+    const mock = createMockFetch();
+    const res = await handlePriceChartingRequest({ action: "lookup", product_url: "https://evil.example.com/game/x/charmander-289", ...IDENTITY }, deps(mock));
+    expect(res.statusCode).toBe(400);
+    expect(res.body.status).toBe("error");
+    expect(mock.calls.length).toBe(0);
   });
 });

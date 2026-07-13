@@ -95,7 +95,7 @@ export function SlabCompsSection({ slab }: { slab: Slab }) {
     try {
       await updateSlab(slab.id, {
         final_value_cents: suggestion.suggested_cents,
-        valuation_confidence: suggestion.basis === "pricecharting_guide" ? "probable" : "high",
+        valuation_confidence: suggestion.basis === "pricecharting_guide" ? "moderate" : "high",
       });
       toast.success(`Final Value set to ${formatCents(suggestion.suggested_cents)}`);
       queryClient.invalidateQueries({ queryKey: ["slab", slab.id] });

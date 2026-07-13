@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { VISUAL_REJECTION_REASONS } from "@/lib/slabs/constants";
 import { toast } from "sonner";
 import { Search, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
 import {
@@ -11,9 +13,10 @@ import {
   priceChartingLookup,
   type PriceChartingSearchArgs,
 } from "@/lib/slabs/data";
-import type { LookupResponse } from "@/server/pricecharting/handler";
+import type { LookupResponse, ImageSource } from "@/server/pricecharting/handler";
 import { CandidateDebugPanel } from "@/components/slabs/CandidateDebugPanel";
 import { formatCents } from "@/lib/slabs/format";
+import { evaluateConfirmedProduct, type ConfirmedProductDecision } from "@/lib/slabs/confirmed-product";
 import {
   deriveCandidateStatus,
   shouldShowBelowThresholdBanner,
@@ -52,9 +55,16 @@ interface PriceChartingPanelProps {
   /** Slab front image URL for §3 side-by-side visual confirmation (optional). */
   frontImageUrl?: string | null;
   /** §4 callback when the operator visually confirms/rejects the candidate image. */
-  onVisualStatus?: (productId: string, status: "user_confirmed" | "user_rejected", imageUrl: string | null) => void;
-  /** Called when the operator visually REJECTS the linked candidate — clear the link. */
-  onReject?: () => void;
+  onVisualStatus?: (
+    productId: string,
+    status: "user_confirmed" | "user_rejected",
+    imageUrl: string | null,
+    imageSource: ImageSource,
+    rejectionReason?: string | null,
+    rejectionNote?: string | null,
+  ) => void;
+  /** Called when the operator REJECTS the linked candidate — clear the link. Carries the structured reason + note. */
+  onReject?: (reason: string, note: string) => void;
 }
 
 /** Map a single resolved link-status tone to a Badge variant. */
@@ -76,6 +86,8 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
     url: string | null;
     count: number;
     loading: boolean;
+    /** Provenance of the image — always marketplace_offer or none from this source. */
+    source: ImageSource;
   } | null>(null);
   // Manual product-id / URL recovery.
   const [recoverInput, setRecoverInput] = useState("");
@@ -84,6 +96,11 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   const [recoveredInput, setRecoveredInput] = useState(""); // the input the lookup validated
   const [recoverError, setRecoverError] = useState<string | null>(null);
   const [visualStatus, setVisualStatus] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected" } | null>(null);
+  // §5 Confirmed-product-first review: the decision + fetched product for a slab
+  // that already has a confirmed id. Fuzzy search is gated behind this.
+  const [confirmedReview, setConfirmedReview] = useState<{ decision: ConfirmedProductDecision; lookup: LookupResponse | null } | null>(null);
+  // §2 structured rejection: the open reject form for a candidate (reason + note).
+  const [rejectForm, setRejectForm] = useState<{ product_id: string; reason: string; note: string } | null>(null);
 
   // A recovered result was identity-checked against the identity AT LOOKUP TIME.
   // If the operator edits identity fields afterward, invalidate it so a stale
@@ -94,6 +111,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
     setRecoverError(null);
     setVisualStatus(null);
     setOfferImage(null);
+    setConfirmedReview(null);
   }, [
     identity.card_name, identity.set, identity.card_number, identity.year,
     identity.language, identity.variation, identity.grader, identity.grade,
@@ -138,11 +156,69 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
       designation_exact: r.designation_exact,
       selected_tier_label: r.selected_tier_label,
     });
-    setOfferImage({ product_id: r.product_id, url: r.offer_image_url, count: r.offer_listing_count, loading: false });
+    setOfferImage({ product_id: r.product_id, url: r.offer_image_url, count: r.offer_listing_count, loading: false, source: r.image_source });
     toast.success(`Linked to ${r.product_name} (manual recovery)`);
   };
 
-  const runSearch = async () => {
+  // Map a fresh lookup of an already-confirmed product back into a selection, so a
+  // retained/soft-review link stays current WITHOUT changing the confirmed id.
+  const refreshFromLookup = (r: LookupResponse, matchStatus: string) => {
+    onSelect({
+      product_id: r.product_id,
+      product_name: r.product_name,
+      grade_field: r.grade_field,
+      value_cents: r.guide_value_cents,
+      sales_volume: r.sales_volume,
+      match_status: matchStatus,
+      confidence_score: r.score,
+      is_estimate: r.is_estimate,
+      available_values_cents: r.available_values_cents ?? {},
+      value_response: r,
+      designation_exact: r.designation_exact,
+      selected_tier_label: r.selected_tier_label,
+    });
+    setOfferImage({ product_id: r.product_id, url: r.offer_image_url, count: r.offer_listing_count, loading: false, source: r.image_source });
+  };
+
+  // §5 Confirmed-product-first: when a slab already has a confirmed product, the
+  // confirmed id is validated FIRST and a fuzzy search that could replace it runs
+  // ONLY when the operator explicitly asks (forceFuzzy) or the state machine
+  // allows it. A confirmed link is never silently unlinked or replaced, and a
+  // failed refresh preserves the id.
+  const runConfirmedFirst = async (confirmedId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const look = await priceChartingLookup(confirmedId, identity);
+      if (look.status === "error") {
+        // Refresh failed (network/upstream) — DO NOT erase the confirmed id.
+        setConfirmedReview({
+          decision: evaluateConfirmedProduct(confirmedId, null),
+          lookup: null,
+        });
+        setError(`Could not refresh the confirmed product (${look.message}). Its link is preserved.`);
+        return;
+      }
+      const decision = evaluateConfirmedProduct(confirmedId, {
+        found: !!look.product_id,
+        disqualified: look.disqualified,
+        requires_confirmation: look.requires_confirmation,
+        conflicts: look.conflicts,
+      });
+      setConfirmedReview({ decision, lookup: look });
+      // Compatible/soft states keep the link and refresh its value in place.
+      if (decision.state === "retained" || decision.state === "soft_review") {
+        refreshFromLookup(look, decision.state === "retained" ? "confirmed_refresh" : "confirmed_soft_review");
+      }
+    } catch (e) {
+      setConfirmedReview({ decision: evaluateConfirmedProduct(confirmedId, null), lookup: null });
+      setError(e instanceof Error ? e.message : "Refresh failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runFuzzy = async () => {
     setLoading(true);
     setError(null);
     setResult(null);
@@ -170,6 +246,14 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
     }
   };
 
+  // The primary "Search PriceCharting" action. A confirmed product is validated
+  // first; a fresh fuzzy search runs only when nothing is confirmed or the
+  // operator explicitly chose to search again.
+  const runSearch = (opts?: { forceFuzzy?: boolean }) => {
+    if (selectedProductId && !opts?.forceFuzzy) return runConfirmedFirst(selectedProductId);
+    return runFuzzy();
+  };
+
   const confirmCandidate = async (c: CandidateResult) => {
     setConfirmingId(c.product_id);
     try {
@@ -195,16 +279,16 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
       toast.success(`Linked to ${res.product_name}`);
       // Best-effort seller listing photo for visual (metadata + photo) confirmation.
       // Never blocks linking; absence is a normal, expected outcome.
-      setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: true });
+      setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: true, source: "none" });
       priceChartingOfferImage(c.product_id)
         .then((img) => {
           setOfferImage(
             img.status === "success"
-              ? { product_id: c.product_id, url: img.offer_image_url, count: img.offer_listing_count, loading: false }
-              : { product_id: c.product_id, url: null, count: 0, loading: false },
+              ? { product_id: c.product_id, url: img.offer_image_url, count: img.offer_listing_count, loading: false, source: img.image_source }
+              : { product_id: c.product_id, url: null, count: 0, loading: false, source: "none" },
           );
         })
-        .catch(() => setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: false }));
+        .catch(() => setOfferImage({ product_id: c.product_id, url: null, count: 0, loading: false, source: "none" }));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to retrieve value");
     } finally {
@@ -235,15 +319,50 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
           <h3 className="font-semibold">PriceCharting</h3>
           <p className="text-xs text-muted-foreground">Current PriceCharting Guide Value — not a last-sold or eBay-sold price.</p>
         </div>
-        <Button type="button" onClick={runSearch} disabled={loading} size="sm">
-          {loading ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Search className="mr-1 h-4 w-4" />}
-          Search PriceCharting
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button type="button" onClick={() => runSearch()} disabled={loading} size="sm">
+            {loading ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Search className="mr-1 h-4 w-4" />}
+            {selectedProductId ? "Re-check confirmed" : "Search PriceCharting"}
+          </Button>
+          {selectedProductId && (
+            <Button type="button" variant="outline" onClick={() => runSearch({ forceFuzzy: true })} disabled={loading} size="sm">
+              Search again
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
         <div className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-sm text-destructive">
           <AlertTriangle className="h-4 w-4" /> {error}
+        </div>
+      )}
+
+      {/* §5 Confirmed-product-first review — the confirmed id was validated before
+          any fuzzy search. The link is preserved; replacing it is an explicit act. */}
+      {confirmedReview && (
+        <div
+          className={`flex items-start gap-2 rounded-md border p-2 text-sm ${
+            confirmedReview.decision.state === "retained"
+              ? "border-emerald-400/40 bg-emerald-50 text-emerald-800"
+              : confirmedReview.decision.state === "confirmation_invalidated"
+                ? "border-destructive/40 bg-destructive/5 text-destructive"
+                : "border-amber-400/40 bg-amber-50 text-amber-800"
+          }`}
+        >
+          {confirmedReview.decision.state === "retained" ? (
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          )}
+          <div className="space-y-1">
+            <p>{confirmedReview.decision.reason}</p>
+            {confirmedReview.decision.allow_fuzzy && (
+              <Button type="button" size="sm" variant="outline" onClick={() => runSearch({ forceFuzzy: true })} disabled={loading}>
+                Search for a different product
+              </Button>
+            )}
+          </div>
         </div>
       )}
 
@@ -349,41 +468,86 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                         ) : null}
                       </div>
                     </div>
-                    {offerImage && offerImage.product_id === c.product_id && offerImage.url ? (
-                      <div className="mt-2 flex items-center gap-2">
+                    {!(offerImage && offerImage.product_id === c.product_id && offerImage.url) && (
+                      // No marketplace photo from the connected source → the visual
+                      // "Yes — same exact artwork" affordance is disabled entirely.
+                      <p className="mt-2 text-xs italic text-muted-foreground">
+                        Visual confirmation unavailable — no product image is available from the connected PriceCharting
+                        source (the Prices API exposes no official catalog image, and no marketplace seller photo was
+                        found). Confirm by the metadata fields only.
+                      </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {offerImage && offerImage.product_id === c.product_id && offerImage.url && (
                         <Button
                           type="button"
                           size="sm"
                           variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
                           onClick={() => {
                             setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
-                            onVisualStatus?.(c.product_id, "user_confirmed", offerImage.url);
+                            setRejectForm(null);
+                            onVisualStatus?.(c.product_id, "user_confirmed", offerImage.url, offerImage.source);
                           }}
                         >
-                          Yes — same card
+                          Yes — same exact artwork
                         </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => {
-                            // Reject → record it AND clear the link so a rejected
-                            // product never drives Final Value or is stored as confirmed.
-                            onVisualStatus?.(c.product_id, "user_rejected", offerImage.url);
-                            setVisualStatus(null);
-                            onReject?.();
-                          }}
-                        >
-                          No — reject &amp; unlink
-                        </Button>
-                        {visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" && (
-                          <span className="text-xs text-muted-foreground">Recorded: user-confirmed</span>
-                        )}
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRejectForm({ product_id: c.product_id, reason: "", note: "" })}
+                      >
+                        No — reject &amp; unlink
+                      </Button>
+                      {visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" && (
+                        <span className="text-xs text-muted-foreground">Recorded: user-confirmed</span>
+                      )}
+                    </div>
+
+                    {/* §2 Structured rejection — reason (required) + optional note.
+                        The candidate is not unlinked until a reason is chosen, so the
+                        rejection is always captured for the audit trail. */}
+                    {rejectForm?.product_id === c.product_id && (
+                      <div className="mt-2 space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-2">
+                        <p className="text-xs font-medium">Why is this not the right product?</p>
+                        <Select value={rejectForm.reason} onValueChange={(v) => setRejectForm((f) => (f ? { ...f, reason: v } : f))}>
+                          <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Select a reason…" /></SelectTrigger>
+                          <SelectContent>
+                            {VISUAL_REJECTION_REASONS.map((r) => (
+                              <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          value={rejectForm.note}
+                          onChange={(e) => setRejectForm((f) => (f ? { ...f, note: e.target.value } : f))}
+                          placeholder="Optional note (details)"
+                          className="h-8 text-sm"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            disabled={!rejectForm.reason}
+                            onClick={() => {
+                              const { reason, note } = rejectForm;
+                              const imgUrl = offerImage && offerImage.product_id === c.product_id ? offerImage.url : null;
+                              const imgSrc = offerImage && offerImage.product_id === c.product_id ? offerImage.source : "none";
+                              onVisualStatus?.(c.product_id, "user_rejected", imgUrl, imgSrc, reason, note);
+                              setVisualStatus(null);
+                              setRejectForm(null);
+                              onReject?.(reason, note);
+                            }}
+                          >
+                            Confirm rejection
+                          </Button>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => setRejectForm(null)}>
+                            Cancel
+                          </Button>
+                        </div>
                       </div>
-                    ) : (
-                      <p className="mt-2 text-xs italic text-muted-foreground">
-                        No PriceCharting image to compare — confirm by the metadata fields only.
-                      </p>
                     )}
                   </div>
                 )}
@@ -443,7 +607,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
             <Input
               value={recoverInput}
               onChange={(e) => setRecoverInput(e.target.value)}
-              placeholder="e.g. 5427932  (or a PriceCharting product URL containing an id)"
+              placeholder="e.g. 5427932  (or a PriceCharting product URL — id or canonical /game/… slug)"
               className="text-sm"
             />
             <Button type="button" size="sm" variant="outline" onClick={runRecover} disabled={recovering || !recoverInput.trim()}>

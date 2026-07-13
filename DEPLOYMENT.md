@@ -32,9 +32,11 @@ cd ~/Desktop/SlabVault
 # (1) link the CLI to the new project (prompts for the DB password)
 supabase link --project-ref <PROJECT_REF>
 
-# (2) apply all 9 migrations in order (admin → tables → storage →
-#     cert-normalization → constraints → rate-limits → archive →
-#     inventory-seq → hard-delete-guard)
+# (2) apply all 20 migrations in order (admin → tables → storage →
+#     cert-normalization → constraints → rate-limits → archive → inventory-seq →
+#     hard-delete-guard → grants → grade-label → analyze-quota → optional-back-image
+#     → pricecharting-tiers → cgc-population → visual-confirmation → audit-actor →
+#     confirmation-RPC + CHECK constraints → confidence-consolidation)
 supabase db push
 
 # (3) set edge-function SECRETS only (never a VITE_ prefix)

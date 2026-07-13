@@ -71,18 +71,60 @@ export type SaveSlabResult =
   | { status: "error"; message: string };
 
 /**
- * Required-field validation shared by the form and the save flow. Only the
- * front image is required — the back is optional (see module doc comment).
+ * Two save modes:
+ *  - "draft":    an unverified draft. Only the front image is required; the cert,
+ *                grader, grade, and PriceCharting confirmation MAY be unresolved.
+ *                Its unresolved requirements are stored (verification_status) and
+ *                displayed so it can be completed later.
+ *  - "verified": a verified record. Requires grader, grade, certification number,
+ *                and the front image, with all blockers resolved.
  */
-export function validateSlabInput(input: SlabInput, hasFront: boolean, _hasBack: boolean): string[] {
+export type SaveMode = "draft" | "verified";
+
+/**
+ * The identity fields a VERIFIED record requires, as short field names. Returned
+ * empty when a record is ready to verify. Shared by the save flow, the intake
+ * disabled-reason UI, and the detail page's "to verify" list so all three agree.
+ */
+export function verifiedBlockers(
+  input: {
+    card_name?: string | null;
+    grader?: string | null;
+    grade?: string | number | null;
+    certification_number?: string | null;
+  },
+  hasFront: boolean,
+): string[] {
+  const b: string[] = [];
+  if (!input.card_name || !input.card_name.trim()) b.push("Card name");
+  if (!input.grader || !String(input.grader).trim()) b.push("Grader");
+  if (!input.grade || !String(input.grade).trim()) b.push("Grade");
+  if (!input.certification_number || !String(input.certification_number).trim()) b.push("Certification number");
+  if (!hasFront) b.push("Front image");
+  return b;
+}
+
+/**
+ * Required-field validation shared by the form and the save flow. The front image
+ * is ALWAYS required (see module doc); the remaining fields are required only for
+ * a "verified" save. The back image is always optional.
+ */
+export function validateSlabInput(
+  input: SlabInput,
+  hasFront: boolean,
+  _hasBack: boolean,
+  mode: SaveMode = "verified",
+): string[] {
   const errors: string[] = [];
-  if (!input.card_name || !input.card_name.trim()) errors.push("Card name is required.");
-  if (!input.grader || !input.grader.trim()) errors.push("Grader is required.");
-  if (!input.grade || !String(input.grade).trim()) errors.push("Grade is required.");
-  if (!input.certification_number || !input.certification_number.trim()) {
-    errors.push("Certification number is required.");
-  }
   if (!hasFront) errors.push("Front image is required.");
+  if (mode === "verified") {
+    if (!input.card_name || !input.card_name.trim()) errors.push("Card name is required.");
+    if (!input.grader || !input.grader.trim()) errors.push("Grader is required.");
+    if (!input.grade || !String(input.grade).trim()) errors.push("Grade is required.");
+    if (!input.certification_number || !input.certification_number.trim()) {
+      errors.push("Certification number is required.");
+    }
+  }
   return errors;
 }
 
@@ -97,8 +139,9 @@ export async function saveSlab(
   back: SlabImageUpload | null,
   dao: SlabDataAccess,
   pricing?: SlabPricingWrite | null,
+  mode: SaveMode = "verified",
 ): Promise<SaveSlabResult> {
-  const errors = validateSlabInput(input, !!front, !!back);
+  const errors = validateSlabInput(input, !!front, !!back, mode);
   if (errors.length > 0) return { status: "validation_error", errors };
 
   // Validate image extensions client-side too (the DB's valid_image_ext is the

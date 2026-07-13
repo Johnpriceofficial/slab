@@ -14,7 +14,8 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { LoadingState } from "@/components/shared/LoadingState";
-import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
+import { verifiedBlockers } from "@/lib/slabs/save-slab";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
@@ -25,7 +26,7 @@ import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
 } from "@/lib/slabs/data";
-import { formatCents, centsToInputString, dollarsToCents } from "@/lib/slabs/format";
+import { centsToInputString, dollarsToCents } from "@/lib/slabs/format";
 import { VERIFICATION_STATUSES, VALUATION_CONFIDENCE, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
 import type { Slab } from "@/lib/slabs/types";
 
@@ -88,6 +89,16 @@ export default function SlabDetail() {
     );
   }
 
+  // The persisted tiers already encode which tier is the slab's exact one; the
+  // valuation is designation-exact only if that exact tier actually has a value
+  // (e.g. a Pristine slab whose exact tier is unavailable stays compatible).
+  const hydratedTiers = hydratePriceTiers(slab.pricecharting_tiers);
+  const detailDesignationExact = hydratedTiers?.find((t) => t.exact_match)?.available;
+
+  // §3 A draft (unverified) shows exactly what remains to make it a verified record.
+  const isDraft = slab.verification_status !== "verified";
+  const toVerify = verifiedBlockers(slab, !!slab.front_image_path);
+
   return (
     <div className="container max-w-5xl py-8">
       <PageHead title={`Slab #${slab.inventory_number} · SlabVault`} noindex />
@@ -120,6 +131,21 @@ export default function SlabDetail() {
           <EditSlabDialog slab={slab} onSaved={() => queryClient.invalidateQueries({ queryKey: ["slab", id] })} />
         </div>
       </div>
+
+      {/* §3 Draft — the exact unresolved requirements to make this a verified record. */}
+      {isDraft && (
+        <div className="mb-6 flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-3 text-sm text-amber-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Unverified draft.</p>
+            {toVerify.length > 0 ? (
+              <p>To make this a verified record, add: {toVerify.join(", ")}.</p>
+            ) : (
+              <p>All required fields are present — edit the record and set its status to “verified”.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Admin actions: archive / restore / hard-delete test records */}
       <div className="mb-6 flex justify-end">
@@ -194,10 +220,11 @@ export default function SlabDetail() {
                 grade_label: slab.grade_label,
                 product_name: slab.pricecharting_product_name,
                 product_id: slab.pricecharting_product_id,
+                designation_exact: detailDesignationExact,
                 // Hydrate the persisted tier table so the saved slab shows the
                 // same Compare Other Grades that was available during intake.
                 // Older rows have no tiers → sparse fallback (exact tier only).
-                tiers: hydratePriceTiers(slab.pricecharting_tiers),
+                tiers: hydratedTiers,
               })}
             />
           </CardContent>

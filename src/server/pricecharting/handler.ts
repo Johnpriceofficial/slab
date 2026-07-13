@@ -50,10 +50,9 @@ export interface SlabSearchInput {
 }
 
 /**
- * Parse a PriceCharting product id from a raw id or URL. PriceCharting product
- * URLs are slugs WITHOUT the numeric id, so a slug-only URL yields null (the
- * caller must supply the numeric id). A `?id=` query or a 5+ digit path segment
- * is accepted.
+ * Parse a PriceCharting product id from a raw id or URL. A `?id=` query or a 5+
+ * digit path segment at the END of the path is accepted. A slug-only URL yields
+ * null here — it is resolved separately, via the API, by `parseProductSlug`.
  */
 export function parseProductId(input: { product_id?: string; product_url?: string }): string | null {
   const direct = (input.product_id ?? "").trim();
@@ -67,6 +66,64 @@ export function parseProductId(input: { product_id?: string; product_url?: strin
     const m = /[?&]id=(\d+)/.exec(url) ?? /\/(\d{5,})\/?(?:[?#]|$)/.exec(url);
     if (m) return m[1];
   }
+  return null;
+}
+
+/**
+ * Parse a CANONICAL PriceCharting product URL (a slug with no numeric id) into a
+ * search query and the product slug, so the id can be resolved via the API
+ * WITHOUT scraping. PriceCharting URLs look like:
+ *   https://www.pricecharting.com/game/<console-slug>/<product-slug>
+ * Returns null for anything that is not a `/game/<console>/<product>` slug path
+ * (a bare number, a non-PriceCharting URL, or a URL that already carries an id).
+ */
+export function parseProductSlug(productUrl?: string): { query: string; productSlug: string } | null {
+  const raw = (productUrl ?? "").trim();
+  if (!raw) return null;
+  let path: string;
+  try {
+    const u = new URL(raw);
+    // Only accept PriceCharting hosts — never resolve a slug from a foreign URL.
+    if (!/(^|\.)pricecharting\.com$/i.test(u.hostname)) return null;
+    path = u.pathname;
+  } catch {
+    // Accept a bare "/game/console/product" path (no host) as well.
+    if (!raw.startsWith("/game/")) return null;
+    path = raw.split(/[?#]/)[0];
+  }
+  const m = /\/game\/([^/]+)\/([^/?#]+)/i.exec(path);
+  if (!m) return null;
+  const consoleSlug = decodeURIComponent(m[1]);
+  const productSlug = decodeURIComponent(m[2]);
+  // A purely-numeric product segment is not a slug (parseProductId handles ids).
+  if (/^\d+$/.test(productSlug)) return null;
+  const query = `${consoleSlug} ${productSlug}`.replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  if (!query) return null;
+  return { query, productSlug: productSlug.toLowerCase() };
+}
+
+/**
+ * Normalize a product name / URL slug for slug-equality. Separators and
+ * punctuation are dropped entirely (so "289/S-P" and "289s-p" compare equal) and
+ * leading zeros in a number are folded (so "047" and "47" compare equal).
+ */
+function normalizeSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "") // drop ALL separators/punctuation
+    .replace(/(^|[^0-9])0+(\d)/g, "$1$2"); // fold leading zeros in numbers (047 → 47)
+}
+
+/**
+ * From the products a slug query returned, choose the ONE whose own slug equals
+ * the URL's product slug (never an arbitrary search hit). Returns null when there
+ * is no unambiguous slug match — the caller then refuses rather than guessing.
+ */
+function bestSlugMatch<T extends { name: string }>(products: T[], productSlug: string): T | null {
+  const target = normalizeSlug(productSlug);
+  const exact = products.filter((p) => normalizeSlug(p.name) === target);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null; // ambiguous — require the numeric id
   return null;
 }
 
@@ -131,6 +188,14 @@ export interface ValueResponse {
   designation_requested: string | null;
   /** True only when the returned tier exactly represents the requested grade+designation. */
   designation_exact: boolean;
+  /**
+   * Capability state for the REQUESTED tier from the connected source:
+   *   - "available"              the exact tier has a value
+   *   - "tier_unavailable"       the source has no value for this tier (null, not $0);
+   *                              this means "unavailable from the connected source", not
+   *                              that the value does not exist anywhere.
+   */
+  tier_availability: "available" | "tier_unavailable";
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
   warnings: string[];
@@ -142,12 +207,23 @@ export interface ValueResponse {
  * exposes no product image, so the only image available is a marketplace
  * seller's photo of their own copy, keyed to the product id and often absent.
  */
+/**
+ * Where an image came from. The connected PriceCharting Prices API exposes NO
+ * official/catalog product image, so this is only ever "marketplace_offer" (a
+ * seller's own photo) or "none". "official_product" documents the taxonomy but
+ * is never produced by this source — a marketplace photo is never relabelled as
+ * an official image.
+ */
+export type ImageSource = "official_product" | "marketplace_offer" | "none";
+
 export interface OfferImageResponse {
   status: "success";
   action: "offer_image";
   product_id: string;
   offer_image_url: string | null;
   offer_listing_count: number;
+  /** Provenance of offer_image_url — never "official_product" from this source. */
+  image_source: ImageSource;
   warnings: string[];
 }
 
@@ -176,10 +252,13 @@ export interface LookupResponse {
   selected_tier_label: string | null;
   designation_requested: string | null;
   designation_exact: boolean;
+  tier_availability: "available" | "tier_unavailable";
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
   offer_image_url: string | null;
   offer_listing_count: number;
+  /** Provenance of offer_image_url — never "official_product" from this source. */
+  image_source: ImageSource;
   /** True when identity is not safe to auto-confirm (conflict or below threshold). */
   requires_confirmation: boolean;
   breakdown: ScoreBreakdown;
@@ -501,6 +580,7 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput):
     selected_tier_label: lookup.selected_tier_label,
     designation_requested: lookup.designation_requested,
     designation_exact: lookup.designation_exact,
+    tier_availability: lookup.value_pennies === null ? "tier_unavailable" : "available",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     warnings: [
@@ -534,6 +614,7 @@ async function handleOfferImage(client: PriceChartingClient, input: SlabSearchIn
     product_id: productId,
     offer_image_url: image.image_url,
     offer_listing_count: image.listing_count,
+    image_source: image.image_url ? "marketplace_offer" : "none",
     warnings: [
       "Seller listing photo from the PriceCharting Marketplace — a copy of this product offered by a seller, " +
         "not a canonical image and not proof this is your exact card. Confirm identity by the metadata fields.",
@@ -550,12 +631,51 @@ async function handleOfferImage(client: PriceChartingClient, input: SlabSearchIn
  * requiring confirmation when not safe to auto-link. A best-effort offer image
  * is attached for visual review.
  */
+/**
+ * Resolve a canonical PriceCharting product URL (slug, no id) to a product id by
+ * querying the API with the slug words and matching the returned product's own
+ * slug. Returns null when the URL is not a slug URL or no unambiguous slug match
+ * is found — the caller then refuses rather than linking an arbitrary product.
+ * The resolved product is still run through the identity matcher downstream, so
+ * a wrong-character / wrong-number slug URL is caught exactly like a search hit.
+ */
+async function resolveSlugToId(
+  client: PriceChartingClient,
+  slug: { query: string; productSlug: string },
+): Promise<string | null> {
+  let products: Awaited<ReturnType<typeof searchProducts>>;
+  try {
+    products = await searchProducts(client, slug.query);
+  } catch (err) {
+    if (isPriceChartingError(err) && err.code === "PRODUCT_NOT_FOUND") return null;
+    throw err;
+  }
+  const match = bestSlugMatch(products, slug.productSlug);
+  return match?.pricecharting_id ?? null;
+}
+
 async function handleLookup(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
-  const id = parseProductId(input);
+  // A numeric id resolves directly; a canonical slug URL is resolved via the API
+  // (no scraping) by querying the slug words and matching the product's own slug.
+  let id = parseProductId(input);
+  if (!id) {
+    const slug = parseProductSlug(input.product_url);
+    if (slug) {
+      id = await resolveSlugToId(client, slug);
+      if (!id) {
+        throw new PriceChartingError(
+          "PRODUCT_NOT_FOUND",
+          "That PriceCharting URL could not be resolved to a single product via the API. " +
+            "Open the product on PriceCharting and paste its numeric id (e.g. 5427932).",
+        );
+      }
+    }
+  }
   if (!id) {
     throw new PriceChartingError(
       "INVALID_PARAMETER",
-      "Enter a numeric PriceCharting product id (e.g. 5427932). A PriceCharting product URL without an id cannot be resolved to a product.",
+      "Enter a numeric PriceCharting product id (e.g. 5427932) or a canonical PriceCharting product URL " +
+        "(pricecharting.com/game/<console>/<product>). A number lifted from an unrelated part of a URL is not accepted.",
     );
   }
 
@@ -614,10 +734,12 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
     selected_tier_label: lookup.selected_tier_label,
     designation_requested: lookup.designation_requested,
     designation_exact: lookup.designation_exact,
+    tier_availability: lookup.value_pennies === null ? "tier_unavailable" : "available",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
     offer_image_url: offerImageUrl,
     offer_listing_count: offerListingCount,
+    image_source: offerImageUrl ? "marketplace_offer" : "none",
     requires_confirmation: requiresConfirmation,
     breakdown: scored.breakdown,
     warnings: [
