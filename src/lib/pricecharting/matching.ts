@@ -194,9 +194,54 @@ export function buildSearchQuery(item: ItemInput): string {
 
 /* ------------------------------ scoring -------------------------------- */
 
+export type FieldResult = "exact" | "normalized_exact" | "partial" | "missing" | "mismatch" | "not_checked";
+
+/** One field's requested-vs-candidate comparison, for the "Why this match?" panel. */
+export interface FieldComparison {
+  field: string;
+  requested_value: string | null;
+  candidate_value: string | null;
+  normalized_requested_value: string | null;
+  normalized_candidate_value: string | null;
+  result: FieldResult;
+  hard_conflict: boolean;
+  points_possible: number;
+  points_awarded: number;
+  explanation: string;
+}
+
+export interface ScoreContribution {
+  field: string;
+  points: number;
+}
+export interface ScoreDeduction {
+  field: string;
+  points: number;
+  reason: string;
+}
+
+/** Structured, human-inspectable breakdown of one candidate's score. */
+export interface ScoreBreakdown {
+  raw_score: number;
+  adjusted_score: number;
+  identity_floor_applied: boolean;
+  identity_floor_reason: string | null;
+  eligible: boolean;
+  disqualified: boolean;
+  hard_conflicts: string[];
+  soft_conflicts: string[];
+  warnings: string[];
+  score_contributions: ScoreContribution[];
+  score_deductions: ScoreDeduction[];
+  fields: FieldComparison[];
+}
+
+/** Scoring version — bump when the algorithm changes (stored with confirmations). */
+export const SCORING_VERSION = 2;
+
 export interface ScoredCandidate {
   product: Product;
-  score: number; // 0..100 normalized
+  score: number; // 0..100 normalized (adjusted, after the identity floor)
   awarded: number;
   possible: number;
   reasons: string[];
@@ -207,6 +252,8 @@ export interface ScoredCandidate {
   characterExact: boolean;
   /** The FULL printed number matched, incl. any promo suffix ("289/S-P"). */
   numberExactFull: boolean;
+  /** Full structured breakdown (per-field results, contributions, floor reason). */
+  breakdown: ScoreBreakdown;
 }
 
 /** Score a single candidate product against the item's identifiers. */
@@ -214,69 +261,132 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
   const ids = extractIdentifiers(item);
   const hay = normalizeText(`${product.name} ${product.console_or_category ?? ""}`);
   const reasons: string[] = [];
-  const conflicts: string[] = [];
+  const hardConflicts: string[] = [];
+  const softConflicts: string[] = [];
   const missing: string[] = [];
+  const fields: FieldComparison[] = [];
+  const pushField = (f: Partial<FieldComparison> & Pick<FieldComparison, "field" | "result">) =>
+    fields.push({
+      requested_value: null,
+      candidate_value: null,
+      normalized_requested_value: null,
+      normalized_candidate_value: null,
+      hard_conflict: false,
+      points_possible: 0,
+      points_awarded: 0,
+      explanation: "",
+      ...f,
+    });
   let awarded = 0;
   let possible = 0;
   let disqualified = false;
   let characterExact = false;
   let numberExactFull = false;
-  // A "distinctive" number carries a promo suffix or letters ("289/S-P",
-  // "SWSH123") and is globally unique; a bare digit ("4") is shared across sets.
   let numberDistinctive = false;
 
   for (const id of ids) {
     possible += id.weight;
 
     if (id.kind === "number") {
-      // Compare canonical NUMERATORS only. "016/064" → "16" matches candidate
-      // "#16"; it does NOT match "#69"/"#76", and is never concatenated to
-      // "016064". The denominator (set size) is not part of the identity.
       const wantedTok = cardNumberToken(id.value);
       const candTok = cardNumberToken(extractHashNumber(product.name));
-      // Separately, does the FULL printed number (incl. promo suffix) match?
+      const candRawFull = extractFullCardNumber(product.name);
       const wantFull = normalizeFullNumber(id.value);
-      const candFull = normalizeFullNumber(extractFullCardNumber(product.name));
+      const candFull = normalizeFullNumber(candRawFull);
       if (wantFull && candFull && wantFull === candFull) numberExactFull = true;
       if (wantFull && /[^0-9]/.test(wantFull)) numberDistinctive = true;
-      // Conflicting PROMO SUFFIXES are a hard conflict (S-P vs SV-P), but a
-      // MISSING suffix on either side is never a conflict, and numeric
-      // denominators (/64) are not suffixes.
       const wantSuffix = promoSuffix(wantFull);
       const candSuffix = promoSuffix(candFull);
-      if (wantSuffix && candSuffix && wantSuffix !== candSuffix) {
-        conflicts.push(`card_number mismatch: promo suffix /${wantSuffix} (${id.value}) vs /${candSuffix}`);
+
+      // Promo-suffix hard conflict (S-P vs SV-P); missing suffix is never a conflict.
+      const suffixConflict = !!(wantSuffix && candSuffix && wantSuffix !== candSuffix);
+      if (suffixConflict) {
+        hardConflicts.push(`card_number mismatch: promo suffix /${wantSuffix} (${id.value}) vs /${candSuffix}`);
         disqualified = true;
       }
+
+      let numAward = 0;
+      let numeratorResult: FieldResult = "not_checked";
       if (candTok !== null && wantedTok !== null) {
         if (candTok === wantedTok) {
-          awarded += id.weight;
+          numAward = id.weight;
+          numeratorResult = "exact";
           reasons.push(`Exact ${id.key} #${wantedTok} (display ${id.value})`);
         } else {
-          // A DIFFERENT explicit number is a disqualifying conflict.
-          conflicts.push(`${id.key} mismatch: wanted #${wantedTok} (${id.value}), candidate #${candTok}`);
+          numeratorResult = "mismatch";
+          hardConflicts.push(`${id.key} mismatch: wanted #${wantedTok} (${id.value}), candidate #${candTok}`);
           disqualified = true;
         }
       } else if (wantedTok !== null && numberTokenPresent(hay, wantedTok)) {
-        awarded += id.weight * 0.85;
+        numAward = id.weight * 0.85;
+        numeratorResult = "partial";
         reasons.push(`${id.key} #${wantedTok} present`);
       } else {
+        numeratorResult = "missing";
         missing.push(`${id.key} #${wantedTok ?? id.value} not found in candidate`);
       }
+      awarded += numAward;
+
+      // Emit the number sub-fields (the weight lives on complete_card_number).
+      pushField({
+        field: "complete_card_number",
+        requested_value: id.value,
+        candidate_value: candRawFull,
+        normalized_requested_value: wantFull,
+        normalized_candidate_value: candFull,
+        result: suffixConflict ? "mismatch" : numberExactFull ? "normalized_exact" : numeratorResult,
+        hard_conflict: suffixConflict || numeratorResult === "mismatch",
+        points_possible: id.weight,
+        points_awarded: numAward,
+        explanation: numberExactFull
+          ? "Full printed number matches exactly."
+          : numeratorResult === "mismatch"
+            ? "Different collector number."
+            : numeratorResult === "partial"
+              ? "Numerator present but full number unconfirmed."
+              : numeratorResult === "missing"
+                ? "Candidate does not expose a collector number."
+                : "Numerator matches.",
+      });
+      pushField({
+        field: "numerator",
+        requested_value: wantedTok,
+        candidate_value: candTok,
+        result: candTok === null || wantedTok === null ? "missing" : candTok === wantedTok ? "exact" : "mismatch",
+        hard_conflict: candTok !== null && wantedTok !== null && candTok !== wantedTok,
+        explanation: "Leading numeric collector number.",
+      });
+      pushField({
+        field: "promo_suffix",
+        requested_value: wantSuffix,
+        candidate_value: candSuffix,
+        result: !wantSuffix && !candSuffix ? "not_checked" : !wantSuffix || !candSuffix ? "missing" : wantSuffix === candSuffix ? "exact" : "mismatch",
+        hard_conflict: suffixConflict,
+        explanation: "Promotional family suffix (e.g. S-P). A numeric denominator (/64) is not a suffix.",
+      });
       continue;
     }
 
     if (id.kind === "console") {
-      // Console/region mismatch is a hard conflict for video games.
       const wantTokens = tokens(id.value);
       const present = wantTokens.some((t) => hay.includes(t));
       if (present) {
         awarded += id.weight;
         reasons.push(`Console matches "${id.value}"`);
       } else {
-        conflicts.push(`Console "${id.value}" not present in candidate "${product.console_or_category ?? ""}"`);
+        hardConflicts.push(`Console "${id.value}" not present in candidate "${product.console_or_category ?? ""}"`);
         disqualified = true;
       }
+      pushField({
+        field: "console",
+        requested_value: id.value,
+        candidate_value: product.console_or_category,
+        result: present ? "partial" : "mismatch",
+        hard_conflict: !present,
+        points_possible: id.weight,
+        points_awarded: present ? id.weight : 0,
+        explanation: "Console/region (hard conflict for video games).",
+      });
       continue;
     }
 
@@ -289,68 +399,113 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
         if (wantYear === relYear) {
           awarded += id.weight;
           reasons.push(`Year matches ${wantYear}`);
+          pushField({ field: "year", requested_value: wantYear, candidate_value: relYear, result: "exact", points_possible: id.weight, points_awarded: id.weight, explanation: "Release year matches." });
         } else {
-          conflicts.push(`Year mismatch: wanted ${wantYear}, candidate ${relYear}`);
-          // Year mismatch is a strong signal but not always disqualifying
-          // (reprints); heavily penalize rather than hard-reject.
+          softConflicts.push(`Year mismatch: wanted ${wantYear}, candidate ${relYear}`);
+          pushField({ field: "year", requested_value: wantYear, candidate_value: relYear, result: "mismatch", hard_conflict: false, points_possible: id.weight, points_awarded: 0, explanation: "Year differs (SOFT — reprints exist; requires review, not a hard reject)." });
         }
       } else {
-        // The candidate provides no year to compare against — treat as UNKNOWN,
-        // not a miss: remove its weight from the denominator so a card whose
-        // PriceCharting product simply lists no release date is not penalized.
-        possible -= id.weight;
+        possible -= id.weight; // candidate has no year → UNKNOWN, not penalized
         missing.push(`Year ${wantYear || "?"} could not be confirmed (candidate has no release date)`);
+        pushField({ field: "year", requested_value: wantYear || null, candidate_value: relYear || null, result: "missing", points_possible: 0, points_awarded: 0, explanation: "Candidate lists no release date — unknown, not penalized." });
       }
       continue;
     }
 
-    // Text identifier: award proportional to token coverage.
     const wantTokens = tokens(id.value);
     if (wantTokens.length === 0) {
       possible -= id.weight;
       continue;
     }
 
-    // Card name: every MAJOR character must be present. A missing/replaced
-    // character (e.g. Piplup vs Pikachu) is a hard disqualification, not a
-    // partial-coverage penalty.
+    let charHard = false;
     if (id.key === "card_name") {
       const cm = characterMatch(id.value, product.name);
       if (cm.wanted.length > 0 && !cm.ok) {
-        conflicts.push(`character mismatch: candidate is missing ${cm.missing.join(", ")}`);
+        hardConflicts.push(`character mismatch: candidate is missing ${cm.missing.join(", ")}`);
         disqualified = true;
+        charHard = true;
       } else if (cm.wanted.length > 0 && cm.ok) {
-        characterExact = true; // every major character present
+        characterExact = true;
       }
     }
 
     const hits = wantTokens.filter((t) => hay.includes(t)).length;
     const coverage = hits / wantTokens.length;
+    const fieldAward = id.weight * coverage;
     if (coverage > 0) {
-      awarded += id.weight * coverage;
+      awarded += fieldAward;
       if (coverage >= 0.99) reasons.push(`Matches ${id.key} "${id.value}"`);
       else reasons.push(`Partial ${id.key} match "${id.value}" (${Math.round(coverage * 100)}%)`);
     } else {
       missing.push(`${id.key} "${id.value}" not found`);
     }
+    // The card_name field is the "character" comparison; other text ids are soft.
+    pushField({
+      field: id.key === "card_name" ? "character" : id.key === "variant" ? "variation" : id.key,
+      requested_value: id.value,
+      candidate_value: product.name,
+      normalized_requested_value: normalizeText(id.value),
+      normalized_candidate_value: hay,
+      result: charHard ? "mismatch" : coverage >= 0.99 ? "exact" : coverage > 0 ? "partial" : "missing",
+      hard_conflict: charHard,
+      points_possible: id.weight,
+      points_awarded: fieldAward,
+      explanation:
+        id.key === "card_name"
+          ? charHard
+            ? "A required character is missing/replaced (hard conflict)."
+            : "Every major character present."
+          : id.key === "set"
+            ? "Set/catalog label (SOFT — a broad catalog alias is not a conflict)."
+            : "Supporting descriptor (soft).",
+    });
   }
 
-  let score = possible > 0 ? Math.round((awarded / possible) * 100) : 0;
+  // Artwork can't be compared from PriceCharting metadata — always not_checked.
+  pushField({ field: "artwork", result: "not_checked", explanation: "PriceCharting metadata carries no artwork to compare; use the image gallery." });
 
-  // IDENTITY FLOOR: an exact character match + an exact DISTINCTIVE full number
-  // (promo suffix or alphanumeric — globally unique) with no conflicts is a
-  // confident identity match, even when the catalog set label differs
-  // ("Sword & Shield Promos" vs "Pokemon Japanese Promo") or PriceCharting lists
-  // no year. Those catalog-alias / missing-year differences must not hold a
-  // genuine exact match below the confirm threshold. Pure-numeric numbers are
-  // NOT distinctive (shared across sets) and are deliberately excluded; genuine
-  // multi-candidate ties are still capped by the ambiguity guard downstream.
+  const rawScore = possible > 0 ? Math.round((awarded / possible) * 100) : 0;
+  let score = rawScore;
+  let identityFloorApplied = false;
+  let identityFloorReason: string | null = null;
+
+  const conflicts = [...hardConflicts, ...softConflicts];
+  // IDENTITY FLOOR (see prior comment): exact character + exact DISTINCTIVE full
+  // number + no conflicts floors the score so catalog-alias / missing-year
+  // differences don't hold a genuine exact match below the confirm threshold.
   if (characterExact && numberExactFull && numberDistinctive && conflicts.length === 0) {
+    if (score < 95) {
+      identityFloorApplied = true;
+      identityFloorReason = "Exact character + exact distinctive collector number, no conflicts — catalog-alias/missing-year differences ignored.";
+    }
     score = Math.max(score, 95);
     reasons.push("Exact character + exact distinctive collector number — catalog/year differences ignored");
   }
 
-  return { product, score, awarded, possible, reasons, conflicts, missing, disqualified, characterExact, numberExactFull };
+  const score_contributions: ScoreContribution[] = fields
+    .filter((f) => f.points_awarded > 0)
+    .map((f) => ({ field: f.field, points: Math.round(f.points_awarded * 100) / 100 }));
+  const score_deductions: ScoreDeduction[] = fields
+    .filter((f) => f.points_possible > 0 && f.points_awarded < f.points_possible)
+    .map((f) => ({ field: f.field, points: Math.round((f.points_possible - f.points_awarded) * 100) / 100, reason: f.explanation }));
+
+  const breakdown: ScoreBreakdown = {
+    raw_score: rawScore,
+    adjusted_score: score,
+    identity_floor_applied: identityFloorApplied,
+    identity_floor_reason: identityFloorReason,
+    eligible: !disqualified,
+    disqualified,
+    hard_conflicts: hardConflicts,
+    soft_conflicts: softConflicts,
+    warnings: missing,
+    score_contributions,
+    score_deductions,
+    fields,
+  };
+
+  return { product, score, awarded, possible, reasons, conflicts, missing, disqualified, characterExact, numberExactFull, breakdown };
 }
 
 /* --------------------------- confidence gate --------------------------- */

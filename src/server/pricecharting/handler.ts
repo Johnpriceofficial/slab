@@ -23,7 +23,7 @@ import type { Clock } from "../../lib/pricecharting/clock";
 import type { Logger } from "../../lib/pricecharting/logger";
 import { nullLogger } from "../../lib/pricecharting/logger";
 import { searchProducts, getProductById } from "../../lib/pricecharting/api";
-import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber } from "../../lib/pricecharting/matching";
+import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber, type ScoreBreakdown } from "../../lib/pricecharting/matching";
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
@@ -95,6 +95,8 @@ export interface CandidateResult {
   conflicts: string[];
   /** True when the candidate was hard-disqualified (shown only under "Rejected"). */
   rejected: boolean;
+  /** Full structured "Why this match?" breakdown (per-field, contributions, floor). */
+  breakdown: ScoreBreakdown;
 }
 
 export interface SearchResponse {
@@ -168,6 +170,7 @@ export interface LookupResponse {
   offer_listing_count: number;
   /** True when identity is not safe to auto-confirm (conflict or below threshold). */
   requires_confirmation: boolean;
+  breakdown: ScoreBreakdown;
   warnings: string[];
 }
 
@@ -342,6 +345,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput)
       company_specific: lookup.company_specific,
       conflicts: s.conflicts,
       rejected: s.disqualified,
+      breakdown: s.breakdown,
     };
   };
 
@@ -595,6 +599,7 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
     offer_image_url: offerImageUrl,
     offer_listing_count: offerListingCount,
     requires_confirmation: requiresConfirmation,
+    breakdown: scored.breakdown,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
       ...(scored.disqualified
