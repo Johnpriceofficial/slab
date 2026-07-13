@@ -37,7 +37,7 @@ export function extractCatalogImage(html: string): string | null {
     const image = safeImageUrl(/content\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]);
     if (image) return image;
   }
-  for (const tag of html.match(/<img\b[^>]*(?:id\s*=\s*["'](?:product_image|product-image)["']|class\s*=\s*["'][^"']*product-image[^"']*["'])[^>]*>/gi) ?? []) {
+  for (const tag of html.match(/<img\b[^>]*(?:id\s*=\s*["'](?:product_image|product-image)["']|class\s*=\s*["'][^"']*product-image[^"']*["']|alt\s*=\s*["']Main Image(?:\s*\||["']))[^>]*>/gi) ?? []) {
     const image = safeImageUrl(/(?:src|data-src)\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]);
     if (image) return image;
   }
