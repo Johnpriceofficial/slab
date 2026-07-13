@@ -1,10 +1,10 @@
 /**
  * LIVE Supabase integration tests. These run ONLY when pointed at a dedicated
- * SlabVault test project via env vars; otherwise the whole suite is skipped so
+ * GradedCardValue.com test project via env vars; otherwise the whole suite is skipped so
  * `bun run test` stays green and NOTHING ever runs against a production (e.g.
  * party-rental) project.
  *
- * Required env (set to a DEDICATED, disposable SlabVault project only):
+ * Required env (set to a DEDICATED, disposable GradedCardValue.com project only):
  *   SLABVAULT_TEST_URL           https://<ref>.supabase.co
  *   SLABVAULT_TEST_ANON_KEY      anon/public key
  *   SLABVAULT_TEST_SERVICE_KEY   service-role key (used only to seed users/admins)
@@ -55,7 +55,7 @@ function baseInput(overrides: Record<string, unknown> = {}) {
   };
 }
 
-suite("SlabVault live integration", () => {
+suite("GradedCardValue.com live integration", () => {
   // Created in beforeAll (NOT at collection time — a skipped suite still runs its
   // factory, and createClient(undefined) would throw).
   let admin: SupabaseClient; // service role: seeds users, bypasses RLS

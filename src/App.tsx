@@ -25,7 +25,7 @@ function AdminHeader() {
     <header className="border-b bg-background">
       <div className="container flex h-14 items-center justify-between">
         <Link to="/dashboard" className="font-semibold">
-          SlabVault
+          GradedCardValue.com
         </Link>
         <div className="flex items-center gap-3 text-sm">
           {user?.email && <span className="text-muted-foreground">{user.email}</span>}

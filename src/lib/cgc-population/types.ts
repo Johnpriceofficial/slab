@@ -34,7 +34,7 @@ export type GradeCountField = (typeof GRADE_COUNT_FIELDS)[number];
 /**
  * Ordered high → low. `rank` 0 is the top. Used to compute "population higher"
  * (strictly smaller rank) and "population lower" (strictly larger rank).
- * NOTE: ranking Perfect 10 above Pristine 10 is a SlabVault display assumption —
+ * NOTE: ranking Perfect 10 above Pristine 10 is a GradedCardValue.com display assumption —
  * CGC's card ceiling is Pristine 10; count_perfect_10 is typically 0 for cards.
  */
 export interface GradeTier {
@@ -114,7 +114,7 @@ export const MATCH_STATUS_LABEL: Record<PopulationMatchStatus, string> = {
 };
 
 /**
- * SlabVault scarcity buckets — configurable, and explicitly NOT official CGC
+ * GradedCardValue.com scarcity buckets — configurable, and explicitly NOT official CGC
  * labels. Population counts themselves are always shown as the raw factual value.
  */
 export interface ScarcityBand {

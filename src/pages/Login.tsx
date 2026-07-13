@@ -1,5 +1,5 @@
 /**
- * Email/password sign-in for SlabVault admins.
+ * Email/password sign-in for GradedCardValue.com admins.
  *
  * On a successful sign-in the AuthProvider re-verifies admin status; once the
  * status becomes "admin" this page redirects to wherever the user was headed
@@ -54,10 +54,10 @@ export default function Login() {
 
   return (
     <div className="container flex min-h-screen max-w-md flex-col justify-center py-12">
-      <PageHead title="Sign in · SlabVault" noindex />
+      <PageHead title="Sign in · GradedCardValue.com" noindex />
       <Card>
         <CardHeader>
-          <CardTitle>Sign in to SlabVault</CardTitle>
+          <CardTitle>Sign in to GradedCardValue.com</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-4">
@@ -98,7 +98,7 @@ export default function Login() {
             </Button>
           </form>
           <p className="mt-4 text-xs text-muted-foreground">
-            SlabVault is an admin-only inventory tool. Access is restricted to authorized accounts.
+            GradedCardValue.com is an admin-only graded-card inventory and valuation tool. Access is restricted to authorized accounts.
           </p>
         </CardContent>
       </Card>

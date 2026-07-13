@@ -52,7 +52,7 @@ export async function scrapeCatalogImage(fetchImpl: FetchLike, product: Product)
   try {
     const response = await fetchImpl(pageUrl, {
       method: "GET",
-      headers: { Accept: "text/html", "User-Agent": "SlabVault/1.0 product-image fallback" },
+      headers: { Accept: "text/html", "User-Agent": "GradedCardValue/1.0 product-image fallback" },
       signal: controller.signal,
     });
     if (!response.ok) return null;
@@ -136,7 +136,7 @@ export async function scrapePublicGuidePrice(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetchImpl(pageUrl, { method: "GET", headers: { Accept: "text/html", "User-Agent": "SlabVault/1.0 pricing fallback" }, signal: controller.signal });
+    const response = await fetchImpl(pageUrl, { method: "GET", headers: { Accept: "text/html", "User-Agent": "GradedCardValue/1.0 pricing fallback" }, signal: controller.signal });
     if (!response.ok) return null;
     return extractPublicGuidePrice(await response.text(), grader, grade, gradeLabel);
   } catch {

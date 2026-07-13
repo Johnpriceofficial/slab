@@ -604,7 +604,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
 
   return (
     <div className="container max-w-5xl py-8">
-      <PageHead title="New Slab · SlabVault" noindex />
+      <PageHead title="New Slab · GradedCardValue.com" noindex />
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Add a Slab</h1>

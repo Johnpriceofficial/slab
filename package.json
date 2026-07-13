@@ -1,9 +1,9 @@
 {
-  "name": "slabvault",
+  "name": "graded-card-value",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "SlabVault — graded Pokémon slab inventory with PriceCharting valuation and Excel export.",
+  "description": "GradedCardValue.com — graded card identification, PriceCharting verification, valuation, inventory, and Excel export.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -9,7 +9,7 @@
  *   - Currency formatting on money columns; money read from integer cents.
  *   - Certification numbers stored as TEXT (leading zeros preserved).
  *   - Inventory sorted numerically by inventory number.
- *   - Filename: SlabVault_Master_Inventory_YYYY-MM-DD.xlsx
+ *   - Filename: GradedCardValue_Master_Inventory_YYYY-MM-DD.xlsx
  *
  * `buildInventoryWorkbook` is pure and synchronous-friendly for tests; the DOM
  * download helper is separate so tests never touch the browser.
@@ -163,7 +163,7 @@ export function buildInventoryWorkbook(
   stats?: DashboardStats,
 ): ExcelJS.Workbook {
   const wb = new ExcelJS.Workbook();
-  wb.creator = "SlabVault";
+  wb.creator = "GradedCardValue.com";
   buildMasterSheet(wb, slabs);
   buildCompsSheet(wb, comps);
   buildSummarySheet(wb, stats ?? computeDashboardStats(slabs));
@@ -175,7 +175,7 @@ export function workbookFilename(today: Date = new Date()): string {
   const y = today.getFullYear();
   const m = String(today.getMonth() + 1).padStart(2, "0");
   const d = String(today.getDate()).padStart(2, "0");
-  return `SlabVault_Master_Inventory_${y}-${m}-${d}.xlsx`;
+  return `GradedCardValue_Master_Inventory_${y}-${m}-${d}.xlsx`;
 }
 
 /** Browser-only: build the workbook and trigger a download. */

@@ -99,7 +99,7 @@ export default function SlabList() {
 
   return (
     <div className="container max-w-[1400px] py-8">
-      <PageHead title="Slab Inventory · SlabVault" noindex />
+      <PageHead title="Graded Card Inventory · GradedCardValue.com" noindex />
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Slab Inventory</h1>

@@ -38,7 +38,7 @@ export function ProtectedAdminRoute({ children }: { children: React.ReactNode })
         <h1 className="mb-2 text-2xl font-bold">Access denied</h1>
         <p className="mb-6 text-sm text-muted-foreground">
           You are signed in as <span className="font-medium">{user?.email ?? "an unknown account"}</span>, but this
-          account is not authorized for SlabVault. Ask an administrator to grant your account access.
+          account is not authorized for GradedCardValue.com. Ask an administrator to grant your account access.
         </p>
         <Button variant="outline" onClick={() => void signOut()}>
           Sign out

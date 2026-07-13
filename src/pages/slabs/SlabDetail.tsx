@@ -107,7 +107,7 @@ export default function SlabDetail() {
 
   return (
     <div className="container max-w-5xl py-8">
-      <PageHead title={`Slab #${slab.inventory_number} · SlabVault`} noindex />
+      <PageHead title={`Slab #${slab.inventory_number} · GradedCardValue.com`} noindex />
 
       {/* Header + prev/next */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">

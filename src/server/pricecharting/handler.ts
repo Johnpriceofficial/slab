@@ -639,7 +639,7 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
     available_values_cents: availableCents,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
-      ...(publicPick ? ["The API omitted this requested tier; SlabVault synchronized the current guide from the confirmed PriceCharting public product page."] : []),
+      ...(publicPick ? ["The API omitted this requested tier; GradedCardValue.com synchronized the current guide from the confirmed PriceCharting public product page."] : []),
       ...lookup.warnings.filter((w) => !publicPick || !/unavailable from the connected PriceCharting source/i.test(w)),
     ],
   };
@@ -822,7 +822,7 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput,
     breakdown: scored.breakdown,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
-      ...(publicPick ? ["The API omitted this requested tier; SlabVault synchronized the current guide from the confirmed PriceCharting public product page."] : []),
+      ...(publicPick ? ["The API omitted this requested tier; GradedCardValue.com synchronized the current guide from the confirmed PriceCharting public product page."] : []),
       ...(scored.disqualified
         ? [`This product HARD-CONFLICTS with the slab identity (${scored.conflicts.join("; ")}) — do not link without review.`]
         : []),
