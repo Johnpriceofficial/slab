@@ -28,6 +28,7 @@ import { dollarsToCents, centsToInputString, todayLocalDate } from "@/lib/slabs/
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
+import { identityChangeAction, productSwitchReplacesDerived } from "@/lib/slabs/valuation-provenance";
 import { buildPricingPersist, tierLabelOf, type SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
 import { saveSlab, validateSlabInput, verifiedBlockers, type SlabDataAccess, type SaveMode } from "@/lib/slabs/save-slab";
 import { supabaseSlabDataAccess } from "@/lib/slabs/data";
@@ -217,9 +218,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     setVisual(null);
     setRejected(null); // a rejection is tied to the identity it was made against
     setPcStale(true); // only surfaced while a confirmed product is linked
-    if (provenanceRef.current === "manual") {
-      setValStale(true); // preserve manual figures, warn (surfaced only when figures exist)
-    } else {
+    const action = identityChangeAction(provenanceRef.current);
+    if (action.warnManualStale) setValStale(true); // preserve manual figures, warn
+    if (action.clearAutoValuation) {
       setVal((s) => ({ ...s, guide: "", final: "", quick: "", replacement: "", confidence: "manual", notes: "" }));
       setValProvenance("manual");
       setValStale(false);
@@ -297,7 +298,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     });
     // §1E: switching products REPLACES the previous product's auto-derived
     // valuation, but a MANUAL valuation the operator typed is never clobbered.
-    const priorWasDerived = valProvenance === "source" || valProvenance === "formula";
+    const priorWasDerived = productSwitchReplacesDerived(valProvenance);
     setVal((s) => ({
       ...s,
       guide: centsToInputString(sel.value_cents),
