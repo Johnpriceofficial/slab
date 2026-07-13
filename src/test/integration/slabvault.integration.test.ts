@@ -48,6 +48,9 @@ function baseInput(overrides: Record<string, unknown> = {}) {
     year: 1999,
     language: "English",
     final_value_cents: 12500,
+    verification_status: "verified",
+    valuation_confidence: "manual",
+    valuation_provenance: "manual_value",
     ...overrides,
   };
 }
@@ -58,6 +61,7 @@ suite("SlabVault live integration", () => {
   let admin: SupabaseClient; // service role: seeds users, bypasses RLS
   let adminClient: SupabaseClient; // signed-in ADMIN user (JWT)
   let userClient: SupabaseClient; // signed-in NON-admin user (JWT)
+  let anonClient: SupabaseClient; // no session: verifies PUBLIC/anon cannot execute definer RPCs
   const createdUserIds: string[] = [];
   const createdSlabIds: string[] = [];
   const stamp = `${Math.floor(performance.now())}`;
@@ -88,6 +92,7 @@ suite("SlabVault live integration", () => {
     });
     adminClient = await makeUser(`admin+${stamp}@slabvault.test`, true);
     userClient = await makeUser(`user+${stamp}@slabvault.test`, false);
+    anonClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false } });
   });
 
   afterAll(async () => {
@@ -95,11 +100,11 @@ suite("SlabVault live integration", () => {
     for (const id of createdUserIds) await admin.auth.admin.deleteUser(id).catch(() => {});
   });
 
-  async function createSlab(client: SupabaseClient, overrides: Record<string, unknown> = {}) {
+  async function createSlab(client: SupabaseClient, overrides: Record<string, unknown> = {}, backExt: string | null = "png") {
     const { data, error } = await client.rpc("create_slab", {
       p: baseInput(overrides),
       p_front_ext: "jpg",
-      p_back_ext: "png",
+      p_back_ext: backExt,
     });
     return { data: Array.isArray(data) ? data[0] : data, error };
   }
@@ -110,6 +115,35 @@ suite("SlabVault live integration", () => {
     expect(data?.inventory_number).toBeGreaterThan(0);
     if (data?.id) createdSlabIds.push(data.id);
   });
+
+  it("creates a front-only incomplete draft while keeping the back image optional", async () => {
+    const { data, error } = await createSlab(adminClient, {
+      card_name: null,
+      grader: null,
+      grade: null,
+      certification_number: null,
+      verification_status: "unverified",
+      final_value_cents: null,
+      valuation_confidence: null,
+      valuation_provenance: "tier_unavailable",
+    }, null);
+    expect(error).toBeNull();
+    expect(data?.front_image_path).toMatch(/\/front\.jpg$/);
+    expect(data?.back_image_path).toBeNull();
+    if (data?.id) createdSlabIds.push(data.id);
+  });
+
+  it.each(["card_name", "grader", "grade", "certification_number"])(
+    "rejects a verified record missing %s at the database boundary",
+    async (field) => {
+      const { error } = await createSlab(adminClient, {
+        certification_number: `MISS-${field}-${stamp}`,
+        [field]: null,
+      });
+      expect(error).not.toBeNull();
+      expect(String(error?.message)).toMatch(/check constraint|violates/i);
+    },
+  );
 
   it("a non-admin is rejected by create_slab", async () => {
     const { error } = await createSlab(userClient, { certification_number: `U${stamp}` });
@@ -156,8 +190,8 @@ suite("SlabVault live integration", () => {
 
   it("spaces global PriceCharting reservations at least ~1s apart", async () => {
     const bucket = `pc-test-${stamp}`;
-    const a = await adminClient.rpc("reserve_api_request_slot", { p_bucket: bucket, p_min_interval_ms: 1000 });
-    const b = await adminClient.rpc("reserve_api_request_slot", { p_bucket: bucket, p_min_interval_ms: 1000 });
+    const a = await admin.rpc("reserve_api_request_slot", { p_bucket: bucket, p_min_interval_ms: 1000 });
+    const b = await admin.rpc("reserve_api_request_slot", { p_bucket: bucket, p_min_interval_ms: 1000 });
     const ta = new Date(a.data as string).getTime();
     const tb = new Date(b.data as string).getTime();
     expect(tb - ta).toBeGreaterThanOrEqual(950); // ≥ ~1s
@@ -166,9 +200,9 @@ suite("SlabVault live integration", () => {
 
   it("enforces a durable daily quota via consume_daily_quota", async () => {
     const bucket = `quota-test-${stamp}`;
-    const r1 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
-    const r2 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
-    const r3 = await adminClient.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    const r1 = await admin.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    const r2 = await admin.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
+    const r3 = await admin.rpc("consume_daily_quota", { p_bucket: bucket, p_limit: 2 });
     expect(r1.data).toBe(true);
     expect(r2.data).toBe(true);
     expect(r3.data).toBe(false); // 3rd call over the limit of 2 → denied, no increment
@@ -215,8 +249,13 @@ suite("SlabVault live integration", () => {
   });
 
   it("apply_slab_pricing: atomic tiers+scalars, stale guard, and hand-entered-guide preservation", async () => {
-    // A slab with a hand-entered graded guide of $42.50.
-    const created = await createSlab(adminClient, { certification_number: `PC${stamp}`, final_value_cents: 4250 });
+    const created = await createSlab(adminClient, {
+      certification_number: `PC${stamp}`,
+      final_value_cents: 4250,
+      pricecharting_value_cents: 4250,
+      valuation_provenance: "pricecharting_exact_tier",
+      valuation_confidence: "high",
+    });
     expect(created.error).toBeNull();
     const id = created.data.id as string;
     createdSlabIds.push(id);
@@ -232,7 +271,7 @@ suite("SlabVault live integration", () => {
     //    columns written atomically.
     const applied1 = await adminClient.rpc("apply_slab_pricing", {
       p_slab_id: id, p_tiers: tiers(t1), p_raw: { ok: true }, p_priced_at: t1,
-      p_scalars: { product_id: "5427932", product_name: "Charmander #289/S-P", grade_field: "condition-17-price", sales_volume: 3, match_status: "exact", apply_value: true, value_cents: 5000, variance: -15 },
+      p_scalars: { product_id: "5427932", product_name: "Charmander #289/S-P", grade_field: "condition-17-price", sales_volume: 3, match_status: "exact", apply_value: true, value_cents: 5000, variance: -15, apply_provenance: true, valuation_provenance: "pricecharting_exact_tier", valuation_confidence: "high" },
     });
     expect(applied1.error).toBeNull();
     expect(applied1.data).toBe(true);
@@ -246,22 +285,27 @@ suite("SlabVault live integration", () => {
     const older = new Date(Date.parse(t1) - 60_000).toISOString();
     const applied2 = await adminClient.rpc("apply_slab_pricing", {
       p_slab_id: id, p_tiers: tiers(older), p_raw: null, p_priced_at: older,
-      p_scalars: { product_id: "OLD", product_name: "stale", grade_field: null, sales_volume: null, match_status: "likely", apply_value: true, value_cents: 9999, variance: 0 },
+      p_scalars: { product_id: "OLD", product_name: "stale", grade_field: null, sales_volume: null, match_status: "likely", apply_value: true, value_cents: 9999, variance: 0, apply_provenance: true, valuation_provenance: "pricecharting_estimate", valuation_confidence: "moderate" },
     });
     expect(applied2.data).toBe(false);
     const { data: row2 } = await admin.from("slabs").select("pricecharting_value_cents, pricecharting_product_id").eq("id", id).single();
     expect(row2.pricecharting_value_cents).toBe(5000); // unchanged
     expect(row2.pricecharting_product_id).toBe("5427932"); // scalar NOT clobbered by the stale write
 
-    // 3. apply_value=false PRESERVES the guide while still refreshing provenance.
+    // 3. A manual guide is preserved while linked metadata/tier comparisons refresh.
+    await admin.from("slabs").update({
+      pricecharting_value_cents: 4250,
+      valuation_provenance: "manual_guide",
+      valuation_confidence: "manual",
+    }).eq("id", id);
     const t3 = new Date(Date.parse(t1) + 60_000).toISOString();
     const applied3 = await adminClient.rpc("apply_slab_pricing", {
       p_slab_id: id, p_tiers: tiers(t3), p_raw: null, p_priced_at: t3,
-      p_scalars: { product_id: "5427932", product_name: "Refreshed Name", grade_field: null, sales_volume: null, match_status: "likely", apply_value: false, value_cents: null, variance: null },
+      p_scalars: { product_id: "5427932", product_name: "Refreshed Name", grade_field: null, sales_volume: null, match_status: "likely", apply_value: false, value_cents: null, variance: null, apply_provenance: false, valuation_provenance: null, valuation_confidence: null },
     });
     expect(applied3.data).toBe(true);
     const { data: row3 } = await admin.from("slabs").select("pricecharting_value_cents, pricecharting_product_name").eq("id", id).single();
-    expect(row3.pricecharting_value_cents).toBe(5000); // guide preserved (apply_value=false)
+    expect(row3.pricecharting_value_cents).toBe(4250); // operator guide preserved
     expect(row3.pricecharting_product_name).toBe("Refreshed Name"); // provenance refreshed
 
     // 4. Non-admin is rejected.
@@ -311,6 +355,13 @@ suite("SlabVault live integration", () => {
       p_slab_id: id, p_patch: patch(), p_event: { event_type: "visual_confirmed", product_id: "x", source: null, detail: {} },
     });
     expect(denied.error).not.toBeNull();
+
+    // Anonymous/PUBLIC callers do not have EXECUTE at all (before body checks).
+    const anonDenied = await anonClient.rpc("record_pricecharting_confirmation", {
+      p_slab_id: id, p_patch: patch(), p_event: { event_type: "visual_confirmed", product_id: "x", source: null, detail: {} },
+    });
+    expect(anonDenied.error).not.toBeNull();
+    expect(String(anonDenied.error?.message)).toMatch(/permission denied|function .* does not exist/i);
 
     // 3. Atomicity: a bad event_type (CHECK violation on the event) rolls the whole
     //    call back — the slab's confirmation status is NOT changed to the new value.
