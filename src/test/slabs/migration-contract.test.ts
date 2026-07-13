@@ -49,4 +49,8 @@ describe("migration contract", () => {
     expect(consolidationSql).toContain("revoke all on function public.rls_auto_enable() from authenticated");
     expect(consolidationSql).toContain("alter function public.valid_image_ext(text) set search_path = pg_catalog");
   });
+
+  it("does not change privileges on the inventory helper removed by an earlier migration", () => {
+    expect(consolidationSql).not.toContain("function public.next_slab_inventory_number()");
+  });
 });

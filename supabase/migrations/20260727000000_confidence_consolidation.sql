@@ -293,10 +293,6 @@ revoke all on function public.is_admin(uuid) from public;
 revoke all on function public.is_admin(uuid) from anon;
 grant execute on function public.is_admin(uuid) to authenticated, service_role;
 
-revoke all on function public.next_slab_inventory_number() from public;
-revoke all on function public.next_slab_inventory_number() from anon;
-revoke all on function public.next_slab_inventory_number() from authenticated;
-
 revoke all on function public.check_slab_certification(text, text) from public;
 revoke all on function public.check_slab_certification(text, text) from anon;
 grant execute on function public.check_slab_certification(text, text) to authenticated;
