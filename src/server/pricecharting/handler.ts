@@ -128,6 +128,13 @@ function bestSlugMatch<T extends { name: string }>(products: T[], productSlug: s
   return null;
 }
 
+/** PriceCharting search can mix sealed products into individual-card results.
+ * These phrases identify packaged inventory, not a collectible card printing.
+ * Do not use a broad `pack` check: real card variants include "Prize Pack". */
+function isPackagedCardProduct(product: Product): boolean {
+  return /\b(?:premium collection|collection box|booster (?:box|bundle|case|display)|elite trainer box|battle deck|theme deck|starter deck|collector chest|display box|sealed case)\b/i.test(product.name);
+}
+
 export interface HandlerDeps {
   tokenProvider: () => string;
   fetch?: FetchLike;
@@ -446,8 +453,29 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput,
     };
   };
 
-  const eligibleScored = scored.filter((s) => !s.disqualified);
-  let rejectedScored = scored.filter((s) => s.disqualified);
+  // A character-name match is not sufficient when the search hit is a sealed
+  // collection/deck/box. Force those into Rejected so they can never be linked
+  // or become the auto-confirmed top card candidate.
+  const classifiedScored = scored.map((s) => {
+    if (!isPackagedCardProduct(s.product)) return s;
+    const conflict = `sealed product mismatch: "${s.product.name}" is packaged inventory, not an individual card`;
+    return {
+      ...s,
+      disqualified: true,
+      conflicts: s.conflicts.includes(conflict) ? s.conflicts : [...s.conflicts, conflict],
+      breakdown: {
+        ...s.breakdown,
+        eligible: false,
+        disqualified: true,
+        hard_conflicts: s.breakdown.hard_conflicts.includes(conflict)
+          ? s.breakdown.hard_conflicts
+          : [...s.breakdown.hard_conflicts, conflict],
+      },
+    };
+  });
+
+  const eligibleScored = classifiedScored.filter((s) => !s.disqualified);
+  let rejectedScored = classifiedScored.filter((s) => s.disqualified);
 
   // ── Number-only-conflict recovery ────────────────────────────────────────────────────────────────────
   // A candidate disqualified SOLELY on card_number (never character/console/
@@ -505,7 +533,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput,
   // distinguish variants (Prize Pack, language, parallel/artwork) without first
   // linking an unknown product. Public-page reads are independent of API rate
   // limits and failures remain non-blocking metadata-only candidates.
-  const productsById = new Map<string, Product>(scored.map((s) => [s.product.pricecharting_id, s.product]));
+  const productsById = new Map<string, Product>(classifiedScored.map((s) => [s.product.pricecharting_id, s.product]));
   const candidatesWithImages = await Promise.all(candidates.map(async (candidate) => {
     const product = productsById.get(candidate.product_id);
     const imageUrl = product ? await scrapeCatalogImage(fetchImpl, product) : null;

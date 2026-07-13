@@ -86,6 +86,26 @@ describe("handler — search", () => {
     }
   });
 
+  it("rejects sealed collection products from individual-card candidates", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/products?", {
+      json: { products: [
+        CARD_ROW({ id: "card", "product-name": "Charizard #4" }),
+        CARD_ROW({ id: "sealed", "product-name": "Charizard Premium Collection" }),
+      ] },
+    });
+    mock.enqueue("/game/pokemon-base-set/charizard-4", { text: "<html></html>" });
+    const res = await handlePriceChartingRequest(
+      { action: "search", card_name: "Charizard", card_number: "4", set: "Base Set", year: 1999, grader: "PSA", grade: 9 },
+      deps(mock),
+    );
+    if (res.body.status === "success" && res.body.action === "search") {
+      expect(res.body.candidates.map((c) => c.product_id)).toEqual(["card"]);
+      const sealed = res.body.rejected_candidates.find((c) => c.product_id === "sealed");
+      expect(sealed?.conflicts.join(" ")).toMatch(/packaged inventory/i);
+    }
+  });
+
   it("promotes a number-only-conflicting card for manual confirmation, never auto-selects it", async () => {
     // A candidate whose ONLY conflict is card_number (name/set/year all match)
     // is no longer hard-rejected — it's surfaced as a selectable "unverified"

@@ -449,7 +449,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
 
                 {/* Candidate artwork is shown BEFORE selection so the operator can
                     compare visually without linking an unknown product first. */}
-                <div className="mt-3 grid gap-3 rounded-md border bg-muted/20 p-2 sm:grid-cols-2">
+                {!isSelected && <div className="mt-3 grid gap-3 rounded-md border bg-muted/20 p-2 sm:grid-cols-2">
                   <div className="space-y-1 text-xs">
                     <p className="text-muted-foreground">Your slab</p>
                     {frontImageUrl ? (
@@ -469,7 +469,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                     )}
                     <p className="text-[10px] text-muted-foreground">Catalog artwork for pre-selection comparison; it never overrides an identity conflict.</p>
                   </div>
-                </div>
+                </div>}
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
                     OFFER image (a seller photo), NOT an authoritative catalog
