@@ -1,9 +1,9 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Upload, RefreshCw, X, ImageIcon } from "lucide-react";
-import { ACCEPTED_IMAGE_EXT, ACCEPTED_IMAGE_MIME, MAX_IMAGE_BYTES } from "@/lib/slabs/constants";
+import { Upload, RefreshCw, X, ImageIcon, Loader2 } from "lucide-react";
 import { extensionFor } from "@/lib/slabs/format";
+import { normalizeImageFile } from "@/lib/slabs/image-normalize";
 
 export interface SlabImageState {
   file: File;
@@ -18,35 +18,33 @@ interface ImageUploaderProps {
   onChange: (image: SlabImageState | null) => void;
 }
 
-/** Validate a picked file; returns an error string or null. */
-export function validateImageFile(file: File): string | null {
-  const ext = extensionFor(file.name, file.type);
-  const mimeOk = !file.type || ACCEPTED_IMAGE_MIME.includes(file.type);
-  const extOk = ACCEPTED_IMAGE_EXT.includes(ext);
-  if (!mimeOk && !extOk) return "Unsupported image type. Use JPEG, PNG, WEBP, or HEIC.";
-  if (file.size > MAX_IMAGE_BYTES) return `Image is too large (max ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)} MB).`;
-  return null;
-}
-
 export function ImageUploader({ label, side, image, onChange }: ImageUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [converting, setConverting] = useState(false);
 
   const pick = () => inputRef.current?.click();
 
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file
     if (!file) return;
-    const err = validateImageFile(file);
-    if (err) {
+
+    setConverting(true);
+    const { file: normalized, error } = await normalizeImageFile(file);
+    setConverting(false);
+
+    if (error || !normalized) {
       onChange(null);
-      // Surface via a tiny inline alert by throwing to caller? Use window alert-free:
-      // We attach the error to the element via data attribute-free approach:
-      import("sonner").then(({ toast }) => toast.error(err));
+      import("sonner").then(({ toast }) => toast.error(error ?? "Could not use this image."));
       return;
     }
+
     if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
-    onChange({ file, previewUrl: URL.createObjectURL(file), ext: extensionFor(file.name, file.type) });
+    onChange({
+      file: normalized,
+      previewUrl: URL.createObjectURL(normalized),
+      ext: extensionFor(normalized.name, normalized.type),
+    });
   };
 
   const clear = () => {
@@ -62,12 +60,17 @@ export function ImageUploader({ label, side, image, onChange }: ImageUploaderPro
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPTED_IMAGE_MIME.join(",")}
+        accept="image/*"
         className="hidden"
         onChange={handleFile}
         aria-label={`Upload ${side} image`}
       />
-      {image ? (
+      {converting ? (
+        <div className="flex h-48 w-full flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed text-muted-foreground">
+          <Loader2 className="h-8 w-8 animate-spin" />
+          <span className="text-sm">Converting image…</span>
+        </div>
+      ) : image ? (
         <div className="rounded-lg border bg-muted/30 p-2">
           <img
             src={image.previewUrl}
@@ -92,7 +95,7 @@ export function ImageUploader({ label, side, image, onChange }: ImageUploaderPro
           <ImageIcon className="h-8 w-8" />
           <span className="text-sm">Click to upload the {side} image</span>
           <span className="flex items-center gap-1 text-xs">
-            <Upload className="h-3 w-3" /> JPEG · PNG · WEBP · HEIC
+            <Upload className="h-3 w-3" /> Any photo — HEIC, JPEG, PNG, WEBP, and more
           </span>
         </button>
       )}
