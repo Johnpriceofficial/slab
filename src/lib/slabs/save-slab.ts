@@ -11,6 +11,11 @@
  *    paths, THEN images are uploaded. If any upload fails, the row and any
  *    uploaded object are removed (compensating cleanup) so no incomplete
  *    inventory record persists.
+ *
+ * Front image is required (it's what identity/valuation is built from). Back
+ * image is OPTIONAL — some slabs (promos, certain label layouts) carry every
+ * field needed for identification and valuation on the front label alone, and
+ * requiring a back photo in that case is pure friction with no data benefit.
  */
 
 import type { Slab, SlabInput } from "./types";
@@ -37,11 +42,15 @@ export interface SlabDataAccess {
     grader: string | null | undefined,
     cert: string,
   ): Promise<{ id: string; inventory_number: number } | null>;
-  /** Atomic RPC: assigns the next number + inserts, or errors (e.g. duplicate). */
+  /**
+   * Atomic RPC: assigns the next number + inserts, or errors (e.g. duplicate).
+   * `backExt` is null when no back image was provided — the row is created
+   * with a null back_image_path and no back upload is attempted.
+   */
   createSlabRow(
     input: SlabInput,
     frontExt: string,
-    backExt: string,
+    backExt: string | null,
   ): Promise<{ data: Slab | null; error: SlabDataError | null }>;
   uploadImage(path: string, blob: Blob): Promise<{ error: SlabDataError | null }>;
   deleteImages(paths: string[]): Promise<void>;
@@ -54,8 +63,11 @@ export type SaveSlabResult =
   | { status: "validation_error"; errors: string[] }
   | { status: "error"; message: string };
 
-/** Required-field validation shared by the form and the save flow. */
-export function validateSlabInput(input: SlabInput, hasFront: boolean, hasBack: boolean): string[] {
+/**
+ * Required-field validation shared by the form and the save flow. Only the
+ * front image is required — the back is optional (see module doc comment).
+ */
+export function validateSlabInput(input: SlabInput, hasFront: boolean, _hasBack: boolean): string[] {
   const errors: string[] = [];
   if (!input.card_name || !input.card_name.trim()) errors.push("Card name is required.");
   if (!input.grader || !input.grader.trim()) errors.push("Grader is required.");
@@ -64,7 +76,6 @@ export function validateSlabInput(input: SlabInput, hasFront: boolean, hasBack: 
     errors.push("Certification number is required.");
   }
   if (!hasFront) errors.push("Front image is required.");
-  if (!hasBack) errors.push("Back image is required.");
   return errors;
 }
 
@@ -85,9 +96,15 @@ export async function saveSlab(
   // Validate image extensions client-side too (the DB's valid_image_ext is the
   // authority; this gives a fast, clear error and normalizes the stored path).
   const frontExt = normalizeImageExt(front!.ext);
-  const backExt = normalizeImageExt(back!.ext);
-  if (!frontExt || !backExt) {
+  if (!frontExt) {
     return { status: "validation_error", errors: ["Unsupported image type. Use JPG, JPEG, PNG, WEBP, HEIC, or HEIF."] };
+  }
+  let backExt: string | null = null;
+  if (back) {
+    backExt = normalizeImageExt(back.ext);
+    if (!backExt) {
+      return { status: "validation_error", errors: ["Unsupported image type. Use JPG, JPEG, PNG, WEBP, HEIC, or HEIF."] };
+    }
   }
 
   // 1. Atomic: assign next inventory number + insert the row (server-side dup
@@ -104,21 +121,27 @@ export async function saveSlab(
 
   const frontPath = slab.front_image_path;
   const backPath = slab.back_image_path;
-  if (!frontPath || !backPath) {
+  if (!frontPath) {
     await safeCleanup(dao, slab.id, []);
-    return { status: "error", message: "Database did not return image paths." };
+    return { status: "error", message: "Database did not return the front image path." };
+  }
+  if (back && !backPath) {
+    await safeCleanup(dao, slab.id, [frontPath]);
+    return { status: "error", message: "Database did not return the back image path." };
   }
 
-  // 2. Upload both images to the deterministic, number-based paths.
+  // 2. Upload the front image (always) and the back image (only if provided).
   const frontUp = await dao.uploadImage(frontPath, front!.blob);
   if (frontUp.error) {
     await safeCleanup(dao, slab.id, [frontPath]);
     return { status: "error", message: `Front image upload failed: ${frontUp.error.message}` };
   }
-  const backUp = await dao.uploadImage(backPath, back!.blob);
-  if (backUp.error) {
-    await safeCleanup(dao, slab.id, [frontPath, backPath]);
-    return { status: "error", message: `Back image upload failed: ${backUp.error.message}` };
+  if (back && backPath) {
+    const backUp = await dao.uploadImage(backPath, back.blob);
+    if (backUp.error) {
+      await safeCleanup(dao, slab.id, [frontPath, backPath]);
+      return { status: "error", message: `Back image upload failed: ${backUp.error.message}` };
+    }
   }
 
   return { status: "success", slab };
