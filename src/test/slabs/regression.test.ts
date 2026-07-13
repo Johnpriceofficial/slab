@@ -44,6 +44,27 @@ function product(name: string, prices: Record<string, number>): Product {
 
 // ── PriceCharting identity protections ──────────────────────────────────────
 describe("§4 identity — Rayquaza / Charmander", () => {
+  it("N’s Zoroark ex #112 resolves to 11302479 and Electivire 8830707 is hard-rejected", async () => {
+    const identity = { card_name: "N's Zoroark ex", card_number: "112/193", set: "Mega Dream ex", language: "Japanese", grader: "CGC", grade: 10 };
+    const correct = createMockFetch();
+    correct.enqueue("/api/product?", { json: { status: "success", id: "11302479", "product-name": "N's Zoroark ex #112", "console-name": "Pokemon Japanese Mega Dream ex" } });
+    correct.enqueue("/api/offers?", { json: { offers: [] } });
+    const good = await handlePriceChartingRequest({ action: "lookup", product_id: "11302479", ...identity }, deps(correct));
+    if (good.body.status !== "success" || good.body.action !== "lookup") throw new Error("expected lookup body");
+    expect(good.body.product_id).toBe("11302479");
+    expect(good.body.disqualified).toBe(false);
+
+    const incorrect = createMockFetch();
+    incorrect.enqueue("/api/product?", { json: { status: "success", id: "8830707", "product-name": "Electivire ex #79", "console-name": "Pokemon Japanese Battle Partners" } });
+    incorrect.enqueue("/api/offers?", { json: { offers: [] } });
+    const bad = await handlePriceChartingRequest({ action: "lookup", product_id: "8830707", ...identity }, deps(incorrect));
+    if (bad.body.status !== "success" || bad.body.action !== "lookup") throw new Error("expected lookup body");
+    expect(bad.body.product_id).toBe("8830707");
+    expect(bad.body.disqualified).toBe(true);
+    expect(bad.body.requires_confirmation).toBe(true);
+    expect(bad.body.conflicts.join(" ")).toMatch(/character|card name|number|set/i);
+  });
+
   it("1. Rayquaza #047 never auto-confirms a #067 candidate — the number mismatch is always surfaced", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/products?", {
