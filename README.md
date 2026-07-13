@@ -64,7 +64,8 @@ supabase link --project-ref YOUR_PROJECT_REF
 supabase db push                                     # applies all 20 migrations in order
 # bootstrap the first admin (see SLABVAULT.md), then:
 supabase secrets set PRICECHARTING_API_TOKEN="…"     # edge-function secret ONLY
-supabase secrets set ANTHROPIC_API_KEY="…"           # edge-function secret ONLY (analyze-slab)
+supabase secrets set OPENAI_API_KEY="…"              # edge-function secret ONLY (analyze-slab)
+supabase secrets set OPENAI_ANALYZE_MODEL="gpt-5.6-terra" # optional
 node scripts/build-pricecharting-edge-bundle.mjs
 node scripts/build-analyze-slab-edge-bundle.mjs
 supabase functions deploy pricecharting-search
@@ -87,7 +88,7 @@ supabase functions deploy analyze-slab
   upload.
 - PriceCharting values are labeled "Current PriceCharting Guide Value" — never a
   sold comp / eBay / last-sold / historical price.
-- `PRICECHARTING_API_TOKEN` and `ANTHROPIC_API_KEY` live only in edge functions;
+- `PRICECHARTING_API_TOKEN`, `OPENAI_API_KEY`, and marketplace credentials live only in Edge Functions;
   never in the client bundle, responses, logs, DB, or Excel.
 - Admin-only via a frontend route guard **plus** RLS + edge-function admin
   checks + a private `slab-images` bucket.

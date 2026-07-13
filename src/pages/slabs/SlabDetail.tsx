@@ -19,6 +19,9 @@ import { verifiedBlockers } from "@/lib/slabs/save-slab";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
+import { PriceChartingMarketplacePanel } from "@/components/slabs/PriceChartingMarketplacePanel";
+import { SlabEvidencePanel } from "@/components/slabs/SlabEvidencePanel";
+import { EbaySellerPanel } from "@/components/slabs/EbaySellerPanel";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import { hydratePriceTiers, tierLabelOf } from "@/lib/slabs/pricing-tiers";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
@@ -240,6 +243,12 @@ export default function SlabDetail() {
 
       {/* Comps — CRUD + stats + operator-approved Final Value */}
       <SlabCompsSection slab={slab} />
+
+      <SlabEvidencePanel slab={slab} />
+
+      <PriceChartingMarketplacePanel slab={slab} />
+
+      <EbaySellerPanel slab={slab} />
 
       {/* Notes */}
       <Card className="mt-6">

@@ -33,7 +33,8 @@ export SLABVAULT_SUPABASE_URL="https://<your-project-ref>.supabase.co"
 export SLABVAULT_ANON_KEY="<your-anon-key>"
 export SLABVAULT_SERVICE_ROLE_KEY="<your-service-role-key>"
 export PRICECHARTING_API_TOKEN="<your-pricecharting-token>"
-export ANTHROPIC_API_KEY="<your-anthropic-key>"
+export OPENAI_API_KEY="<your-openai-key>"
+export OPENAI_ANALYZE_MODEL="gpt-5.6-terra"
 # Optional: skip the secure prompt by exporting the DB password
 # export SLABVAULT_DB_PASSWORD="<your-db-password>"
 ```
@@ -44,7 +45,7 @@ export ANTHROPIC_API_KEY="<your-anthropic-key>"
 ## 4. Deploy
 
 ```bash
-cd ~/Desktop/SlabVault
+cd ~/Desktop/GradedCardValue
 bash scripts/deploy-live.sh
 ```
 

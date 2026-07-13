@@ -29,7 +29,7 @@ require_vars \
   SLABVAULT_ANON_KEY \
   SLABVAULT_SERVICE_ROLE_KEY \
   PRICECHARTING_API_TOKEN \
-  ANTHROPIC_API_KEY
+  OPENAI_API_KEY
 
 guard_dedicated_project SLABVAULT_PROJECT_REF SLABVAULT_SUPABASE_URL
 check_url_matches_ref SLABVAULT_SUPABASE_URL SLABVAULT_PROJECT_REF
@@ -47,12 +47,28 @@ export SUPABASE_DB_PASSWORD="$SLABVAULT_DB_PASSWORD"
 
 # --- 2. temp secret env-files (never tracked; removed on exit via trap) ------
 PC_FILE="$(mktemp)"
-AN_FILE="$(mktemp)"
-cleanup() { rm -f "$PC_FILE" "$AN_FILE"; }
+AI_FILE="$(mktemp)"
+EBAY_FILE="$(mktemp)"
+cleanup() { rm -f "$PC_FILE" "$AI_FILE" "$EBAY_FILE"; }
 trap cleanup EXIT
-chmod 600 "$PC_FILE" "$AN_FILE"
+chmod 600 "$PC_FILE" "$AI_FILE" "$EBAY_FILE"
 printf 'PRICECHARTING_API_TOKEN=%s\n' "$PRICECHARTING_API_TOKEN" >"$PC_FILE"
-printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" >"$AN_FILE"
+printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" >"$AI_FILE"
+printf 'OPENAI_ANALYZE_MODEL=%s\n' "${OPENAI_ANALYZE_MODEL:-gpt-5.6-terra}" >>"$AI_FILE"
+
+EBAY_ENABLED=false
+if [ -n "${EBAY_CLIENT_ID:-}" ] || [ -n "${EBAY_CLIENT_SECRET:-}" ]; then
+  require_vars EBAY_CLIENT_ID EBAY_CLIENT_SECRET EBAY_REDIRECT_URI EBAY_RU_NAME EBAY_TOKEN_ENCRYPTION_KEY
+  EBAY_ENABLED=true
+  {
+    printf 'EBAY_CLIENT_ID=%s\n' "$EBAY_CLIENT_ID"
+    printf 'EBAY_CLIENT_SECRET=%s\n' "$EBAY_CLIENT_SECRET"
+    printf 'EBAY_REDIRECT_URI=%s\n' "$EBAY_REDIRECT_URI"
+    printf 'EBAY_RU_NAME=%s\n' "$EBAY_RU_NAME"
+    printf 'EBAY_TOKEN_ENCRYPTION_KEY=%s\n' "$EBAY_TOKEN_ENCRYPTION_KEY"
+    printf 'EBAY_ENVIRONMENT=%s\n' "${EBAY_ENVIRONMENT:-PRODUCTION}"
+  } >"$EBAY_FILE"
+fi
 
 # --- 3. frontend .env.local (PUBLIC values only; must be gitignored) --------
 if ! git check-ignore -q .env.local; then
@@ -69,7 +85,7 @@ fi
 _redact_stream() {
   local line s
   while IFS= read -r line; do
-    for s in "$SLABVAULT_DB_PASSWORD" "$PRICECHARTING_API_TOKEN" "$ANTHROPIC_API_KEY" "$SLABVAULT_SERVICE_ROLE_KEY"; do
+    for s in "$SLABVAULT_DB_PASSWORD" "$PRICECHARTING_API_TOKEN" "$OPENAI_API_KEY" "$SLABVAULT_SERVICE_ROLE_KEY" "${EBAY_CLIENT_SECRET:-}" "${EBAY_TOKEN_ENCRYPTION_KEY:-}"; do
       [ -n "$s" ] && line="${line//$s/[REDACTED]}"
     done
     printf '%s\n' "$line"
@@ -96,12 +112,15 @@ printf 'Deploying to the dedicated GradedCardValue.com project (ref redacted)…
 run_step "supabase link"                     supabase link --project-ref "$SLABVAULT_PROJECT_REF" --yes
 run_step "supabase db push (migrations)"     supabase db push --yes
 run_step "set PRICECHARTING_API_TOKEN secret" supabase secrets set --env-file "$PC_FILE"
-run_step "set ANTHROPIC_API_KEY secret"      supabase secrets set --env-file "$AN_FILE"
+run_step "set OpenAI secrets"                supabase secrets set --env-file "$AI_FILE"
+[ "$EBAY_ENABLED" = false ] || run_step "set eBay secrets" supabase secrets set --env-file "$EBAY_FILE"
 run_step "build pricecharting edge bundle"   node scripts/build-pricecharting-edge-bundle.mjs
 run_step "build analyze-slab edge bundle"    node scripts/build-analyze-slab-edge-bundle.mjs
-run_step "deno check edge functions"         deno check supabase/functions/pricecharting-search/index.ts supabase/functions/analyze-slab/index.ts
-run_step "deploy pricecharting-search"       supabase functions deploy pricecharting-search
-run_step "deploy analyze-slab"               supabase functions deploy analyze-slab
+run_step "build marketplace edge bundle"     node scripts/build-pricecharting-marketplace-edge-bundle.mjs
+run_step "deno check edge functions"         deno check supabase/functions/{pricecharting-search,analyze-slab,pricecharting-marketplace,pricecharting-sync,marketplace-scheduler,ebay-oauth-start,ebay-oauth-callback,ebay-account-sync,ebay-reference-search,ebay-list-item,ebay-revise-item,ebay-end-item,ebay-order-sync,ebay-fulfillment,ebay-finances-sync,ebay-notification-handler}/index.ts
+for fn in pricecharting-search analyze-slab pricecharting-marketplace pricecharting-sync marketplace-scheduler ebay-oauth-start ebay-oauth-callback ebay-account-sync ebay-reference-search ebay-list-item ebay-revise-item ebay-end-item ebay-order-sync ebay-fulfillment ebay-finances-sync ebay-notification-handler; do
+  run_step "deploy $fn" supabase functions deploy "$fn"
+done
 
 printf '\nDeploy complete.\n'
 printf 'Hard-delete remains DISABLED (frontend VITE_ALLOW_SLAB_HARD_DELETE=false; slab_settings.allow_hard_delete defaults false).\n'

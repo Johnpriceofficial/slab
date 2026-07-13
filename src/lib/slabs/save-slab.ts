@@ -25,6 +25,9 @@ import { normalizeImageExt } from "./constants";
 export interface SlabImageUpload {
   blob: Blob;
   ext: string;
+  original_blob?: Blob;
+  original_ext?: string;
+  original_mime?: string;
 }
 
 export interface SlabDataError {
@@ -54,6 +57,12 @@ export interface SlabDataAccess {
     backExt: string | null,
   ): Promise<{ data: Slab | null; error: SlabDataError | null }>;
   uploadImage(path: string, blob: Blob): Promise<{ error: SlabDataError | null }>;
+  registerImageEvidence?(
+    slabId: string,
+    role: "front" | "back",
+    original: { path: string; blob: Blob; mime: string },
+    normalized: { path: string; blob: Blob; mime: string },
+  ): Promise<void>;
   deleteImages(paths: string[]): Promise<void>;
   deleteSlabRow(id: string): Promise<void>;
   /**
@@ -75,7 +84,8 @@ export type SaveWarningCode =
   | "pricing_persistence_failed"
   | "pricing_stale"
   | "image_cleanup_failed"
-  | "row_cleanup_failed";
+  | "row_cleanup_failed"
+  | "image_evidence_failed";
 
 export interface SaveWarning {
   code: SaveWarningCode;
@@ -231,9 +241,51 @@ export async function saveSlab(
     }
   }
 
+  // Preserve the byte-for-byte camera file when normalization converted it
+  // (notably HEIC). The existing front/back path remains the browser-safe full
+  // image; originals live under a deterministic private evidence path.
+  const evidenceWarnings: SaveWarning[] = [];
+  const uploadedEvidencePaths: string[] = [];
+  const preserve = async (role: "front" | "back", image: SlabImageUpload, normalizedPath: string) => {
+    const originalBlob = image.original_blob ?? image.blob;
+    const originalExt = normalizeImageExt(image.original_ext ?? image.ext) ?? normalizeImageExt(image.ext)!;
+    const originalPath = originalBlob === image.blob
+      ? normalizedPath
+      : `slabs/${slab.inventory_number}/original/${role}.${originalExt}`;
+    if (originalPath !== normalizedPath) {
+      const upload = await dao.uploadImage(originalPath, originalBlob);
+      if (upload.error) throw new Error(`${role} original upload failed: ${upload.error.message}`);
+      uploadedEvidencePaths.push(originalPath);
+    }
+    if (dao.registerImageEvidence) {
+      try {
+        await dao.registerImageEvidence(
+          slab.id,
+          role,
+          { path: originalPath, blob: originalBlob, mime: image.original_mime || originalBlob.type || "application/octet-stream" },
+          { path: normalizedPath, blob: image.blob, mime: image.blob.type || "image/jpeg" },
+        );
+      } catch (error) {
+        evidenceWarnings.push({
+          code: "image_evidence_failed",
+          message: error instanceof Error ? error.message : "Image evidence registration failed.",
+          retryable: true,
+        });
+      }
+    }
+  };
+  try {
+    await preserve("front", front!, frontPath);
+    if (back && backPath) await preserve("back", back, backPath);
+  } catch (error) {
+    const paths = [frontPath, ...(backPath ? [backPath] : []), ...uploadedEvidencePaths];
+    const warnings = await safeCleanup(dao, slab.id, paths);
+    return { status: "error", message: error instanceof Error ? error.message : "Original image preservation failed.", slab_id: slab.id, warnings };
+  }
+
   // 3. Persist the confirmed PriceCharting tier table. A failure does not destroy
   //    the valid slab, but is returned explicitly so the UI can keep recovery.
-  const warnings: SaveWarning[] = [];
+  const warnings: SaveWarning[] = [...evidenceWarnings];
   if (pricing && dao.applySlabPricing) {
     try {
       const applied = await dao.applySlabPricing(slab.id, pricing);

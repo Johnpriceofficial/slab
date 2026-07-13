@@ -5,7 +5,8 @@
  */
 
 import { supabase } from "@/integrations/supabase/client";
-import type { Slab, SlabComp, SlabCompInput, SlabInput } from "./types";
+import type { Slab, SlabComp, SlabCompInput, SlabInput, PriceChartingOffer } from "./types";
+import type { MarketplaceInput, MarketplaceHandlerBody, MarketplaceSnapshot } from "@/server/pricecharting/marketplace-handler";
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import { buildPricingPersist } from "./pricing-tiers";
 import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
@@ -18,6 +19,7 @@ import type {
   HandlerErrorBody,
 } from "@/server/pricecharting/handler";
 import type { AnalyzeResult, AnalyzeErrorBody, AnalyzeInput } from "@/server/analyze-slab/handler";
+import { buildDeterministicAnalysisVariants } from "./image-derivatives";
 
 // The generated types predate these tables; use a loosely-typed handle.
 type AnyClient = {
@@ -29,6 +31,22 @@ type AnyClient = {
 const sb = supabase as unknown as AnyClient;
 
 const BUCKET = "slab-images";
+
+async function sha256Hex(blob: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function imageDimensions(blob: Blob): Promise<{ width: number | null; height: number | null }> {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const dimensions = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return dimensions;
+  } catch {
+    return { width: null, height: null };
+  }
+}
 
 /* ----------------------------- write path ------------------------------ */
 
@@ -72,6 +90,36 @@ export const supabaseSlabDataAccess: SlabDataAccess = {
       .from(BUCKET)
       .upload(path, blob, { upsert: false, contentType: (blob as Blob).type || "image/jpeg" });
     return { error: error ? { message: error.message } : null };
+  },
+
+  async registerImageEvidence(slabId, role, original, normalized) {
+    const [originalSha, originalSize, normalizedSha, normalizedSize] = await Promise.all([
+      sha256Hex(original.blob), imageDimensions(original.blob), sha256Hex(normalized.blob), imageDimensions(normalized.blob),
+    ]);
+    const { data: imageRow, error: imageError } = await sb.from("slab_images").upsert({
+      slab_id: slabId,
+      image_role: role,
+      storage_path: original.path,
+      mime_type: original.mime,
+      width: originalSize.width,
+      height: originalSize.height,
+      sha256: originalSha,
+      is_original: true,
+    }, { onConflict: "storage_path" }).select("id").single();
+    if (imageError) throw new Error(`Original ${role} evidence could not be registered: ${imageError.message}`);
+    if (normalized.path !== original.path) {
+      if (!normalizedSize.width || !normalizedSize.height) throw new Error(`Normalized ${role} image dimensions are unreadable.`);
+      const { error: derivativeError } = await sb.from("image_derivatives").upsert({
+        slab_image_id: imageRow.id,
+        derivative_type: "lossless_or_browser_decode",
+        storage_path: normalized.path,
+        transform_manifest: { version: 1, operation: "format_decode", generative: false },
+        width: normalizedSize.width,
+        height: normalizedSize.height,
+        sha256: normalizedSha,
+      }, { onConflict: "storage_path" });
+      if (derivativeError) throw new Error(`Normalized ${role} derivative could not be registered: ${derivativeError.message}`);
+    }
   },
 
   async deleteImages(paths: string[]) {
@@ -344,9 +392,123 @@ export async function analyzeSlab(
     body.back_image_base64 = await blobToBase64(back.blob);
     body.back_mime = back.mime;
   }
+  try {
+    const variants = await buildDeterministicAnalysisVariants(front.blob);
+    body.variants = await Promise.all(variants.map(async (variant) => ({
+      label: variant.label,
+      image_base64: await blobToBase64(variant.blob),
+      mime: variant.mime,
+    })));
+  } catch {
+    // The original remains valid evidence. A derivative failure must never
+    // replace or corrupt it; analysis proceeds with originals only.
+  }
   const { data, error } = await sb.functions.invoke("analyze-slab", { body });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message };
   return data as AnalyzeResult | AnalyzeErrorBody;
+}
+
+export async function linkAnalysisRun(runId: string, slabId: string): Promise<void> {
+  const { error } = await sb.rpc("link_ai_analysis_run", { p_run_id: runId, p_slab_id: slabId });
+  if (error) throw new Error(error.message);
+}
+
+export async function fetchPriceChartingOffers(slabId: string): Promise<PriceChartingOffer[]> {
+  const { data, error } = await sb.from("pricecharting_offers").select("*").eq("slab_id", slabId).order("updated_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as PriceChartingOffer[];
+}
+
+export async function invokePriceChartingMarketplace(
+  slabId: string,
+  input: MarketplaceInput,
+  eventType?: "published" | "edited" | "synced" | "shipped" | "feedback" | "ended" | "refunded",
+): Promise<MarketplaceHandlerBody> {
+  const { data, error } = await sb.functions.invoke("pricecharting-marketplace", { body: input });
+  if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
+  const result = data as MarketplaceHandlerBody;
+  if (result.status === "success" && result.snapshot) {
+    const { error: applyError } = await sb.rpc("apply_pricecharting_offer_snapshot", {
+      p_slab_id: slabId,
+      p_snapshot: result.snapshot as MarketplaceSnapshot,
+      p_event_type: eventType ?? (input.action === "publish" ? "published" : input.action === "details" ? "synced" : input.action),
+    });
+    if (applyError) return { status: "error", error_code: "PERSISTENCE_ERROR", message: applyError.message, retryable: true };
+  }
+  return result;
+}
+
+export async function syncAllPriceChartingOffers(): Promise<{ status: string; offers_seen?: number; offers_updated?: number; failed?: number; message?: string }> {
+  const { data, error } = await sb.functions.invoke("pricecharting-marketplace", { body: { action: "sync_all" } });
+  if (error) return { status: "error", message: error.message };
+  return data as { status: string; offers_seen?: number; offers_updated?: number; failed?: number; message?: string };
+}
+
+export interface EbayReferenceItem {
+  item_id: string | null;
+  title: string | null;
+  image_url: string | null;
+  additional_images: string[];
+  item_url: string | null;
+  price: { value?: string; currency?: string } | null;
+  source_label: "Reference Listing";
+  market_label: "Active Asking Price";
+  sold_comparable: false;
+}
+
+export async function ebayReferenceSearch(args: { query: string; card_name?: string; card_number?: string }): Promise<{
+  status: "success" | "unavailable" | "error";
+  items: EbayReferenceItem[];
+  message?: string;
+}> {
+  const { data, error } = await sb.functions.invoke("ebay-reference-search", { body: args });
+  if (error) return { status: "unavailable", items: [], message: "eBay reference images are not connected." };
+  return data as { status: "success" | "unavailable" | "error"; items: EbayReferenceItem[]; message?: string };
+}
+
+export interface FieldEvidenceRow {
+  id: string;
+  field_name: string;
+  value: string | null;
+  normalized_value: string | null;
+  confidence: number | null;
+  readability: string | null;
+  created_at: string;
+}
+
+export async function fetchFieldEvidence(slabId: string): Promise<FieldEvidenceRow[]> {
+  const { data, error } = await sb.from("ai_field_evidence").select("id,field_name,value,normalized_value,confidence,readability,created_at").eq("slab_id", slabId).order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as FieldEvidenceRow[];
+}
+
+export async function fetchEbayAccounts(): Promise<Array<{ id: string; display_label: string | null; connection_status: string; privilege_status: string | null; last_synced_at: string | null }>> {
+  const { data, error } = await sb.from("ebay_accounts").select("id,display_label,connection_status,privilege_status,last_synced_at").order("created_at", { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function fetchIntegrationHealth(): Promise<{ failed_sync_jobs: number; unresolved_errors: number }> {
+  const [{ count: failed }, { count: errors }] = await Promise.all([
+    sb.from("pricecharting_sync_runs").select("id", { count: "exact", head: true }).eq("status", "failed"),
+    sb.from("integration_errors").select("id", { count: "exact", head: true }).is("resolved_at", null),
+  ]);
+  return { failed_sync_jobs: failed ?? 0, unresolved_errors: errors ?? 0 };
+}
+
+export async function startEbayOAuth(): Promise<{ status: string; authorization_url?: string; message?: string }> {
+  const { data, error } = await sb.functions.invoke("ebay-oauth-start", { body: { redirect_after: window.location.href } });
+  if (error) return { status: "unavailable", message: "eBay OAuth is not configured for this deployment." };
+  return data as { status: string; authorization_url?: string; message?: string };
+}
+
+export async function ebaySellerOperation(
+  functionName: "ebay-account-sync" | "ebay-list-item" | "ebay-revise-item" | "ebay-end-item" | "ebay-order-sync" | "ebay-fulfillment" | "ebay-finances-sync",
+  body: Record<string, unknown>,
+): Promise<Record<string, any>> {
+  const { data, error } = await sb.functions.invoke(functionName, { body });
+  if (error) return { status: "error", message: error.message };
+  return (data ?? { status: "error", message: "eBay returned no response." }) as Record<string, any>;
 }
 
 export async function priceChartingValue(
@@ -363,8 +525,9 @@ export async function priceChartingValue(
 }
 
 /**
- * Fetch an image for a confirmed product. Uses a marketplace seller photo first,
- * then a best-effort catalog-image scrape of the public product page.
+ * Fetch eligible PriceCharting Marketplace seller photos for a confirmed
+ * product. The official Prices API does not expose catalog artwork; this path
+ * never scrapes a public product page.
  */
 export async function priceChartingOfferImage(
   productId: string,
@@ -402,8 +565,8 @@ export async function priceChartingLookup(
 export interface PricechartingConfirmation {
   product_id: string | null;
   candidate_image_url: string | null;
-  candidate_image_source: string | null; // 'official_product'|'marketplace_offer'
-  candidate_image_type: string | null; // 'catalog_product_image'|'marketplace_offer_image'
+  candidate_image_source: string | null; // 'marketplace_offer'|'none' (legacy rows may contain older values)
+  candidate_image_type: string | null; // 'marketplace_offer_image' or null
   candidate_image_available: boolean;
   visual_confirmation_status: string; // not_available|not_reviewed|user_confirmed|user_rejected|metadata_auto_confirmed
   visual_confirmation_method: string | null; // 'side_by_side'

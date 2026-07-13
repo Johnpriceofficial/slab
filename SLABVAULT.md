@@ -25,7 +25,7 @@ Browser (admin-only routes, guarded)        Supabase
 │ src/lib/slabs/*            │              │  └─ pricecharting-bundle.js        │
 │  ├─ save-slab (DI flow)    │  rpc/storage │ Edge Fn: analyze-slab             │
 │  ├─ comps (stats/valuation)│◄────────────►│  ├─ isCallerAdmin (JWT)           │
-│  ├─ data (rpc/storage/     │              │  ├─ ANTHROPIC_API_KEY (env)       │
+│  ├─ data (rpc/storage/     │              │  ├─ OPENAI_API_KEY (env)          │
 │  │   invoke)               │              │  └─ analyze-slab-bundle.js        │
 │  └─ excel (exceljs, lazy)  │              │ Postgres: slabs, slab_comps,      │
 └───────────────────────────┘              │   api_rate_limits                  │
@@ -82,8 +82,8 @@ Until a row exists, no one can read or write slabs — that is intentional.
 ### 3. Set edge-function secrets (server-side only)
 ```
 supabase secrets set PRICECHARTING_API_TOKEN="your-pricecharting-token"
-supabase secrets set ANTHROPIC_API_KEY="your-anthropic-key"   # for analyze-slab
-# optional: ANALYZE_MODEL (defaults to claude-sonnet-5)
+supabase secrets set OPENAI_API_KEY="your-openai-key"         # for analyze-slab
+# optional: OPENAI_ANALYZE_MODEL (defaults to gpt-5.6-terra)
 ```
 > **Never** use a `VITE_` prefix for these — that would expose them in the
 > browser bundle. They are read via `Deno.env.get(...)` in the edge functions.
@@ -108,7 +108,7 @@ Sign in at **`/login`**, then open **`/dashboard`** or **`/slabs/new`**.
 | `VITE_SUPABASE_URL` | Client (`.env.local`) | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Client (`.env.local`) | Supabase anon (public) key |
 | `PRICECHARTING_API_TOKEN` | Edge secret (server) | PriceCharting auth — never client-exposed |
-| `ANTHROPIC_API_KEY` | Edge secret (server) | analyze-slab vision model — never client-exposed |
+| `OPENAI_API_KEY` | Edge secret (server) | Responses API vision model — never client-exposed |
 | `ANALYZE_MODEL` | Edge secret (optional) | Override the analysis model id |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY` | Edge (auto) | JWT verification + service-role RPCs |
 

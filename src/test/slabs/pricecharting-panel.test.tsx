@@ -8,6 +8,7 @@ vi.mock("@/lib/slabs/data", () => ({
   priceChartingValue: vi.fn(),
   priceChartingOfferImage: vi.fn(),
   priceChartingLookup: vi.fn(),
+  ebayReferenceSearch: vi.fn(async () => ({ status: "unavailable", items: [] })),
 }));
 
 vi.mock("@/components/slabs/CandidateDebugPanel", () => ({ CandidateDebugPanel: () => null }));
@@ -83,7 +84,7 @@ describe("PriceChartingPanel identity invalidation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search PriceCharting" }));
     expect(await screen.findByText("Charmander #289/S-P")).toBeTruthy();
     rerender(<PriceChartingPanel identity={identity} selectedProductId="5427932" onSelect={vi.fn()} />);
-    expect(await screen.findByText(/Does the PriceCharting image show the same exact card/)).toBeTruthy();
+    expect(await screen.findByText(/Does the marketplace reference image show the same exact card/)).toBeTruthy();
     expect(screen.queryByAltText("PriceCharting candidate artwork for Charmander #289/S-P")).toBeNull();
   });
 });

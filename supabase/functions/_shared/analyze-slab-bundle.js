@@ -33,6 +33,10 @@ Fields: ${ANALYZE_FIELD_KEYS.join(", ")}.
 Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
 var VERIFY_CARD_NUMBER_SYSTEM_PROMPT = 'You are independently re-verifying ONE specific field on a graded trading-card slab label: the card_number (numerator/denominator, e.g. "016/064"). Treat this as a fresh, independent examination — you have no memory of any prior reading, and you must not anchor on what a first pass might have guessed. You return ONLY strict JSON, no prose.';
 var VERIFY_CARD_NUMBER_INSTRUCTION = 'Look ONLY at the card_number printed on the slab label. Read every digit individually. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the most common source of a wrong reading; scrutinize each digit against these confusable pairs before deciding. Return ONLY this exact JSON shape: { "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, set readable=false and value=null — never guess the closest-looking digit.';
+var VERIFY_CERTIFICATION_SYSTEM_PROMPT = "You are independently re-verifying ONE field on a graded-card label: the certification_number. This is a fresh examination. You are not shown and must not infer any earlier prediction. Return only schema-conforming output.";
+var VERIFY_CERTIFICATION_INSTRUCTION = "Look ONLY at the certification_number printed on the grading label. Read each character independently and preserve leading zeros. Return the exact certification_number schema. If glare, blur, size, or a confusable character prevents a reliable reading, set readable=false and value=null. Never reconstruct or guess a missing character.";
+var VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT = "You are independently rereading critical identity and artwork evidence on a graded-card slab. This is a fresh examination. You are not shown any earlier transcription or marketplace candidate. Return only schema-conforming output and never infer unreadable text.";
+var VERIFY_CRITICAL_IDENTITY_INSTRUCTION = "Independently reread the critical identity fields card_name, grader, grade, language, and major variation. Also describe only directly visible artwork evidence: character, composition, border, set symbol, collector number, rarity marking, promo marking, and error/variation markings. If evidence is not readable or visible, return null; never use outside product knowledge and never reconstruct a character or digit.";
 function clamp01(n) {
   const x = typeof n === "number" ? n : Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -101,6 +105,65 @@ async function reverifyCardNumber(deps, images, proposed, warnings) {
     `Card number could not be verified: two independent readings disagree ("${first.value}" vs "${second.value}"). Enter the correct number manually after checking the physical slab — never guessing between disagreeing reads.`
   );
 }
+async function reverifyCertificationNumber(deps, images, proposed, warnings) {
+  const first = proposed.certification_number;
+  let second;
+  try {
+    const text = await deps.callModel({
+      system: VERIFY_CERTIFICATION_SYSTEM_PROMPT,
+      instruction: VERIFY_CERTIFICATION_INSTRUCTION,
+      images
+    });
+    const parsed = JSON.parse(stripFence(text));
+    second = mapField(parsed.certification_number);
+  } catch {
+    warnings.push("Certification number could not be independently reread. Verify every character against the original label photograph.");
+    return;
+  }
+  if (!second.readable) {
+    warnings.push("Certification number was not clear enough for an independent reread. Verify it manually from a closer, glare-free label photograph.");
+    return;
+  }
+  const normalize = (value) => (value ?? "").replace(/\s+/g, "").toUpperCase();
+  if (normalize(first.value) === normalize(second.value)) {
+    proposed.certification_number = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
+    return;
+  }
+  proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+  warnings.push(
+    `Certification number needs review: independent readings disagree ("${first.value}" vs "${second.value}"). Do not save a verified certification number until the original photograph resolves every character.`
+  );
+}
+async function reverifyCriticalIdentity(deps, images, proposed, warnings) {
+  let parsed;
+  try {
+    const text = await deps.callModel({
+      system: VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT,
+      instruction: VERIFY_CRITICAL_IDENTITY_INSTRUCTION,
+      images
+    });
+    parsed = JSON.parse(stripFence(text));
+  } catch {
+    warnings.push("Critical identity fields could not be independently reread. Review the original photograph before linking a product.");
+    return;
+  }
+  const reread = parsed.fields ?? {};
+  const critical = ["card_name", "grader", "grade", "language", "variation"];
+  const normalize = (value) => (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  for (const key of critical) {
+    const first = proposed[key];
+    const second = mapField(reread[key]);
+    if (!first.readable && !second.readable) continue;
+    if (!first.readable || !second.readable || normalize(first.value) !== normalize(second.value)) {
+      proposed[key] = { value: null, confidence: 0, source: first.source, readable: false };
+      warnings.push(
+        `${key} needs review: independent readings ${!first.readable || !second.readable ? "could not both resolve the evidence" : `disagree ("${first.value}" vs "${second.value}")`}.`
+      );
+      continue;
+    }
+    proposed[key] = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
+  }
+}
 async function analyzeSlabImages(input, deps) {
   const images = [];
   if (!input.front_image_base64 || !input.front_mime) {
@@ -115,6 +178,10 @@ async function analyzeSlabImages(input, deps) {
       return err(400, "UNSUPPORTED_IMAGE", `Unsupported back image type: ${input.back_mime}.`);
     }
     images.push({ label: "back", image: { base64: input.back_image_base64, mime: input.back_mime } });
+  }
+  for (const variant of input.variants ?? []) {
+    if (!variant?.image_base64 || !ALLOWED_MIME.has(variant.mime)) continue;
+    images.push({ label: variant.label, image: { base64: variant.image_base64, mime: variant.mime } });
   }
   let text;
   try {
@@ -140,6 +207,12 @@ async function analyzeSlabImages(input, deps) {
   }
   if (proposed.card_number.readable) {
     await reverifyCardNumber(deps, images, proposed, warnings);
+  }
+  if (proposed.certification_number.readable) {
+    await reverifyCertificationNumber(deps, images, proposed, warnings);
+  }
+  if (input.strict_multi_pass) {
+    await reverifyCriticalIdentity(deps, images, proposed, warnings);
   }
   const unreadable = ANALYZE_FIELD_KEYS.filter((k) => !proposed[k].readable);
   if (unreadable.length > 0) {

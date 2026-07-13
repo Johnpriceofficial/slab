@@ -1,0 +1,435 @@
+import { createClient } from "npm:@supabase/supabase-js@2.110.2";
+import { corsHeaders } from "./cors.ts";
+import { isCallerAdmin, unauthorizedResponse } from "./auth.ts";
+
+type Operation =
+  | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
+  | "list_item" | "revise_item" | "end_item" | "order_sync"
+  | "fulfillment" | "finances_sync" | "notification";
+
+const MODE = Deno.env.get("EBAY_ENVIRONMENT") === "sandbox" ? "sandbox" : "production";
+const API = MODE === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
+const AUTH = MODE === "sandbox" ? "https://auth.sandbox.ebay.com" : "https://auth.ebay.com";
+const CLIENT_ID = Deno.env.get("EBAY_CLIENT_ID") ?? "";
+const CLIENT_SECRET = Deno.env.get("EBAY_CLIENT_SECRET") ?? "";
+const REDIRECT_URI = Deno.env.get("EBAY_REDIRECT_URI") ?? "";
+const RU_NAME = Deno.env.get("EBAY_RU_NAME") ?? Deno.env.get("EBAY_RUNAME") ?? "";
+
+function reply(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+}
+
+function safeEnum(value: unknown): { raw: string | null; label: string } {
+  if (value === null || value === undefined) return { raw: null, label: "Unknown" };
+  const raw = String(value);
+  return { raw, label: raw.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) || "Unknown" };
+}
+
+async function sha256(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+async function encryptionKey(): Promise<CryptoKey> {
+  const raw = Deno.env.get("EBAY_TOKEN_ENCRYPTION_KEY") ?? "";
+  const bytes = base64ToBytes(raw);
+  if (![16, 24, 32].includes(bytes.length)) throw new Error("eBay token encryption is not configured.");
+  return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptToken(token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await encryptionKey(), new TextEncoder().encode(token)));
+  const joined = new Uint8Array(iv.length + encrypted.length);
+  joined.set(iv); joined.set(encrypted, iv.length);
+  return bytesToBase64(joined);
+}
+
+async function decryptToken(value: string): Promise<string> {
+  const bytes = base64ToBytes(value);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12) }, await encryptionKey(), bytes.slice(12));
+  return new TextDecoder().decode(clear);
+}
+
+function configured(): boolean {
+  return !!(CLIENT_ID && CLIENT_SECRET);
+}
+
+async function oauthToken(params: URLSearchParams): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API}/identity/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params,
+  });
+  if (!res.ok) throw new Error(`eBay OAuth returned HTTP ${res.status}.`);
+  return await res.json();
+}
+
+async function appToken(): Promise<string> {
+  const data = await oauthToken(new URLSearchParams({ grant_type: "client_credentials", scope: "https://api.ebay.com/oauth/api_scope" }));
+  const token = data.access_token;
+  if (typeof token !== "string") throw new Error("eBay did not return an application token.");
+  return token;
+}
+
+async function ebayFetch(path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "Content-Language": "en-US",
+      ...(init.headers ?? {}),
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`eBay API returned HTTP ${res.status}.`);
+  return data as Record<string, unknown>;
+}
+
+async function parseBody(req: Request): Promise<Record<string, unknown>> {
+  try { return await req.json(); } catch { return {}; }
+}
+
+async function requireAdmin(req: Request) {
+  const auth = await isCallerAdmin(req);
+  if (!auth.user) return { error: unauthorizedResponse(corsHeaders), user: null };
+  if (!auth.isAdmin) return { error: reply({ status: "error", error_code: "NOT_AUTHORIZED", message: "Admin access required." }, 403), user: null };
+  return { error: null, user: auth.user };
+}
+
+function moneyCents(money: unknown): number | null {
+  if (!money || typeof money !== "object") return null;
+  const value = Number((money as Record<string, unknown>).value);
+  return Number.isFinite(value) ? Math.round(value * 100) : null;
+}
+
+function confirmation(body: Record<string, unknown>, phrase: string): Response | null {
+  if (body.confirmation === phrase) return null;
+  return reply({
+    status: "confirmation_required",
+    confirmation_phrase: phrase,
+    message: `Review the marketplace payload and explicitly confirm ${phrase} before this external mutation runs.`,
+  }, 409);
+}
+
+async function userAccessToken(admin: ReturnType<typeof createClient>, accountId: string): Promise<string> {
+  const { data: credential } = await admin.schema("private").from("ebay_oauth_credentials")
+    .select("refresh_token_encrypted,scopes").eq("ebay_account_id", accountId).maybeSingle();
+  if (!credential) throw new Error("CONNECTED_ACCOUNT_REQUIRED");
+  const params = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: await decryptToken(credential.refresh_token_encrypted),
+  });
+  if (Array.isArray(credential.scopes) && credential.scopes.length) params.set("scope", credential.scopes.join(" "));
+  const refreshed = await oauthToken(params);
+  if (typeof refreshed.access_token !== "string") throw new Error("OAUTH_REFRESH_FAILED");
+  return refreshed.access_token;
+}
+
+function unavailable(operation: Operation, capability: string): Response {
+  return reply({
+    status: "unavailable",
+    operation,
+    capability,
+    message: "eBay is not connected or this seller/application is not eligible for the required API capability.",
+    required_configuration: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_RU_NAME", "EBAY_REDIRECT_URI", "EBAY_TOKEN_ENCRYPTION_KEY"],
+  }, 409);
+}
+
+export async function handleEbay(req: Request, operation: Operation): Promise<Response> {
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (!configured()) return unavailable(operation, operation === "reference_search" ? "Browse API" : "Seller API");
+
+  if (operation === "notification" && req.method === "GET") {
+    const url = new URL(req.url);
+    const challenge = url.searchParams.get("challenge_code") ?? "";
+    const token = Deno.env.get("EBAY_NOTIFICATION_VERIFICATION_TOKEN") ?? "";
+    const endpoint = Deno.env.get("EBAY_NOTIFICATION_ENDPOINT") ?? "";
+    if (!challenge || !token || !endpoint) return reply({ status: "error", message: "Notification verification is not configured." }, 503);
+    return reply({ challengeResponse: await sha256(challenge + token + endpoint) });
+  }
+  if (operation === "notification") {
+    // eBay notification signatures require certificate-backed verification.
+    // Until a valid signature verifier succeeds, fail closed and do not store or
+    // process buyer/account data.
+    return reply({ status: "error", error_code: "SIGNATURE_NOT_VERIFIED", message: "Notification signature could not be verified." }, 401);
+  }
+
+  if (operation === "oauth_callback") {
+    const url = new URL(req.url);
+    const state = url.searchParams.get("state") ?? "";
+    const code = url.searchParams.get("code") ?? "";
+    if (!state || !code || !RU_NAME) return reply({ status: "error", error_code: "INVALID_CALLBACK", message: "The eBay authorization callback is incomplete." }, 400);
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const stateHash = await sha256(state);
+    const { data: stored } = await admin.schema("private").from("ebay_oauth_states").select("requested_by,expires_at,consumed_at,redirect_after").eq("state_hash", stateHash).maybeSingle();
+    if (!stored || stored.consumed_at || new Date(stored.expires_at) <= new Date()) return reply({ status: "error", error_code: "INVALID_STATE", message: "The eBay authorization state is invalid or expired." }, 400);
+    const token = await oauthToken(new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: RU_NAME }));
+    const accessToken = typeof token.access_token === "string" ? token.access_token : "";
+    const refreshToken = typeof token.refresh_token === "string" ? token.refresh_token : "";
+    if (!accessToken || !refreshToken || !Deno.env.get("EBAY_TOKEN_ENCRYPTION_KEY")) return unavailable(operation, "Encrypted OAuth token storage");
+    const identity = await ebayFetch("/commerce/identity/v1/user/", accessToken);
+    const ebayUserId = String(identity.userId ?? identity.username ?? "");
+    if (!ebayUserId) return reply({ status: "error", error_code: "IDENTITY_UNAVAILABLE", message: "eBay did not return an opaque account identifier." }, 502);
+    const { data: account, error: accountError } = await admin.from("ebay_accounts").upsert({
+      ebay_user_id: ebayUserId,
+      display_label: "Connected eBay seller",
+      connection_status: "connected",
+      authorization_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
+      last_synced_at: new Date().toISOString(),
+    }, { onConflict: "ebay_user_id" }).select("id").single();
+    if (accountError) return reply({ status: "error", error_code: "ACCOUNT_PERSISTENCE_FAILED", message: "The connected eBay account could not be stored." }, 500);
+    await admin.schema("private").from("ebay_oauth_credentials").upsert({
+      ebay_account_id: account.id,
+      refresh_token_encrypted: await encryptToken(refreshToken),
+      refresh_token_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
+      scopes: typeof token.scope === "string" ? token.scope.split(" ") : [],
+      rotated_at: new Date().toISOString(),
+    });
+    await admin.schema("private").from("ebay_oauth_states").update({ consumed_at: new Date().toISOString() }).eq("state_hash", stateHash);
+    return reply({ status: "success", account_id: account.id, redirect_after: stored.redirect_after ?? null });
+  }
+
+  const auth = await requireAdmin(req);
+  if (auth.error) return auth.error;
+  const body = await parseBody(req);
+
+  if (operation === "oauth_start") {
+    if (!RU_NAME || !REDIRECT_URI) return unavailable(operation, "OAuth authorization-code flow");
+    const state = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    await admin.schema("private").from("ebay_oauth_states").insert({
+      state_hash: await sha256(state), requested_by: auth.user!.id,
+      expires_at: new Date(Date.now() + 10 * 60_000).toISOString(), redirect_after: body.redirect_after ?? null,
+    });
+    const scopes = [
+      "https://api.ebay.com/oauth/api_scope/sell.account",
+      "https://api.ebay.com/oauth/api_scope/sell.inventory",
+      "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+      "https://api.ebay.com/oauth/api_scope/sell.finances",
+    ].join(" ");
+    const url = `${AUTH}/oauth2/authorize?${new URLSearchParams({ client_id: CLIENT_ID, response_type: "code", redirect_uri: RU_NAME, scope: scopes, state })}`;
+    return reply({ status: "success", authorization_url: url, expires_in_seconds: 600 });
+  }
+
+  if (operation === "reference_search") {
+    const query = String(body.query ?? "").trim();
+    if (!query) return reply({ status: "error", error_code: "MISSING_QUERY", message: "A reference search query is required." }, 400);
+    const token = await appToken();
+    const params = new URLSearchParams({ q: query, limit: "10" });
+    const data = await ebayFetch(`/buy/browse/v1/item_summary/search?${params}`, token, { headers: { "X-EBAY-C-MARKETPLACE-ID": String(body.marketplace_id ?? "EBAY_US") } });
+    const normalize = (value: unknown) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const cardName = normalize(body.card_name);
+    const collector = normalize(String(body.card_number ?? "").split("/")[0]).replace(/^0+/, "");
+    const items = (Array.isArray(data.itemSummaries) ? data.itemSummaries : []).filter((raw: any) => {
+      const title = normalize(raw.title);
+      if (cardName && !cardName.split(" ").every((token) => title.includes(token))) return false;
+      if (collector && !new RegExp(`(?:^|\\D)0*${collector}(?:\\D|$)`).test(title)) return false;
+      return true;
+    }).slice(0, 5).map((raw: any) => ({
+      item_id: raw.itemId ?? null,
+      title: raw.title ?? null,
+      image_url: raw.image?.imageUrl ?? null,
+      additional_images: Array.isArray(raw.additionalImages) ? raw.additionalImages.map((image: any) => image.imageUrl).filter(Boolean) : [],
+      item_url: raw.itemWebUrl ?? null,
+      price: raw.price ?? null,
+      condition: safeEnum(raw.condition),
+      source_label: "Reference Listing",
+      market_label: "Active Asking Price",
+      sold_comparable: false,
+    }));
+    return reply({ status: "success", source: "EBAY_BROWSE", active_listings_only: true, items });
+  }
+
+  if (operation === "account_sync") {
+    const accountId = String(body.account_id ?? "");
+    if (!accountId) return reply({ status: "error", error_code: "MISSING_ACCOUNT", message: "account_id is required." }, 400);
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    let accessToken: string;
+    try { accessToken = await userAccessToken(admin, accountId); } catch { return unavailable(operation, "Connected eBay account"); }
+    const identity = await ebayFetch("/commerce/identity/v1/user/", accessToken);
+    let privileges: Record<string, unknown> | null = null;
+    try { privileges = await ebayFetch("/sell/account/v1/privilege", accessToken); } catch { privileges = null; }
+    await admin.from("ebay_accounts").update({
+      connection_status: "connected",
+      privilege_status: privileges ? "available" : "unavailable",
+      last_synced_at: new Date().toISOString(),
+    }).eq("id", accountId);
+    return reply({ status: "success", account_id: accountId, opaque_user_id: identity.userId ?? null, username_display: "Connected eBay seller", privileges });
+  }
+
+  const accountId = String(body.account_id ?? "");
+  if (!accountId) return reply({ status: "error", error_code: "MISSING_ACCOUNT", message: "account_id is required." }, 400);
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  let accessToken: string;
+  try { accessToken = await userAccessToken(admin, accountId); } catch { return unavailable(operation, "Connected eBay account"); }
+
+  if (operation === "list_item") {
+    const marketplaceId = String(body.marketplace_id ?? "EBAY_US");
+    const categoryId = String(body.category_id ?? "");
+    if (body.confirmation !== "PUBLISH") {
+      const [privileges, locations, fulfillment, payment, returns] = await Promise.all([
+        ebayFetch("/sell/account/v1/privilege", accessToken).catch(() => ({})),
+        ebayFetch("/sell/inventory/v1/location?limit=100", accessToken).catch(() => ({})),
+        ebayFetch(`/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
+        ebayFetch(`/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
+        ebayFetch(`/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
+      ]);
+      let categoryRequirements: Record<string, unknown> | null = null;
+      let conditionPolicies: Record<string, unknown> | null = null;
+      if (categoryId) {
+        const tree = await ebayFetch(`/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken);
+        categoryRequirements = await ebayFetch(`/commerce/taxonomy/v1/category_tree/${encodeURIComponent(String(tree.categoryTreeId))}/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`, accessToken);
+        conditionPolicies = await ebayFetch(`/sell/metadata/v1/marketplace/${encodeURIComponent(marketplaceId)}/get_item_condition_policies?filter=categoryIds:%7B${encodeURIComponent(categoryId)}%7D`, accessToken);
+      }
+      return reply({
+        status: "confirmation_required",
+        confirmation_phrase: "PUBLISH",
+        privileges,
+        inventory_locations: locations,
+        business_policies: { fulfillment, payment, return: returns },
+        category_aspects: categoryRequirements,
+        condition_policies: conditionPolicies,
+        message: "Resolve the current eBay category, aspects, condition policy, business policies, and inventory location, then explicitly confirm PUBLISH.",
+      }, 409);
+    }
+    const slabId = String(body.slab_id ?? "");
+    const sku = String(body.sku ?? "");
+    const merchantLocationKey = String(body.merchant_location_key ?? "");
+    const fulfillmentPolicyId = String(body.fulfillment_policy_id ?? "");
+    const paymentPolicyId = String(body.payment_policy_id ?? "");
+    const returnPolicyId = String(body.return_policy_id ?? "");
+    const priceValue = Number(body.price_value);
+    if (!slabId || !sku || !categoryId || !merchantLocationKey || !fulfillmentPolicyId || !paymentPolicyId || !returnPolicyId || !Number.isFinite(priceValue)) {
+      return reply({ status: "error", error_code: "INCOMPLETE_LISTING", message: "Slab, SKU, category, location, policies, condition, and price are required." }, 400);
+    }
+    const inventoryPayload = {
+      availability: { shipToLocationAvailability: { quantity: Number(body.quantity ?? 1) } },
+      condition: String(body.condition ?? ""),
+      conditionDescription: body.condition_description ?? undefined,
+      product: {
+        title: String(body.title ?? ""),
+        description: String(body.description ?? ""),
+        aspects: body.aspects ?? {},
+        imageUrls: Array.isArray(body.image_urls) ? body.image_urls : [],
+      },
+    };
+    await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) });
+    const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify({
+      sku,
+      marketplaceId,
+      format: "FIXED_PRICE",
+      availableQuantity: Number(body.quantity ?? 1),
+      categoryId,
+      merchantLocationKey,
+      listingDescription: String(body.description ?? ""),
+      pricingSummary: { price: { currency: String(body.currency ?? "USD"), value: priceValue.toFixed(2) } },
+      listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId },
+    }) });
+    const offerId = String(offer.offerId ?? "");
+    if (!offerId) throw new Error("eBay did not return an offer ID.");
+    const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" });
+    await admin.from("ebay_listing_mappings").upsert({
+      slab_id: slabId, ebay_account_id: accountId, sku, offer_id: offerId,
+      listing_id: published.listingId ?? null, listing_status: "published",
+      asking_price_cents: Math.round(priceValue * 100), currency: String(body.currency ?? "USD"), last_synced_at: new Date().toISOString(),
+    }, { onConflict: "ebay_account_id,sku" });
+    return reply({ status: "success", offer_id: offerId, listing_id: published.listingId ?? null, listing_status: "published" });
+  }
+
+  if (operation === "revise_item") {
+    const needs = confirmation(body, "REVISE"); if (needs) return needs;
+    const offerId = String(body.offer_id ?? "");
+    if (!offerId) return reply({ status: "error", error_code: "MISSING_OFFER", message: "offer_id is required." }, 400);
+    const patch: Record<string, unknown> = {};
+    if (body.price_value !== undefined) patch.pricingSummary = { price: { currency: String(body.currency ?? "USD"), value: Number(body.price_value).toFixed(2) } };
+    if (body.quantity !== undefined) patch.availableQuantity = Number(body.quantity);
+    await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, accessToken, { method: "PUT", body: JSON.stringify(patch) });
+    await admin.from("ebay_listing_mappings").update({ asking_price_cents: body.price_value === undefined ? undefined : Math.round(Number(body.price_value) * 100), last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    return reply({ status: "success", offer_id: offerId, listing_status: "published" });
+  }
+
+  if (operation === "end_item") {
+    const needs = confirmation(body, "END"); if (needs) return needs;
+    const offerId = String(body.offer_id ?? "");
+    await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, accessToken, { method: "POST", body: "{}" });
+    await admin.from("ebay_listing_mappings").update({ listing_status: "ended", last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    return reply({ status: "success", offer_id: offerId, listing_status: "ended" });
+  }
+
+  if (operation === "order_sync") {
+    const data = await ebayFetch("/sell/fulfillment/v1/order?limit=200", accessToken);
+    let synced = 0;
+    for (const raw of (Array.isArray(data.orders) ? data.orders : []) as Array<Record<string, any>>) {
+      const orderId = String(raw.orderId ?? ""); if (!orderId) continue;
+      const { data: order } = await admin.schema("private").from("ebay_orders").upsert({
+        ebay_account_id: accountId, order_id: orderId, order_status: String(raw.orderFulfillmentStatus ?? raw.orderPaymentStatus ?? "UNKNOWN"),
+        buyer_data: { buyer: raw.buyer ?? null, fulfillmentStartInstructions: raw.fulfillmentStartInstructions ?? null },
+        pricing_summary: raw.pricingSummary ?? {}, raw_response: raw, updated_at: new Date().toISOString(),
+      }, { onConflict: "ebay_account_id,order_id" }).select("id").single();
+      for (const line of (Array.isArray(raw.lineItems) ? raw.lineItems : []) as Array<Record<string, any>>) {
+        const sku = String(line.sku ?? "");
+        const { data: mapping } = await admin.from("ebay_listing_mappings").select("slab_id").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+        const lineId = String(line.lineItemId ?? "");
+        await admin.schema("private").from("ebay_order_line_items").upsert({
+          order_id: order.id, line_item_id: lineId, slab_id: mapping?.slab_id ?? null, sku,
+          listing_id: line.legacyItemId ?? null, quantity: Number(line.quantity ?? 1), line_total: line.lineItemCost ?? null, raw_response: line,
+        }, { onConflict: "order_id,line_item_id" });
+        const soldCents = moneyCents(line.lineItemCost);
+        if (mapping?.slab_id && soldCents !== null) {
+          await admin.from("sold_comps").upsert({ slab_id: mapping.slab_id, source: "EBAY_SELLER_ORDER", external_sale_id: `${orderId}:${lineId}`, sold_price_cents: soldCents, currency: String(line.lineItemCost?.currency ?? "USD"), sold_at: raw.creationDate ?? new Date().toISOString(), raw_response: { order_id: orderId, line_item_id: lineId, sku } }, { onConflict: "source,external_sale_id" });
+          await admin.from("slabs").update({ inventory_status: "Sold", sold_at: raw.creationDate ?? new Date().toISOString(), sold_price_cents: soldCents }).eq("id", mapping.slab_id);
+        }
+      }
+      synced += 1;
+    }
+    await admin.from("ebay_accounts").update({ last_synced_at: new Date().toISOString() }).eq("id", accountId);
+    return reply({ status: "success", orders_synced: synced, source_label: "Seller’s Completed Sale" });
+  }
+
+  if (operation === "fulfillment") {
+    const action = String(body.action ?? "ship");
+    const phrase = action === "refund" ? "REFUND" : "SHIP";
+    const needs = confirmation(body, phrase); if (needs) return needs;
+    const orderId = String(body.order_id ?? "");
+    if (action === "refund") {
+      const result = await ebayFetch(`/sell/fulfillment/v1/order/${encodeURIComponent(orderId)}/issue_refund`, accessToken, { method: "POST", body: JSON.stringify(body.refund ?? {}) });
+      return reply({ status: "success", action: "refund", order_id: orderId, refund_id: result.refundId ?? null });
+    }
+    const payload = { lineItems: body.line_items ?? [], shippedDate: body.shipped_at ?? new Date().toISOString(), shippingCarrierCode: body.shipping_carrier_code, trackingNumber: body.tracking_number };
+    const result = await ebayFetch(`/sell/fulfillment/v1/order/${encodeURIComponent(orderId)}/shipping_fulfillment`, accessToken, { method: "POST", body: JSON.stringify(payload) });
+    return reply({ status: "success", action: "ship", order_id: orderId, fulfillment_id: result.fulfillmentId ?? null });
+  }
+
+  if (operation === "finances_sync") {
+    const data = await ebayFetch("/sell/finances/v1/transaction?limit=200", accessToken);
+    let synced = 0;
+    for (const raw of (Array.isArray(data.transactions) ? data.transactions : []) as Array<Record<string, any>>) {
+      const transactionId = String(raw.transactionId ?? ""); if (!transactionId) continue;
+      await admin.schema("private").from("ebay_financial_transactions").upsert({
+        ebay_account_id: accountId, transaction_id: transactionId, order_id: raw.orderId ?? null,
+        transaction_type: String(raw.transactionType ?? "UNKNOWN"), transaction_status: String(raw.transactionStatus ?? "UNKNOWN"),
+        amount: raw.amount ?? null, fee_basis_amount: raw.totalFeeBasisAmount ?? null, raw_response: raw,
+        occurred_at: raw.transactionDate ?? raw.bookingEntry ?? null,
+      }, { onConflict: "ebay_account_id,transaction_id" });
+      synced += 1;
+    }
+    return reply({ status: "success", financial_transactions_synced: synced, note: "Actual fees and payouts are stored privately; unknown enum and CustomCode values are preserved in raw_response." });
+  }
+
+  return unavailable(operation, "eBay seller API capability");
+}

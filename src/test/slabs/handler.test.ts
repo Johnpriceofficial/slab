@@ -49,9 +49,6 @@ describe("handler — search", () => {
   it("returns candidates with guide values in integer cents", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/products?", { json: { products: [CARD_ROW({})] } });
-    mock.enqueue("/game/pokemon-base-set/charizard-4", {
-      text: '<img alt="Main Image | Charizard #4" src="https://storage.googleapis.com/images.pricecharting.com/charizard/240.jpg">',
-    });
     const res = await handlePriceChartingRequest(
       { action: "search", card_name: "Charizard", card_number: "4", set: "Base Set", year: 1999, grader: "PSA", grade: 9 },
       deps(mock),
@@ -61,8 +58,8 @@ describe("handler — search", () => {
       expect(res.body.candidates[0].product_id).toBe("6910");
       expect(res.body.candidates[0].grade_field).toBe("graded-price");
       expect(res.body.candidates[0].guide_value_cents).toBe(12500); // integer cents
-      expect(res.body.candidates[0].candidate_image_url).toContain("/charizard/240.jpg");
-      expect(res.body.candidates[0].candidate_image_source).toBe("official_product");
+      expect(res.body.candidates[0].candidate_image_url).toBeNull();
+      expect(res.body.candidates[0].candidate_image_source).toBe("none");
     }
   });
 
@@ -177,17 +174,16 @@ describe("handler — value", () => {
     expect(res.body.status).toBe("error");
   });
 
-  it("syncs a missing API Grade 9 tier from the confirmed public product page", async () => {
+  it("leaves a missing API Grade 9 tier unavailable without webpage scraping", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/product?", { json: CARD_ROW({ id: "10085339", "product-name": "Alakazam #71", "console-name": "Pokemon Japanese Mega Symphonia", "graded-price": undefined }) });
-    mock.enqueue("/game/pokemon-japanese-mega-symphonia/alakazam-71", { text: "<h2>Full Price Guide</h2> Grade 9 $16.01 Grade 9.5 $18.00" });
     const res = await handlePriceChartingRequest({ action: "value", product_id: "10085339", grader: "CGC", grade: 9, grade_label: "MINT" }, deps(mock));
     if (res.body.status === "success" && res.body.action === "value") {
-      expect(res.body.guide_value_cents).toBe(1601);
-      expect(res.body.grade_field).toBe("graded-price");
-      expect(res.body.price_source).toBe("public_product_page");
+      expect(res.body.guide_value_cents).toBeNull();
+      expect(res.body.grade_field).toBeNull();
+      expect(res.body.price_source).toBe("unavailable");
       expect(res.body.designation_exact).toBe(false);
-      expect(res.body.available_values_cents.grade_9_general).toBe(1601);
+      expect(res.body.available_values_cents.grade_9_general).toBeNull();
     } else throw new Error("expected value response");
   });
 });

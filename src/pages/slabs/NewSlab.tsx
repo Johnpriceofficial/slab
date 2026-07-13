@@ -14,7 +14,7 @@ import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/sla
 import type { ImageSource } from "@/server/pricecharting/handler";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
-import { analyzeSlab, recordPricechartingConfirmation, type PricechartingConfirmation } from "@/lib/slabs/data";
+import { analyzeSlab, linkAnalysisRun, recordPricechartingConfirmation, type PricechartingConfirmation } from "@/lib/slabs/data";
 import { SCORING_VERSION } from "@/lib/pricecharting/matching";
 import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
@@ -537,13 +537,36 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     try {
       const result = await saveSlab(
         input,
-        front ? { blob: front.file, ext: front.ext } : null,
-        back ? { blob: back.file, ext: back.ext } : null,
+        front ? {
+          blob: front.file,
+          ext: front.ext,
+          original_blob: front.originalFile,
+          original_ext: front.originalFile.name.split(".").pop()?.toLowerCase() || front.ext,
+          original_mime: front.originalFile.type,
+        } : null,
+        back ? {
+          blob: back.file,
+          ext: back.ext,
+          original_blob: back.originalFile,
+          original_ext: back.originalFile.name.split(".").pop()?.toLowerCase() || back.ext,
+          original_mime: back.originalFile.type,
+        } : null,
         dao,
         pricingWrite,
         mode,
       );
       if (result.status === "success") {
+        if (analysis?.analysis_run_id) {
+          try {
+            await linkAnalysisRun(analysis.analysis_run_id, result.slab.id);
+          } catch (error) {
+            result.warnings.push({
+              code: "image_evidence_failed",
+              message: error instanceof Error ? error.message : "Analysis evidence could not be linked.",
+              retryable: true,
+            });
+          }
+        }
         // §2 persist confirmation/rejection state + append-only audit event via the
         // ONE transactional RPC. Errors are surfaced (never swallowed) and retried
         // for transient failures; the slab itself is already saved.

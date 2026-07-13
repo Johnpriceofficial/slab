@@ -17,7 +17,7 @@ key (secrets I never see). Everything targets a **new, empty** project.
 ## 1. Frontend env
 
 ```bash
-cd ~/Desktop/SlabVault
+cd ~/Desktop/GradedCardValue
 cp .env.example .env.local
 # edit .env.local:
 #   VITE_SUPABASE_URL=https://<PROJECT_REF>.supabase.co
@@ -27,7 +27,7 @@ cp .env.example .env.local
 ## 2. The commands
 
 ```bash
-cd ~/Desktop/SlabVault
+cd ~/Desktop/GradedCardValue
 
 # (1) link the CLI to the new project (prompts for the DB password)
 supabase link --project-ref <PROJECT_REF>
@@ -41,16 +41,21 @@ supabase db push
 
 # (3) set edge-function SECRETS only (never a VITE_ prefix)
 supabase secrets set PRICECHARTING_API_TOKEN="<your real PriceCharting token>"
-supabase secrets set ANTHROPIC_API_KEY="<your Anthropic key>"   # for analyze-slab
-# optional: supabase secrets set ANALYZE_MODEL="claude-sonnet-5"
+supabase secrets set OPENAI_API_KEY="<your OpenAI key>"        # for analyze-slab
+# optional: supabase secrets set OPENAI_ANALYZE_MODEL="gpt-5.6-terra"
 
 # (4) regenerate the Deno bundles the edge functions import
 node scripts/build-pricecharting-edge-bundle.mjs
 node scripts/build-analyze-slab-edge-bundle.mjs
+node scripts/build-pricecharting-marketplace-edge-bundle.mjs
 
 # (5) deploy the admin-only edge functions
 supabase functions deploy pricecharting-search
 supabase functions deploy analyze-slab
+supabase functions deploy pricecharting-marketplace
+supabase functions deploy pricecharting-sync
+supabase functions deploy marketplace-scheduler
+# Deploy the ebay-* functions after configuring the server-only eBay secrets.
 ```
 
 ## 3. Bootstrap yourself as admin (one time)

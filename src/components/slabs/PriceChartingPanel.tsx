@@ -11,6 +11,7 @@ import {
   priceChartingValue,
   priceChartingOfferImage,
   priceChartingLookup,
+  ebayReferenceSearch,
   type PriceChartingSearchArgs,
 } from "@/lib/slabs/data";
 import type { LookupResponse, ImageSource } from "@/server/pricecharting/handler";
@@ -298,7 +299,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
           url: c.candidate_image_url,
           count: 0,
           loading: false,
-          source: c.candidate_image_source ?? "official_product",
+          source: c.candidate_image_source ?? "none",
         });
         return;
       }
@@ -459,7 +460,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                     )}
                   </div>
                   <div className="space-y-1 text-xs">
-                    <p className="text-muted-foreground">PriceCharting candidate · ID {c.product_id}</p>
+                    <p className="text-muted-foreground">Marketplace reference · PriceCharting product ID {c.product_id}</p>
                     {c.candidate_image_url ? (
                       <img src={c.candidate_image_url} alt={`PriceCharting candidate artwork for ${c.product_name}`} loading="lazy" className="h-40 w-full rounded border object-contain" />
                     ) : (
@@ -467,8 +468,9 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                         Candidate image unavailable — verify metadata before selecting.
                       </div>
                     )}
-                    <p className="text-[10px] text-muted-foreground">Catalog artwork for pre-selection comparison; it never overrides an identity conflict.</p>
+                    <p className="text-[10px] text-muted-foreground">PriceCharting seller-listing photo, not official artwork and not a sold price. It never overrides an identity conflict.</p>
                   </div>
+                  <EbayReferenceImages candidate={c} identity={identity} />
                 </div>}
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
@@ -477,7 +479,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                 {isSelected && (
                   <div className="mt-3 border-t pt-3">
                     <p className="mb-2 text-xs font-medium">
-                      Does the PriceCharting image show the same exact card and artwork as your slab?
+                      Does the marketplace reference image show the same exact card and artwork as your slab?
                     </p>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="space-y-1 text-xs">
@@ -507,25 +509,20 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                             <>
                               <img src={offerImage.url} alt={`PriceCharting image for ${c.product_name}`} loading="lazy" className="max-h-40 rounded border object-contain" />
                               <p className="text-[10px] text-muted-foreground">
-                                {offerImage.source === "official_product" ? (
-                                  <><strong>PriceCharting catalog image</strong> (scraped fallback) — raw card artwork, not your graded slab.</>
-                                ) : (
-                                  <><strong>Marketplace offer image</strong> (a seller's photo) — supporting evidence, not an official catalog image.</>
-                                )} It never overrides a metadata conflict.
+                                <><strong>Marketplace reference image</strong> (a PriceCharting seller photo) — supporting evidence, not official catalog artwork and not a sold price.</> It never overrides a metadata conflict.
                               </p>
                             </>
                           ) : (
-                            <p className="italic text-muted-foreground">PriceCharting image unavailable.</p>
+                            <p className="italic text-muted-foreground">No PriceCharting seller photo is available.</p>
                           )
                         ) : null}
                       </div>
                     </div>
                     {!(offerImage && offerImage.product_id === c.product_id && offerImage.url) && (
-                      // No image from the connected source or public-page fallback → the visual
-                      // "Yes — same exact artwork" affordance is disabled entirely.
+                      // No eligible seller photograph: metadata remains visible and the
+                      // operator receives a precise, non-broken fallback.
                       <p className="mt-2 text-xs italic text-muted-foreground">
-                        Visual confirmation unavailable — no product image is available from the connected PriceCharting
-                        source or public product page. Confirm by the metadata fields only.
+                        No independent reference artwork is available. Verify using the uploaded card image and product metadata.
                       </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -694,8 +691,23 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                   className="mt-2 max-h-40 rounded border object-contain"
                 />
               ) : (
-                <p className="mt-2 text-xs italic text-muted-foreground">PriceCharting image unavailable.</p>
+                <p className="mt-2 text-xs italic text-muted-foreground">No PriceCharting seller photo is available.</p>
               )}
+              <EbayReferenceImages candidate={{
+                product_id: recovered.product_id,
+                product_name: recovered.product_name,
+                console_or_category: recovered.console_or_category,
+                confidence_score: recovered.score,
+                match_status: recovered.disqualified ? "no_match" : "likely",
+                guide_value_cents: recovered.guide_value_cents,
+                grade_field: recovered.grade_field,
+                company_specific: recovered.company_specific,
+                candidate_image_url: recovered.offer_image_url,
+                candidate_image_source: recovered.image_source,
+                conflicts: recovered.conflicts,
+                breakdown: recovered.breakdown,
+                rejected: recovered.disqualified,
+              }} identity={identity} />
               <div className="mt-2 flex gap-2">
                 <Button
                   type="button"
@@ -721,4 +733,33 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
       </details>
     </div>
   );
+}
+
+function EbayReferenceImages({ candidate, identity }: { candidate: CandidateResult; identity: PriceChartingSearchArgs }) {
+  const query = [candidate.product_name, identity.set, identity.language].filter(Boolean).join(" ");
+  const [data, setData] = useState<Awaited<ReturnType<typeof ebayReferenceSearch>> | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  useEffect(() => {
+    let active = true;
+    setIsLoading(true);
+    ebayReferenceSearch({ query, card_name: identity.card_name, card_number: identity.card_number })
+      .then((result) => { if (active) setData(result); })
+      .finally(() => { if (active) setIsLoading(false); });
+    return () => { active = false; };
+  }, [query, identity.card_name, identity.card_number]);
+  if (isLoading) return <div className="sm:col-span-2 text-xs text-muted-foreground">Checking eligible eBay reference listings…</div>;
+  if (!data || data.status !== "success" || data.items.length === 0) {
+    return <div className="sm:col-span-2 rounded border p-2 text-xs italic text-muted-foreground">No independent reference artwork is available. Verify using the uploaded card image and product metadata.</div>;
+  }
+  return <div className="sm:col-span-2 space-y-2">
+    <p className="text-xs font-medium">eBay marketplace reference images</p>
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {data.items.map((item) => <a key={item.item_id ?? item.item_url} href={item.item_url ?? undefined} target="_blank" rel="noreferrer" className="rounded border p-2 text-xs hover:border-primary">
+        {item.image_url && <img src={item.image_url} alt={item.title ?? "eBay reference listing"} className="h-32 w-full object-contain" loading="lazy" />}
+        <p className="mt-1 line-clamp-2 font-medium">{item.title ?? "Reference listing"}</p>
+        <p className="text-muted-foreground">Marketplace reference image · Active Asking Price{item.price?.value ? ` ${item.price.value} ${item.price.currency ?? ""}` : ""}</p>
+      </a>)}
+    </div>
+    <p className="text-[10px] text-muted-foreground">Active eBay listings are visual/asking-price context only. They are never treated as completed sales or sold comparables.</p>
+  </div>;
 }

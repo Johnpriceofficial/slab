@@ -46,6 +46,17 @@ export function computeDashboardStats(slabs: Slab[]): DashboardStats {
   let possibleLabelErrors = 0;
   let duplicateAttempts = 0;
   let highest: DashboardStats["highest_value_slab"] = null;
+  let activeInventoryValue = 0;
+  let totalCostBasis = 0;
+  let exactGuide = 0;
+  let compatibleGuide = 0;
+  let unvalued = 0;
+  let listed = 0;
+  let sold = 0;
+  let revenue = 0;
+  let soldCostBasis = 0;
+  let activeCostBasis = 0;
+  const daysHeld: number[] = [];
 
   for (const s of slabs) {
     bump(byGrader, s.grader);
@@ -66,6 +77,26 @@ export function computeDashboardStats(slabs: Slab[]): DashboardStats {
     if (fv !== null && fv !== undefined && (!highest || fv > highest.final_value_cents)) {
       highest = { inventory_number: s.inventory_number, card_name: s.card_name, final_value_cents: fv };
     }
+    const status = s.inventory_status ?? (s.archived_at ? "archived" : "active");
+    const cost = s.cost_basis_cents ?? 0;
+    totalCostBasis += cost;
+    if (status === "sold") {
+      sold += 1;
+      revenue += (s.sold_price_cents ?? 0) + (s.sale_shipping_cents ?? 0);
+      soldCostBasis += cost;
+    } else if (status !== "archived") {
+      activeInventoryValue += s.final_value_cents ?? 0;
+      activeCostBasis += cost;
+      if (status === "listed") listed += 1;
+    }
+    if (s.valuation_status === "exact_api_tier" || s.valuation_provenance === "pricecharting_exact_tier") exactGuide += 1;
+    else if (s.valuation_status === "compatible_api_tier" || s.valuation_provenance === "pricecharting_compatible_tier") compatibleGuide += 1;
+    else if (s.pricecharting_value_cents == null) unvalued += 1;
+    if (s.acquired_at) {
+      const end = s.sold_at ? new Date(s.sold_at).getTime() : Date.now();
+      const start = new Date(s.acquired_at).getTime();
+      if (Number.isFinite(start) && end >= start) daysHeld.push(Math.floor((end - start) / 86_400_000));
+    }
   }
 
   return {
@@ -83,6 +114,17 @@ export function computeDashboardStats(slabs: Slab[]): DashboardStats {
     count_needs_clearer_images: needsClearer,
     count_possible_label_errors: possibleLabelErrors,
     count_duplicate_attempts: duplicateAttempts,
+    active_inventory_value_cents: activeInventoryValue,
+    total_cost_basis_cents: totalCostBasis,
+    exact_guide_inventory: exactGuide,
+    compatible_guide_inventory: compatibleGuide,
+    unvalued_inventory: unvalued,
+    listed_inventory: listed,
+    sold_inventory: sold,
+    revenue_cents: revenue,
+    preliminary_realized_profit_cents: revenue - soldCostBasis,
+    unrealized_gain_cents: activeInventoryValue - activeCostBasis,
+    average_days_held: daysHeld.length ? Math.round(sum(daysHeld) / daysHeld.length) : null,
   };
 }
 

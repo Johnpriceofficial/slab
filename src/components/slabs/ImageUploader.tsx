@@ -6,6 +6,9 @@ import { extensionFor } from "@/lib/slabs/format";
 import { normalizeImageFile } from "@/lib/slabs/image-normalize";
 
 export interface SlabImageState {
+  /** Byte-for-byte user-selected file, retained for evidence storage. */
+  originalFile: File;
+  /** Browser-safe deterministic decode used for preview and analysis. */
   file: File;
   previewUrl: string;
   ext: string;
@@ -41,6 +44,7 @@ export function ImageUploader({ label, side, image, onChange }: ImageUploaderPro
 
     if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
     onChange({
+      originalFile: file,
       file: normalized,
       previewUrl: URL.createObjectURL(normalized),
       ext: extensionFor(normalized.name, normalized.type),

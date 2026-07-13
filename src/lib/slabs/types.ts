@@ -67,6 +67,42 @@ export interface Slab {
   date_valued: string | null;
   /** Set when the slab is archived (hidden from active inventory; never deleted). */
   archived_at?: string | null;
+  inventory_status?: "draft" | "active" | "listed" | "sold" | "archived";
+  cost_basis_cents?: number | null;
+  acquired_at?: string | null;
+  sold_at?: string | null;
+  sold_price_cents?: number | null;
+  sale_shipping_cents?: number | null;
+  visual_identity_status?: "not_checked" | "needs_review" | "verified" | "rejected";
+  certification_verification_status?: "not_checked" | "unsupported" | "verified" | "failed";
+  valuation_status?: "exact_api_tier" | "compatible_api_tier" | "manual" | "unavailable" | "needs_review";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PriceChartingOffer {
+  id: string;
+  slab_id: string;
+  offer_id: string;
+  product_id: string | null;
+  product_name: string | null;
+  sku: string | null;
+  condition_id: number | null;
+  offer_status: "available" | "collection" | "sold" | "ended" | "refunded" | "unknown";
+  cost_basis_cents: number | null;
+  price_min_cents: number | null;
+  price_max_cents: number | null;
+  sale_price_cents: number | null;
+  shipping_premium_cents: number | null;
+  shipped: boolean | null;
+  refunded: boolean | null;
+  feedback_status: string | null;
+  tracking_number: string | null;
+  listed_at: string | null;
+  sold_at: string | null;
+  shipped_at: string | null;
+  ended_at: string | null;
+  last_synced_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -154,4 +190,15 @@ export interface DashboardStats {
   count_needs_clearer_images: number;
   count_possible_label_errors: number;
   count_duplicate_attempts: number;
+  active_inventory_value_cents: number;
+  total_cost_basis_cents: number;
+  exact_guide_inventory: number;
+  compatible_guide_inventory: number;
+  unvalued_inventory: number;
+  listed_inventory: number;
+  sold_inventory: number;
+  revenue_cents: number;
+  preliminary_realized_profit_cents: number;
+  unrealized_gain_cents: number;
+  average_days_held: number | null;
 }

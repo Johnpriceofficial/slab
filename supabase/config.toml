@@ -5,3 +5,34 @@ verify_jwt = true
 
 [functions.analyze-slab]
 verify_jwt = true
+
+[functions.pricecharting-marketplace]
+verify_jwt = true
+
+[functions.ebay-oauth-start]
+verify_jwt = true
+[functions.ebay-oauth-callback]
+verify_jwt = false
+[functions.ebay-account-sync]
+verify_jwt = true
+[functions.ebay-reference-search]
+verify_jwt = true
+[functions.ebay-list-item]
+verify_jwt = true
+[functions.ebay-revise-item]
+verify_jwt = true
+[functions.ebay-end-item]
+verify_jwt = true
+[functions.ebay-order-sync]
+verify_jwt = true
+[functions.ebay-fulfillment]
+verify_jwt = true
+[functions.ebay-finances-sync]
+verify_jwt = true
+[functions.ebay-notification-handler]
+verify_jwt = false
+
+[functions.pricecharting-sync]
+verify_jwt = true
+[functions.marketplace-scheduler]
+verify_jwt = true

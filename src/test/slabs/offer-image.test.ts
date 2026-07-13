@@ -68,20 +68,14 @@ describe("handler — offer_image (seller listing photo for visual confirmation)
     }
   });
 
-  it("falls back to the confirmed product page catalog image when offers have no photo", async () => {
+  it("does not scrape a product page when Marketplace API offers have no photo", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/offers?", { json: { offers: [] } });
-    mock.enqueue("/api/product?", {
-      json: { id: "11302479", "product-name": "N's Zoroark ex #112", "console-name": "Pokemon Japanese Mega Dream ex" },
-    });
-    mock.enqueue("/game/pokemon-japanese-mega-dream-ex/n%27s-zoroark-ex-112", {
-      text: '<meta property="og:image" content="https://storage.googleapis.com/images.pricecharting.com/zoroark/240.jpg">',
-    });
     const res = await handlePriceChartingRequest({ action: "offer_image", product_id: "11302479" }, deps(mock));
     if (res.body.status === "success" && res.body.action === "offer_image") {
-      expect(res.body.offer_image_url).toContain("/zoroark/240.jpg");
-      expect(res.body.image_source).toBe("official_product");
-      expect(res.body.warnings.join(" ")).toMatch(/scraped/i);
+      expect(res.body.offer_image_url).toBeNull();
+      expect(res.body.image_source).toBe("none");
+      expect(res.body.warnings.join(" ")).toMatch(/No independent reference artwork/i);
     } else {
       throw new Error("expected offer_image success body");
     }

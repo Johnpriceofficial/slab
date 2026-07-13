@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "build:edge-bundle": "node scripts/build-pricecharting-edge-bundle.mjs",
-    "build:analyze-bundle": "node scripts/build-analyze-slab-edge-bundle.mjs"
+    "build:analyze-bundle": "node scripts/build-analyze-slab-edge-bundle.mjs",
+    "build:marketplace-bundle": "node scripts/build-pricecharting-marketplace-edge-bundle.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.14",

@@ -7,13 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { Download, Plus, Loader2 } from "lucide-react";
-import { fetchAllSlabs, fetchAllComps } from "@/lib/slabs/data";
+import { fetchAllSlabs, fetchAllComps, fetchIntegrationHealth } from "@/lib/slabs/data";
 import { computeDashboardStats } from "@/lib/slabs/compute-stats";
 import { formatCents } from "@/lib/slabs/format";
 
 export default function SlabDashboard() {
   const [exporting, setExporting] = useState(false);
   const { data: slabs, isLoading } = useQuery({ queryKey: ["dashboard-slabs"], queryFn: fetchAllSlabs });
+  const { data: health } = useQuery({ queryKey: ["integration-health"], queryFn: fetchIntegrationHealth });
 
   const stats = slabs ? computeDashboardStats(slabs) : null;
 
@@ -54,6 +55,19 @@ export default function SlabDashboard() {
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat label="Active Inventory Value" value={formatCents(stats.active_inventory_value_cents)} />
+            <Stat label="Cost Basis" value={formatCents(stats.total_cost_basis_cents)} />
+            <Stat label="Exact-Guide Inventory" value={String(stats.exact_guide_inventory)} />
+            <Stat label="Compatible-Guide Inventory" value={String(stats.compatible_guide_inventory)} />
+            <Stat label="Unvalued Inventory" value={String(stats.unvalued_inventory)} />
+            <Stat label="Listed Inventory" value={String(stats.listed_inventory)} />
+            <Stat label="Sold Inventory" value={String(stats.sold_inventory)} />
+            <Stat label="Revenue" value={formatCents(stats.revenue_cents)} />
+            <Stat label="Marketplace Fees" value="Unavailable until provider settlement" />
+            <Stat label="Preliminary Realized Profit" value={formatCents(stats.preliminary_realized_profit_cents)} />
+            <Stat label="Unrealized Gain" value={formatCents(stats.unrealized_gain_cents)} />
+            <Stat label="Average Days Held" value={stats.average_days_held === null ? "—" : String(stats.average_days_held)} />
+            <Stat label="Failed Sync Jobs" value={String(health?.failed_sync_jobs ?? 0)} sub={`${health?.unresolved_errors ?? 0} unresolved integration error(s)`} />
             <Stat label="Total Slabs" value={String(stats.total_slabs)} />
             <Stat label="Total Final Value" value={formatCents(stats.total_final_value_cents)} />
             <Stat label="Total Quick-Sale Value" value={formatCents(stats.total_quick_sale_value_cents)} />

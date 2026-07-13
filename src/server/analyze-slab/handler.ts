@@ -85,6 +85,12 @@ export interface AnalyzeResult {
   warnings: string[];
   /** Always true: extracted values must be human-confirmed before use. */
   requires_confirmation: true;
+  /** Present when the Edge Function persisted the immutable analysis audit. */
+  analysis_run_id?: string | null;
+  analysis_version?: string;
+  model?: string;
+  provider?: string;
+  overall_status?: "PROPOSED" | "NEEDS_REVIEW";
 }
 
 export interface AnalyzeErrorBody {
@@ -106,7 +112,7 @@ export interface AnalyzeImage {
 export interface AnalyzeModelRequest {
   system: string;
   instruction: string;
-  images: Array<{ label: "front" | "back"; image: AnalyzeImage }>;
+  images: Array<{ label: string; image: AnalyzeImage }>;
 }
 
 export interface AnalyzeDeps {
@@ -119,6 +125,9 @@ export interface AnalyzeInput {
   front_mime?: string;
   back_image_base64?: string;
   back_mime?: string;
+  variants?: Array<{ label: string; image_base64: string; mime: string }>;
+  /** Server-only switch. Production Edge calls enable every independent pass. */
+  strict_multi_pass?: boolean;
 }
 
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
@@ -181,6 +190,29 @@ const VERIFY_CARD_NUMBER_INSTRUCTION =
   '{ "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. ' +
   "If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, " +
   "set readable=false and value=null — never guess the closest-looking digit.";
+
+const VERIFY_CERTIFICATION_SYSTEM_PROMPT =
+  "You are independently re-verifying ONE field on a graded-card label: the " +
+  "certification_number. This is a fresh examination. You are not shown and must " +
+  "not infer any earlier prediction. Return only schema-conforming output.";
+
+const VERIFY_CERTIFICATION_INSTRUCTION =
+  "Look ONLY at the certification_number printed on the grading label. Read each " +
+  "character independently and preserve leading zeros. Return the exact " +
+  "certification_number schema. If glare, blur, size, or a confusable character " +
+  "prevents a reliable reading, set readable=false and value=null. Never reconstruct " +
+  "or guess a missing character.";
+
+const VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT =
+  "You are independently rereading critical identity and artwork evidence on a graded-card slab. " +
+  "This is a fresh examination. You are not shown any earlier transcription or marketplace candidate. " +
+  "Return only schema-conforming output and never infer unreadable text.";
+
+const VERIFY_CRITICAL_IDENTITY_INSTRUCTION =
+  "Independently reread the critical identity fields card_name, grader, grade, language, and major variation. " +
+  "Also describe only directly visible artwork evidence: character, composition, border, set symbol, collector number, " +
+  "rarity marking, promo marking, and error/variation markings. If evidence is not readable or visible, return null; " +
+  "never use outside product knowledge and never reconstruct a character or digit.";
 
 function clamp01(n: unknown): number {
   const x = typeof n === "number" ? n : Number(n);
@@ -304,6 +336,79 @@ async function reverifyCardNumber(
   );
 }
 
+async function reverifyCertificationNumber(
+  deps: AnalyzeDeps,
+  images: AnalyzeModelRequest["images"],
+  proposed: AnalyzeProposal,
+  warnings: string[],
+): Promise<void> {
+  const first = proposed.certification_number;
+  let second: ProposedField;
+  try {
+    const text = await deps.callModel({
+      system: VERIFY_CERTIFICATION_SYSTEM_PROMPT,
+      instruction: VERIFY_CERTIFICATION_INSTRUCTION,
+      images,
+    });
+    const parsed = JSON.parse(stripFence(text)) as Record<string, unknown>;
+    second = mapField(parsed.certification_number);
+  } catch {
+    warnings.push("Certification number could not be independently reread. Verify every character against the original label photograph.");
+    return;
+  }
+  if (!second.readable) {
+    warnings.push("Certification number was not clear enough for an independent reread. Verify it manually from a closer, glare-free label photograph.");
+    return;
+  }
+  const normalize = (value: string | null) => (value ?? "").replace(/\s+/g, "").toUpperCase();
+  if (normalize(first.value) === normalize(second.value)) {
+    proposed.certification_number = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
+    return;
+  }
+  proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+  warnings.push(
+    `Certification number needs review: independent readings disagree ("${first.value}" vs "${second.value}"). ` +
+      "Do not save a verified certification number until the original photograph resolves every character.",
+  );
+}
+
+async function reverifyCriticalIdentity(
+  deps: AnalyzeDeps,
+  images: AnalyzeModelRequest["images"],
+  proposed: AnalyzeProposal,
+  warnings: string[],
+): Promise<void> {
+  let parsed: Record<string, unknown>;
+  try {
+    const text = await deps.callModel({
+      system: VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT,
+      instruction: VERIFY_CRITICAL_IDENTITY_INSTRUCTION,
+      images,
+    });
+    parsed = JSON.parse(stripFence(text)) as Record<string, unknown>;
+  } catch {
+    warnings.push("Critical identity fields could not be independently reread. Review the original photograph before linking a product.");
+    return;
+  }
+
+  const reread = (parsed.fields ?? {}) as Record<string, unknown>;
+  const critical: AnalyzeFieldKey[] = ["card_name", "grader", "grade", "language", "variation"];
+  const normalize = (value: string | null) => (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  for (const key of critical) {
+    const first = proposed[key];
+    const second = mapField(reread[key]);
+    if (!first.readable && !second.readable) continue;
+    if (!first.readable || !second.readable || normalize(first.value) !== normalize(second.value)) {
+      proposed[key] = { value: null, confidence: 0, source: first.source, readable: false };
+      warnings.push(
+        `${key} needs review: independent readings ${!first.readable || !second.readable ? "could not both resolve the evidence" : `disagree ("${first.value}" vs "${second.value}")`}.`,
+      );
+      continue;
+    }
+    proposed[key] = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
+  }
+}
+
 export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps): Promise<AnalyzeHandlerResult> {
   const images: AnalyzeModelRequest["images"] = [];
 
@@ -320,6 +425,10 @@ export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps):
       return err(400, "UNSUPPORTED_IMAGE", `Unsupported back image type: ${input.back_mime}.`);
     }
     images.push({ label: "back", image: { base64: input.back_image_base64, mime: input.back_mime } });
+  }
+  for (const variant of input.variants ?? []) {
+    if (!variant?.image_base64 || !ALLOWED_MIME.has(variant.mime)) continue;
+    images.push({ label: variant.label, image: { base64: variant.image_base64, mime: variant.mime } });
   }
 
   let text: string;
@@ -358,6 +467,12 @@ export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps):
   // `proposed.card_number` and `warnings` in place.
   if (proposed.card_number.readable) {
     await reverifyCardNumber(deps, images, proposed, warnings);
+  }
+  if (proposed.certification_number.readable) {
+    await reverifyCertificationNumber(deps, images, proposed, warnings);
+  }
+  if (input.strict_multi_pass) {
+    await reverifyCriticalIdentity(deps, images, proposed, warnings);
   }
 
   // Surface unreadable fields explicitly so the operator knows what to fill in
