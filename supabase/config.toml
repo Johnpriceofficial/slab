@@ -6,6 +6,9 @@ verify_jwt = true
 [functions.analyze-slab]
 verify_jwt = true
 
+[functions.scan-card]
+verify_jwt = true
+
 [functions.pricecharting-marketplace]
 verify_jwt = true
 

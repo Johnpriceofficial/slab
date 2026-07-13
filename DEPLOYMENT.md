@@ -43,6 +43,7 @@ supabase db push
 supabase secrets set PRICECHARTING_API_TOKEN="<your real PriceCharting token>"
 supabase secrets set OPENAI_API_KEY="<your OpenAI key>"        # for analyze-slab
 # optional: supabase secrets set OPENAI_ANALYZE_MODEL="gpt-5.6-terra"
+# optional: supabase secrets set OPENAI_SCAN_MODEL="gpt-5.6-terra"
 
 # (4) regenerate the Deno bundles the edge functions import
 node scripts/build-pricecharting-edge-bundle.mjs
@@ -52,6 +53,7 @@ node scripts/build-pricecharting-marketplace-edge-bundle.mjs
 # (5) deploy the admin-only edge functions
 supabase functions deploy pricecharting-search
 supabase functions deploy analyze-slab
+supabase functions deploy scan-card
 supabase functions deploy pricecharting-marketplace
 supabase functions deploy pricecharting-sync
 supabase functions deploy marketplace-scheduler
@@ -151,18 +153,22 @@ integration tests in `src/test/integration/`.
 
 1. Visit a protected route while signed out → redirected to `/login`. Sign in as
    a non-admin → **Access denied**. Sign in as an admin → `/dashboard` loads.
-2. `/slabs/new` → upload front + back → **Analyze Images** → review proposals,
+2. `/scan-card` → allow the rear camera, align a card, and scan. Confirm that no
+   native camera/file dialog opens, the card auto-adds only at confidence ≥0.75,
+   duplicates offer **Add another copy** or **Skip**, and low-confidence captures
+   remain in **Needs Review** with a private signed thumbnail.
+3. `/slabs/new` → upload front + back → **Analyze Images** → review proposals,
    apply, and edit. Enter a **cert with a leading zero** (e.g. `0012345`).
-3. Duplicate check runs (grader-scoped); **Search PriceCharting** → confirm a
+4. Duplicate check runs (grader-scoped); **Search PriceCharting** → confirm a
    product; add **sold comps**; **Approve as Final Value**; **Save**.
-4. Confirm: row + both images in `slab-images/slabs/{n}/`, number from the DB
+5. Confirm: row + both images in `slab-images/slabs/{n}/`, number from the DB
    sequence, cert kept its leading zero, detail loads, prev/next work, appears in
    `/slabs`, `/dashboard` totals update.
-5. **Archive** the slab → it leaves the active list (Show archived reveals it),
+6. **Archive** the slab → it leaves the active list (Show archived reveals it),
    number preserved. **Unarchive** to restore.
-6. **Export Inventory** → 3 sheets, exact column order, cert stored as text,
+7. **Export Inventory** → 3 sheets, exact column order, cert stored as text,
    currency cells, frozen header, filters.
-7. **Archive** is the standard action. Hard delete is double-gated: the RPC
+8. **Archive** is the standard action. Hard delete is double-gated: the RPC
    refuses with `HARD_DELETE_DISABLED` until `update public.slab_settings set
    allow_hard_delete = true`, and the UI button is hidden in prod builds unless
    `VITE_ALLOW_SLAB_HARD_DELETE=true`. With both enabled → row + comps + images
@@ -176,7 +182,7 @@ integration tests in `src/test/integration/`.
 - **RLS** on `slabs` / `slab_comps` / `slab_admins` / `api_rate_limits`.
 - **Storage** `slab-images`: private; all object ops require `is_admin`; served
   via short-lived signed URLs.
-- **Edge functions** `pricecharting-search` + `analyze-slab`: `verify_jwt=true`
+- **Edge functions** `pricecharting-search` + `analyze-slab` + `scan-card`: `verify_jwt=true`
   + `isCallerAdmin`. Secrets read only from the function env.
 - Anon users: blocked at every layer.
 ```

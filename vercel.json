@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/scan-card",
+      "destination": "https://rcbwemkfcefarqnlgrmv.supabase.co/functions/v1/scan-card"
+    }
+  ]
+}

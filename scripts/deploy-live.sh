@@ -55,6 +55,7 @@ chmod 600 "$PC_FILE" "$AI_FILE" "$EBAY_FILE"
 printf 'PRICECHARTING_API_TOKEN=%s\n' "$PRICECHARTING_API_TOKEN" >"$PC_FILE"
 printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" >"$AI_FILE"
 printf 'OPENAI_ANALYZE_MODEL=%s\n' "${OPENAI_ANALYZE_MODEL:-gpt-5.6-terra}" >>"$AI_FILE"
+printf 'OPENAI_SCAN_MODEL=%s\n' "${OPENAI_SCAN_MODEL:-${OPENAI_ANALYZE_MODEL:-gpt-5.6-terra}}" >>"$AI_FILE"
 
 EBAY_ENABLED=false
 if [ -n "${EBAY_CLIENT_ID:-}" ] || [ -n "${EBAY_CLIENT_SECRET:-}" ]; then
@@ -117,8 +118,8 @@ run_step "set OpenAI secrets"                supabase secrets set --env-file "$A
 run_step "build pricecharting edge bundle"   node scripts/build-pricecharting-edge-bundle.mjs
 run_step "build analyze-slab edge bundle"    node scripts/build-analyze-slab-edge-bundle.mjs
 run_step "build marketplace edge bundle"     node scripts/build-pricecharting-marketplace-edge-bundle.mjs
-run_step "deno check edge functions"         deno check supabase/functions/{pricecharting-search,analyze-slab,pricecharting-marketplace,pricecharting-sync,marketplace-scheduler,ebay-oauth-start,ebay-oauth-callback,ebay-account-sync,ebay-reference-search,ebay-list-item,ebay-revise-item,ebay-end-item,ebay-order-sync,ebay-fulfillment,ebay-finances-sync,ebay-notification-handler}/index.ts
-for fn in pricecharting-search analyze-slab pricecharting-marketplace pricecharting-sync marketplace-scheduler ebay-oauth-start ebay-oauth-callback ebay-account-sync ebay-reference-search ebay-list-item ebay-revise-item ebay-end-item ebay-order-sync ebay-fulfillment ebay-finances-sync ebay-notification-handler; do
+run_step "deno check edge functions"         deno check supabase/functions/{pricecharting-search,analyze-slab,scan-card,pricecharting-marketplace,pricecharting-sync,marketplace-scheduler,ebay-oauth-start,ebay-oauth-callback,ebay-account-sync,ebay-reference-search,ebay-list-item,ebay-revise-item,ebay-end-item,ebay-order-sync,ebay-fulfillment,ebay-finances-sync,ebay-notification-handler}/index.ts
+for fn in pricecharting-search analyze-slab scan-card pricecharting-marketplace pricecharting-sync marketplace-scheduler ebay-oauth-start ebay-oauth-callback ebay-account-sync ebay-reference-search ebay-list-item ebay-revise-item ebay-end-item ebay-order-sync ebay-fulfillment ebay-finances-sync ebay-notification-handler; do
   run_step "deploy $fn" supabase functions deploy "$fn"
 done
 

@@ -85,7 +85,7 @@ run_check "typecheck (tsc)"                       bun run typecheck
 run_check "production build"                       bun run build
 run_check "build pricecharting edge bundle"        node scripts/build-pricecharting-edge-bundle.mjs
 run_check "build analyze-slab edge bundle"         node scripts/build-analyze-slab-edge-bundle.mjs
-run_check "deno check edge functions"              deno check supabase/functions/pricecharting-search/index.ts supabase/functions/analyze-slab/index.ts
+run_check "deno check edge functions"              deno check supabase/functions/pricecharting-search/index.ts supabase/functions/analyze-slab/index.ts supabase/functions/scan-card/index.ts
 
 # --- 3. secret scan: source + generated bundles (NOT dist / node_modules) ----
 SECRET_RE='sk-ant-[A-Za-z0-9_-]{8}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xoxb-[0-9A-Za-z-]{10}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}'

@@ -6,7 +6,7 @@ import { PageHead } from "@/components/seo/PageHead";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LoadingState } from "@/components/shared/LoadingState";
-import { Download, Plus, Loader2 } from "lucide-react";
+import { Camera, Download, Plus, Loader2 } from "lucide-react";
 import { fetchAllSlabs, fetchAllComps, fetchIntegrationHealth } from "@/lib/slabs/data";
 import { computeDashboardStats } from "@/lib/slabs/compute-stats";
 import { formatCents } from "@/lib/slabs/format";
@@ -45,7 +45,8 @@ export default function SlabDashboard() {
             {exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
             Export Inventory
           </Button>
-          <Button asChild><Link to="/slabs/new"><Plus className="mr-1 h-4 w-4" /> Add Slab</Link></Button>
+          <Button asChild><Link to="/scan-card"><Camera className="mr-1 h-4 w-4" /> Scan Card</Link></Button>
+          <Button variant="outline" asChild><Link to="/slabs/new"><Plus className="mr-1 h-4 w-4" /> Add Slab</Link></Button>
           <Button variant="outline" asChild><Link to="/slabs">View Inventory</Link></Button>
         </div>
       </div>
