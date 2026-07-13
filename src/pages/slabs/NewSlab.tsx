@@ -22,7 +22,7 @@ import {
   LABEL_ACCURACY,
   VALUATION_CONFIDENCE,
 } from "@/lib/slabs/constants";
-import { dollarsToCents, centsToInputString } from "@/lib/slabs/format";
+import { dollarsToCents, centsToInputString, todayLocalDate } from "@/lib/slabs/format";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
@@ -55,7 +55,7 @@ const EMPTY_VALUATION = {
   guide: "",
   confidence: "manual",
   notes: "",
-  date_valued: new Date().toISOString().slice(0, 10),
+  date_valued: todayLocalDate(),
 };
 
 interface NewSlabPageProps {

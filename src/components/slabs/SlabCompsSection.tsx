@@ -20,12 +20,12 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogT
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Pencil, Trash2, Check } from "lucide-react";
 import { fetchComps, insertComp, updateComp, deleteComp, updateSlab } from "@/lib/slabs/data";
-import { formatCents, centsToInputString, dollarsToCents } from "@/lib/slabs/format";
+import { formatCents, centsToInputString, dollarsToCents, todayLocalDate } from "@/lib/slabs/format";
 import { computeCompStats, suggestFinalValue } from "@/lib/slabs/comps";
 import type { Slab, SlabComp, SlabCompInput } from "@/lib/slabs/types";
 
 const EMPTY_FORM = {
-  sale_date: new Date().toISOString().slice(0, 10),
+  sale_date: todayLocalDate(),
   sold: "",
   shipping: "",
   total: "",

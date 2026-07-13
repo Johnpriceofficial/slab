@@ -3,6 +3,16 @@
  * produced is at the display boundary. No binary-float money arithmetic.
  */
 
+/**
+ * Today's date as YYYY-MM-DD in the operator's LOCAL timezone. Date-only fields
+ * (Date Valued, comp Sale Date) must NOT use `toISOString()` — that is UTC and
+ * rolls to tomorrow on evenings west of UTC (e.g. EDT), showing the wrong day.
+ */
+export function todayLocalDate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** Cents → dollars number (e.g. 42995 → 429.95). Null-preserving. */
 export function centsToDollars(cents: number | null | undefined): number | null {
   if (cents === null || cents === undefined) return null;
