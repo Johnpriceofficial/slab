@@ -19,7 +19,9 @@ import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
-import { hydratePriceTiers } from "@/lib/slabs/pricing-tiers";
+import { hydratePriceTiers, tierLabelOf } from "@/lib/slabs/pricing-tiers";
+import { deriveValuation } from "@/lib/slabs/valuation-derive";
+import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
 } from "@/lib/slabs/data";
@@ -258,6 +260,7 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
     final: centsToInputString(slab.final_value_cents),
     quick: centsToInputString(slab.quick_sale_value_cents),
     replacement: centsToInputString(slab.replacement_value_cents),
+    guide: centsToInputString(slab.pricecharting_value_cents),
     verification_status: slab.verification_status ?? "unverified",
     valuation_confidence: slab.valuation_confidence ?? "manual",
     duplicate_status: slab.duplicate_status ?? "unique",
@@ -268,10 +271,15 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
   const save = async () => {
     setSaving(true);
     try {
+      const guideCents = dollarsToCents(form.guide);
       await updateSlab(slab.id, {
         final_value_cents: dollarsToCents(form.final),
         quick_sale_value_cents: dollarsToCents(form.quick),
         replacement_value_cents: dollarsToCents(form.replacement),
+        // Graded guide entered by hand (the API has no tier for many cards). This
+        // becomes the exact-tier value the pricing card renders.
+        pricecharting_value_cents: guideCents,
+        price_variance_percent: priceVariancePercent(dollarsToCents(form.final), guideCents),
         verification_status: form.verification_status,
         valuation_confidence: form.valuation_confidence,
         duplicate_status: form.duplicate_status,
@@ -290,6 +298,30 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
 
   const set = (k: keyof typeof form, v: string) => setForm((s) => ({ ...s, [k]: v }));
 
+  // Evaluate the hand-entered guide as the slab's EXACT tier (e.g. CGC 10
+  // Pristine) → Verified, with Quick-Sale/Replacement/notes derived, matching
+  // the intake screen's behaviour.
+  const evaluateFromGuide = () => {
+    const guideCents = dollarsToCents(form.guide);
+    if (guideCents === null) {
+      toast.error("Enter the PriceCharting Guide Value first.");
+      return;
+    }
+    const derived = deriveValuation({
+      guide_cents: guideCents,
+      confidence_score: null,
+      exact_tier_label: tierLabelOf({ grader: slab.grader, grade: slab.grade, grade_label: slab.grade_label }) || null,
+    });
+    setForm((s) => ({
+      ...s,
+      final: centsToInputString(derived.suggested_final_cents),
+      quick: centsToInputString(derived.quick_sale_cents),
+      replacement: centsToInputString(derived.replacement_cents),
+      valuation_confidence: derived.confidence,
+      notes: derived.method,
+    }));
+  };
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -298,6 +330,14 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
       <DialogContent>
         <DialogHeader><DialogTitle>Edit Slab #{slab.inventory_number}</DialogTitle></DialogHeader>
         <div className="grid grid-cols-2 gap-3">
+          <EditField label="PriceCharting Guide Value ($)" className="col-span-2">
+            <Input value={form.guide} onChange={(e) => set("guide", e.target.value)} inputMode="decimal" placeholder="e.g. 42.50 (read from PriceCharting for this grade)" />
+          </EditField>
+          <div className="col-span-2 -mt-1">
+            <Button type="button" variant="secondary" size="sm" onClick={evaluateFromGuide} disabled={!form.guide}>
+              Evaluate as {tierLabelOf({ grader: slab.grader, grade: slab.grade, grade_label: slab.grade_label }) || "exact tier"} → Final / Quick-Sale (80%) / Replacement (110%)
+            </Button>
+          </div>
           <EditField label="Final Value ($)"><Input value={form.final} onChange={(e) => set("final", e.target.value)} inputMode="decimal" /></EditField>
           <EditField label="Quick-Sale ($)"><Input value={form.quick} onChange={(e) => set("quick", e.target.value)} inputMode="decimal" /></EditField>
           <EditField label="Replacement ($)"><Input value={form.replacement} onChange={(e) => set("replacement", e.target.value)} inputMode="decimal" /></EditField>
