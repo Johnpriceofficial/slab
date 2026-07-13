@@ -37,6 +37,23 @@ export interface ReviewItem {
   thumbnail_url: string | null;
 }
 
+export interface InventoryCard {
+  id: string;
+  card_name: string;
+  set_name: string;
+  card_number: string;
+  rarity: string | null;
+  condition_notes: string | null;
+  condition_issues?: CardExtraction["condition_issues"];
+  identification_confidence: number;
+  inventory_status: "active" | "archived";
+  thumbnail_url?: string | null;
+  image_url?: string | null;
+  created_at: string;
+  updated_at: string;
+  scan?: { model: string | null; openai_request_id: string | null; latency_ms: number | null; schema_version: string; created_at: string } | null;
+}
+
 async function invoke(body: FormData | Record<string, unknown>): Promise<Record<string, unknown>> {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.access_token) throw new Error("Your session expired. Sign in again.");
@@ -84,4 +101,31 @@ export async function resolveScan(input: {
 export async function fetchScanReviews(): Promise<ReviewItem[]> {
   const data = await invoke({ action: "list_reviews" });
   return Array.isArray(data.reviews) ? data.reviews as ReviewItem[] : [];
+}
+
+export async function fetchCards(inventoryStatus: "active" | "archived" = "active"): Promise<InventoryCard[]> {
+  const data = await invoke({ action: "list_cards", inventory_status: inventoryStatus });
+  return Array.isArray(data.cards) ? data.cards as InventoryCard[] : [];
+}
+
+export async function fetchCard(cardId: string): Promise<InventoryCard> {
+  const data = await invoke({ action: "get_card", card_id: cardId });
+  if (!data.card) throw new Error("Card not found.");
+  return data.card as unknown as InventoryCard;
+}
+
+export async function fetchCardSummary(): Promise<{ active: number; archived: number; needs_review: number }> {
+  const data = await invoke({ action: "card_summary" });
+  return { active: Number(data.active ?? 0), archived: Number(data.archived ?? 0), needs_review: Number(data.needs_review ?? 0) };
+}
+
+export async function updateCard(input: {
+  card_id: string; card_name: string; set_name: string; card_number: string;
+  rarity: string; condition_notes: string; allow_duplicate?: boolean;
+}): Promise<{ status: "success" | "possible_duplicate"; card?: InventoryCard }> {
+  return await invoke({ action: "update_card", ...input }) as { status: "success" | "possible_duplicate"; card?: InventoryCard };
+}
+
+export async function setCardArchived(cardId: string, archived: boolean): Promise<void> {
+  await invoke({ action: archived ? "archive_card" : "restore_card", card_id: cardId });
 }

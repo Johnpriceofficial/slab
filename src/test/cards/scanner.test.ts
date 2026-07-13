@@ -59,4 +59,14 @@ describe("live card scanner", () => {
     expect(edge).toContain("store: false");
     expect(edge).not.toContain("VITE_OPENAI");
   });
+
+  it("exposes authenticated inventory actions without browser writes", () => {
+    const edge = readFileSync("supabase/functions/scan-card/index.ts", "utf8");
+    const app = readFileSync("src/App.tsx", "utf8");
+    for (const action of ["list_cards", "get_card", "update_card", "archive_card", "restore_card", "card_summary"]) {
+      expect(edge).toContain(`action === "${action}"`);
+    }
+    expect(app).toContain('path="/cards"');
+    expect(app).toContain('path="/cards/:id"');
+  });
 });

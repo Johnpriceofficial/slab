@@ -10,11 +10,13 @@ import { Camera, Download, Plus, Loader2 } from "lucide-react";
 import { fetchAllSlabs, fetchAllComps, fetchIntegrationHealth } from "@/lib/slabs/data";
 import { computeDashboardStats } from "@/lib/slabs/compute-stats";
 import { formatCents } from "@/lib/slabs/format";
+import { fetchCardSummary } from "@/lib/cards/api";
 
 export default function SlabDashboard() {
   const [exporting, setExporting] = useState(false);
   const { data: slabs, isLoading } = useQuery({ queryKey: ["dashboard-slabs"], queryFn: fetchAllSlabs });
   const { data: health } = useQuery({ queryKey: ["integration-health"], queryFn: fetchIntegrationHealth });
+  const { data: cardSummary } = useQuery({ queryKey: ["card-summary"], queryFn: fetchCardSummary });
 
   const stats = slabs ? computeDashboardStats(slabs) : null;
 
@@ -70,6 +72,8 @@ export default function SlabDashboard() {
             <Stat label="Average Days Held" value={stats.average_days_held === null ? "—" : String(stats.average_days_held)} />
             <Stat label="Failed Sync Jobs" value={String(health?.failed_sync_jobs ?? 0)} sub={`${health?.unresolved_errors ?? 0} unresolved integration error(s)`} />
             <Stat label="Total Slabs" value={String(stats.total_slabs)} />
+            <Stat label="Active Scanned Cards" value={String(cardSummary?.active ?? 0)} sub={`${cardSummary?.archived ?? 0} archived`} />
+            <Stat label="Card Scans Needing Review" value={String(cardSummary?.needs_review ?? 0)} />
             <Stat label="Total Final Value" value={formatCents(stats.total_final_value_cents)} />
             <Stat label="Total Quick-Sale Value" value={formatCents(stats.total_quick_sale_value_cents)} />
             <Stat label="Total Replacement Value" value={formatCents(stats.total_replacement_value_cents)} />

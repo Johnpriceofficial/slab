@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Camera, CameraIcon, CheckCircle2, FlipHorizontal2, Loader2, RotateCcw, ShieldAlert, SkipForward } from "lucide-react";
 import { toast } from "sonner";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -232,6 +233,9 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
                 <Field label="Card number" value={corrections.card_number} onChange={(value) => setCorrections((old) => ({ ...old, card_number: value }))} />
                 <Field label="Rarity" value={corrections.rarity} onChange={(value) => setCorrections((old) => ({ ...old, rarity: value }))} />
               </div>
+            )}
+            {result.status === "added" && result.card?.id && (
+              <div className="mt-4 flex justify-end"><Button variant="outline" asChild><Link to={`/cards/${result.card.id}`}>View inventory card</Link></Button></div>
             )}
             {result.extraction && (
               <p className="mt-3 text-xs text-slate-500">

@@ -266,6 +266,98 @@ function correctedExtraction(scan: Record<string, unknown>, input: Record<string
 
 async function handleAction(body: Record<string, unknown>, userId: string, admin: ReturnType<typeof createClient>): Promise<Response> {
   const action = body.action;
+  if (action === "card_summary") {
+    const [activeResult, archivedResult, reviewsResult] = await Promise.all([
+      admin.from("cards").select("id", { count: "exact", head: true }).eq("created_by", userId).eq("inventory_status", "active"),
+      admin.from("cards").select("id", { count: "exact", head: true }).eq("created_by", userId).eq("inventory_status", "archived"),
+      admin.from("card_scan_reviews").select("id", { count: "exact", head: true }).eq("created_by", userId).eq("status", "pending"),
+    ]);
+    if (activeResult.error) throw activeResult.error;
+    if (archivedResult.error) throw archivedResult.error;
+    if (reviewsResult.error) throw reviewsResult.error;
+    return json({
+      status: "success",
+      active: activeResult.count ?? 0,
+      archived: archivedResult.count ?? 0,
+      needs_review: reviewsResult.count ?? 0,
+    });
+  }
+
+  if (action === "list_cards") {
+    const requestedStatus = body.inventory_status === "archived" ? "archived" : "active";
+    const { data: cards, error } = await admin.from("cards")
+      .select("id,card_name,set_name,card_number,rarity,condition_notes,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
+      .eq("created_by", userId).eq("inventory_status", requestedStatus)
+      .order("created_at", { ascending: false }).limit(500);
+    if (error) throw error;
+    const paths = (cards ?? []).map((card) => card.scan_image_path).filter(Boolean);
+    const { data: signedRows } = paths.length ? await admin.storage.from(BUCKET).createSignedUrls(paths, 600) : { data: [] };
+    const signedByPath = new Map((signedRows ?? []).map((row) => [row.path, row.signedUrl]));
+    return json({ status: "success", cards: (cards ?? []).map((card) => ({ ...card, thumbnail_url: signedByPath.get(card.scan_image_path) ?? null })) });
+  }
+
+  if (action === "get_card") {
+    const cardId = typeof body.card_id === "string" ? body.card_id : "";
+    if (!cardId) return json({ status: "error", error_code: "CARD_ID_REQUIRED", message: "card_id is required." }, 400);
+    const { data: card, error } = await admin.from("cards")
+      .select("id,source_scan_id,card_name,set_name,card_number,rarity,condition_notes,condition_issues,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
+      .eq("id", cardId).eq("created_by", userId).single();
+    if (error || !card) return json({ status: "error", error_code: "CARD_NOT_FOUND", message: "Card not found." }, 404);
+    const { data: scan } = await admin.from("card_scans")
+      .select("model,openai_request_id,latency_ms,schema_version,created_at")
+      .eq("id", card.source_scan_id).eq("created_by", userId).single();
+    const { data: signed } = await admin.storage.from(BUCKET).createSignedUrl(card.scan_image_path, 600);
+    return json({ status: "success", card: { ...card, image_url: signed?.signedUrl ?? null, scan: scan ?? null } });
+  }
+
+  if (action === "update_card") {
+    const cardId = typeof body.card_id === "string" ? body.card_id : "";
+    const extraction = {
+      card_name: typeof body.card_name === "string" ? body.card_name.trim() : "",
+      set_name: typeof body.set_name === "string" ? body.set_name.trim() : "",
+      card_number: typeof body.card_number === "string" ? body.card_number.trim() : "",
+      rarity: typeof body.rarity === "string" ? body.rarity.trim() : "",
+    };
+    if (!cardId || !extraction.card_name || !extraction.set_name || !extraction.card_number) {
+      return json({ status: "error", error_code: "INVALID_CARD", message: "Card name, set, and number are required." }, 400);
+    }
+    const { data: owned } = await admin.from("cards").select("id").eq("id", cardId).eq("created_by", userId).single();
+    if (!owned) return json({ status: "error", error_code: "CARD_NOT_FOUND", message: "Card not found." }, 404);
+    const { data: duplicates, error: duplicateError } = await admin.from("cards").select("id,card_name,set_name,card_number")
+      .eq("created_by", userId)
+      .eq("card_name_normalized", normalizeIdentity(extraction.card_name))
+      .eq("set_name_normalized", normalizeIdentity(extraction.set_name))
+      .eq("card_number_normalized", normalizeCardNumber(extraction.card_number))
+      .neq("id", cardId).limit(10);
+    if (duplicateError) throw duplicateError;
+    if ((duplicates?.length ?? 0) > 0 && body.allow_duplicate !== true) {
+      return json({ status: "possible_duplicate", duplicates });
+    }
+    const { data: card, error } = await admin.from("cards").update({
+      card_name: extraction.card_name,
+      set_name: extraction.set_name,
+      card_number: extraction.card_number,
+      rarity: extraction.rarity || null,
+      condition_notes: typeof body.condition_notes === "string" ? body.condition_notes.trim() || null : null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", cardId).eq("created_by", userId)
+      .select("id,card_name,set_name,card_number,rarity,condition_notes,inventory_status,updated_at").single();
+    if (error) throw error;
+    await admin.from("audit_log").insert({ actor_user_id: userId, action: "card_inventory_updated", entity_type: "card", entity_id: cardId, source: "USER", detail: { duplicate_override: (duplicates?.length ?? 0) > 0 } });
+    return json({ status: "success", card });
+  }
+
+  if (action === "archive_card" || action === "restore_card") {
+    const cardId = typeof body.card_id === "string" ? body.card_id : "";
+    if (!cardId) return json({ status: "error", error_code: "CARD_ID_REQUIRED", message: "card_id is required." }, 400);
+    const inventoryStatus = action === "archive_card" ? "archived" : "active";
+    const { data: card, error } = await admin.from("cards").update({ inventory_status: inventoryStatus, updated_at: new Date().toISOString() })
+      .eq("id", cardId).eq("created_by", userId).select("id,inventory_status").single();
+    if (error || !card) return json({ status: "error", error_code: "CARD_NOT_FOUND", message: "Card not found." }, 404);
+    await admin.from("audit_log").insert({ actor_user_id: userId, action: action === "archive_card" ? "card_inventory_archived" : "card_inventory_restored", entity_type: "card", entity_id: cardId, source: "USER" });
+    return json({ status: "success", card });
+  }
+
   if (action === "list_reviews") {
     const { data: reviews, error } = await admin.from("card_scan_reviews")
       .select("id,scan_id,review_reason,proposed_data,status,created_at")
