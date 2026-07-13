@@ -45,6 +45,46 @@ export function extractHashNumber(name: string): string | null {
   return m ? m[1].toLowerCase() : null;
 }
 
+/**
+ * Extract the FULL printed collector number from a product name, including a
+ * promo suffix: "Charmander #289/S-P" → "289/S-P", "Charmander #4" → "4".
+ */
+export function extractFullCardNumber(name: string): string | null {
+  const m = /#\s*([0-9]+(?:\s*\/\s*[a-z0-9][a-z0-9-]*)?)/i.exec(name);
+  return m ? m[1] : null;
+}
+
+/**
+ * Normalize a full printed collector number for equality comparison, preserving
+ * the complete value: unicode dashes → "-", lowercase, drop a leading "#", and
+ * remove whitespace around "/" and "-". "289 / S–P" and "#289/S-P" → "289/s-p".
+ */
+export function normalizeFullNumber(s: string | null | undefined): string | null {
+  if (!s) return null;
+  const cleaned = s
+    .replace(/^#\s*/, "")
+    .replace(/[‐-―−]/g, "-") // unicode dashes → ASCII hyphen
+    .toLowerCase()
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s*-\s*/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned === "" ? null : cleaned;
+}
+
+/**
+ * The ALPHABETIC promo suffix after the slash ("289/s-p" → "s-p"), or null. A
+ * purely numeric part after the slash is a set-size DENOMINATOR ("16/64"), not a
+ * promo family, and is never treated as a suffix.
+ */
+export function promoSuffix(fullNormalized: string | null): string | null {
+  if (!fullNormalized) return null;
+  const i = fullNormalized.lastIndexOf("/");
+  if (i < 0) return null;
+  const suf = fullNormalized.slice(i + 1);
+  return /[a-z]/i.test(suf) ? suf : null;
+}
+
 /** Does `needle` (a card/issue number like "4" or "17a") appear as a token? */
 function numberTokenPresent(haystack: string, needle: string): boolean {
   const n = needle.toLowerCase().replace(/[^0-9a-z]/g, "");
@@ -163,6 +203,10 @@ export interface ScoredCandidate {
   conflicts: string[];
   missing: string[];
   disqualified: boolean;
+  /** Every major character matched (no missing/replaced character). */
+  characterExact: boolean;
+  /** The FULL printed number matched, incl. any promo suffix ("289/S-P"). */
+  numberExactFull: boolean;
 }
 
 /** Score a single candidate product against the item's identifiers. */
@@ -175,6 +219,11 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
   let awarded = 0;
   let possible = 0;
   let disqualified = false;
+  let characterExact = false;
+  let numberExactFull = false;
+  // A "distinctive" number carries a promo suffix or letters ("289/S-P",
+  // "SWSH123") and is globally unique; a bare digit ("4") is shared across sets.
+  let numberDistinctive = false;
 
   for (const id of ids) {
     possible += id.weight;
@@ -185,6 +234,20 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       // "016064". The denominator (set size) is not part of the identity.
       const wantedTok = cardNumberToken(id.value);
       const candTok = cardNumberToken(extractHashNumber(product.name));
+      // Separately, does the FULL printed number (incl. promo suffix) match?
+      const wantFull = normalizeFullNumber(id.value);
+      const candFull = normalizeFullNumber(extractFullCardNumber(product.name));
+      if (wantFull && candFull && wantFull === candFull) numberExactFull = true;
+      if (wantFull && /[^0-9]/.test(wantFull)) numberDistinctive = true;
+      // Conflicting PROMO SUFFIXES are a hard conflict (S-P vs SV-P), but a
+      // MISSING suffix on either side is never a conflict, and numeric
+      // denominators (/64) are not suffixes.
+      const wantSuffix = promoSuffix(wantFull);
+      const candSuffix = promoSuffix(candFull);
+      if (wantSuffix && candSuffix && wantSuffix !== candSuffix) {
+        conflicts.push(`card_number mismatch: promo suffix /${wantSuffix} (${id.value}) vs /${candSuffix}`);
+        disqualified = true;
+      }
       if (candTok !== null && wantedTok !== null) {
         if (candTok === wantedTok) {
           awarded += id.weight;
@@ -232,7 +295,11 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
           // (reprints); heavily penalize rather than hard-reject.
         }
       } else {
-        missing.push(`Year ${wantYear || "?"} could not be confirmed`);
+        // The candidate provides no year to compare against — treat as UNKNOWN,
+        // not a miss: remove its weight from the denominator so a card whose
+        // PriceCharting product simply lists no release date is not penalized.
+        possible -= id.weight;
+        missing.push(`Year ${wantYear || "?"} could not be confirmed (candidate has no release date)`);
       }
       continue;
     }
@@ -252,6 +319,8 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       if (cm.wanted.length > 0 && !cm.ok) {
         conflicts.push(`character mismatch: candidate is missing ${cm.missing.join(", ")}`);
         disqualified = true;
+      } else if (cm.wanted.length > 0 && cm.ok) {
+        characterExact = true; // every major character present
       }
     }
 
@@ -266,8 +335,22 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
     }
   }
 
-  const score = possible > 0 ? Math.round((awarded / possible) * 100) : 0;
-  return { product, score, awarded, possible, reasons, conflicts, missing, disqualified };
+  let score = possible > 0 ? Math.round((awarded / possible) * 100) : 0;
+
+  // IDENTITY FLOOR: an exact character match + an exact DISTINCTIVE full number
+  // (promo suffix or alphanumeric — globally unique) with no conflicts is a
+  // confident identity match, even when the catalog set label differs
+  // ("Sword & Shield Promos" vs "Pokemon Japanese Promo") or PriceCharting lists
+  // no year. Those catalog-alias / missing-year differences must not hold a
+  // genuine exact match below the confirm threshold. Pure-numeric numbers are
+  // NOT distinctive (shared across sets) and are deliberately excluded; genuine
+  // multi-candidate ties are still capped by the ambiguity guard downstream.
+  if (characterExact && numberExactFull && numberDistinctive && conflicts.length === 0) {
+    score = Math.max(score, 95);
+    reasons.push("Exact character + exact distinctive collector number — catalog/year differences ignored");
+  }
+
+  return { product, score, awarded, possible, reasons, conflicts, missing, disqualified, characterExact, numberExactFull };
 }
 
 /* --------------------------- confidence gate --------------------------- */
