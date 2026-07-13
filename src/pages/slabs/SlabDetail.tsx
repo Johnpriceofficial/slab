@@ -17,6 +17,8 @@ import { LoadingState } from "@/components/shared/LoadingState";
 import { ChevronLeft, ChevronRight, Pencil, ImageOff } from "lucide-react";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
+import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
+import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab,
 } from "@/lib/slabs/data";
@@ -126,32 +128,30 @@ export default function SlabDetail() {
           </CardContent>
         </Card>
 
-        {/* Values */}
-        <Card>
-          <CardHeader><CardTitle>Valuation</CardTitle></CardHeader>
-          <CardContent className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <Detail label="Final Value" value={formatCents(slab.final_value_cents)} strong />
-            <Detail label="Quick-Sale Value" value={formatCents(slab.quick_sale_value_cents)} />
-            <Detail label="Replacement Value" value={formatCents(slab.replacement_value_cents)} />
-            <Detail label="Valuation Confidence" value={slab.valuation_confidence} />
-            <Detail label="Price Variance %" value={slab.price_variance_percent === null ? null : `${slab.price_variance_percent}%`} />
-            <Detail label="Date Valued" value={slab.date_valued ? slab.date_valued.slice(0, 10) : null} />
-          </CardContent>
-        </Card>
-
-        {/* PriceCharting */}
-        <Card>
-          <CardHeader><CardTitle>PriceCharting</CardTitle></CardHeader>
-          <CardContent className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <Detail label="Product" value={slab.pricecharting_product_name} className="col-span-2" />
-            <Detail label="Product ID" value={slab.pricecharting_product_id} />
-            <Detail label="Match" value={slab.pricecharting_match_status} />
-            <Detail label="Grade Field" value={slab.pricecharting_grade_field} />
-            <Detail label="Guide Value" value={formatCents(slab.pricecharting_value_cents)} />
-            <Detail label="Sales Volume" value={slab.pricecharting_sales_volume} />
-            <p className="col-span-2 text-xs text-muted-foreground">
-              Current PriceCharting Guide Value — not a last-sold, eBay-sold, or historical sale.
-            </p>
+        {/* Valuation — strict pricing hierarchy (primary value card + grade table) */}
+        <Card className="lg:col-span-2">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle>Valuation</CardTitle>
+            <span className="text-xs text-muted-foreground">
+              Date Valued: {slab.date_valued ? slab.date_valued.slice(0, 10) : "—"}
+            </span>
+          </CardHeader>
+          <CardContent>
+            <SlabPricingCard
+              model={buildPricingModel({
+                final_cents: slab.final_value_cents,
+                guide_cents: slab.pricecharting_value_cents,
+                quick_cents: slab.quick_sale_value_cents,
+                replacement_cents: slab.replacement_value_cents,
+                valuation_confidence: slab.valuation_confidence,
+                price_variance_percent: slab.price_variance_percent,
+                grader: slab.grader,
+                grade: slab.grade,
+                grade_label: slab.grade_label,
+                product_name: slab.pricecharting_product_name,
+                product_id: slab.pricecharting_product_id,
+              })}
+            />
           </CardContent>
         </Card>
       </div>
