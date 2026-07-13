@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -70,20 +70,34 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
   const [recoverInput, setRecoverInput] = useState("");
   const [recovering, setRecovering] = useState(false);
   const [recovered, setRecovered] = useState<LookupResponse | null>(null);
+  const [recoveredInput, setRecoveredInput] = useState(""); // the input the lookup validated
   const [recoverError, setRecoverError] = useState<string | null>(null);
 
+  // A recovered result was identity-checked against the identity AT LOOKUP TIME.
+  // If the operator edits identity fields afterward, invalidate it so a stale
+  // check can't be confirmed.
+  useEffect(() => {
+    setRecovered(null);
+    setRecoverError(null);
+  }, [
+    identity.card_name, identity.set, identity.card_number, identity.year,
+    identity.language, identity.variation, identity.grader, identity.grade,
+  ]);
+
   const runRecover = async () => {
-    if (!recoverInput.trim()) return;
+    const input = recoverInput.trim();
+    if (!input) return;
     setRecovering(true);
     setRecoverError(null);
     setRecovered(null);
     try {
-      const res = await priceChartingLookup(recoverInput, identity);
+      const res = await priceChartingLookup(input, identity);
       if (res.status === "error") {
         setRecoverError(res.message);
         return;
       }
       setRecovered(res);
+      setRecoveredInput(input); // remember exactly what was looked up
     } catch (e) {
       setRecoverError(e instanceof Error ? e.message : "Lookup failed");
     } finally {
@@ -92,7 +106,9 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
   };
 
   const confirmRecovered = (r: LookupResponse) => {
-    const source = /^https?:\/\//i.test(recoverInput.trim()) || recoverInput.includes("/") ? "manual_product_url" : "manual_product_id";
+    // Source is derived from the input that produced THIS result, not the live box.
+    const source =
+      /^https?:\/\//i.test(recoveredInput) || recoveredInput.includes("/") ? "manual_product_url" : "manual_product_id";
     onSelect({
       product_id: r.product_id,
       product_name: r.product_name,

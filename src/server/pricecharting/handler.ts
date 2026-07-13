@@ -58,7 +58,11 @@ export function parseProductId(input: { product_id?: string; product_url?: strin
   if (/^\d+$/.test(direct)) return direct;
   const url = (input.product_url ?? "").trim();
   if (url) {
-    const m = /[?&]id=(\d+)/.exec(url) ?? /(?:^|[/=])(\d{5,})(?:[/?#]|$)/.exec(url);
+    // Only an explicit `id=` query param, or a 5+ digit segment at the very END
+    // of the path (e.g. ".../product/5427932"). A slug URL, or a stray numeric
+    // query param (?sort=99999) / mid-path number (/game/12345/charizard), must
+    // NOT be mistaken for a product id.
+    const m = /[?&]id=(\d+)/.exec(url) ?? /\/(\d{5,})\/?(?:[?#]|$)/.exec(url);
     if (m) return m[1];
   }
   return null;
@@ -566,7 +570,10 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput)
   }
 
   const threshold = requiresHighConfidence(item) ? 85 : 70;
-  const requiresConfirmation = scored.disqualified || scored.score < threshold;
+  // ANY conflict — even a non-disqualifying one like a year mismatch — must
+  // require confirmation, matching the search gate (which penalizes residual
+  // conflicts before its threshold test). Never flag a conflicting product safe.
+  const requiresConfirmation = scored.disqualified || scored.conflicts.length > 0 || scored.score < threshold;
 
   const body: LookupResponse = {
     status: "success",
