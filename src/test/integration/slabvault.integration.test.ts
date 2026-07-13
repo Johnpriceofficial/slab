@@ -268,4 +268,75 @@ suite("SlabVault live integration", () => {
     const denied = await userClient.rpc("apply_slab_pricing", { p_slab_id: id, p_tiers: tiers(new Date().toISOString()), p_raw: null, p_priced_at: new Date().toISOString(), p_scalars: null });
     expect(denied.error).not.toBeNull();
   });
+
+  it("§2 record_pricecharting_confirmation: atomic state+audit, RLS, append-only, CHECK constraints", async () => {
+    const created = await createSlab(adminClient, { certification_number: `CONF${stamp}` });
+    expect(created.error).toBeNull();
+    const id = created.data.id as string;
+    createdSlabIds.push(id);
+
+    const patch = (over: Record<string, unknown> = {}) => ({
+      candidate_image_url: "https://storage.googleapis.com/images.pricecharting.com/x/240.jpg",
+      candidate_image_source: "marketplace_offer",
+      candidate_image_type: "marketplace_offer_image",
+      candidate_image_retrieved_at: new Date().toISOString(),
+      candidate_image_available: true,
+      visual_confirmation_status: "user_confirmed",
+      visual_confirmation_method: "side_by_side",
+      visual_confirmation_at: new Date().toISOString(),
+      visual_rejection_reason: null,
+      visual_rejection_note: null,
+      product_confirmation_source: "search_manual",
+      product_confirmed_at: new Date().toISOString(),
+      scoring_version: 2,
+      ...over,
+    });
+
+    // 1. Happy path: slab state written AND one audit event inserted, together.
+    const ok = await adminClient.rpc("record_pricecharting_confirmation", {
+      p_slab_id: id,
+      p_patch: patch(),
+      p_event: { event_type: "visual_confirmed", product_id: "5427932", source: "search_manual", detail: { visual_confirmation_status: "user_confirmed" } },
+    });
+    expect(ok.error).toBeNull();
+    const { data: row } = await admin.from("slabs").select("visual_confirmation_status, product_confirmed_at, visual_confirmation_by").eq("id", id).single();
+    expect(row.visual_confirmation_status).toBe("user_confirmed");
+    expect(row.product_confirmed_at).not.toBeNull();
+    expect(row.visual_confirmation_by).not.toBeNull(); // actor stamped server-side
+    const { data: events } = await admin.from("slab_pricecharting_events").select("event_type").eq("slab_id", id);
+    expect(events!.length).toBe(1);
+
+    // 2. Non-admin is rejected (RLS + explicit is_admin gate).
+    const denied = await userClient.rpc("record_pricecharting_confirmation", {
+      p_slab_id: id, p_patch: patch(), p_event: { event_type: "visual_confirmed", product_id: "x", source: null, detail: {} },
+    });
+    expect(denied.error).not.toBeNull();
+
+    // 3. Atomicity: a bad event_type (CHECK violation on the event) rolls the whole
+    //    call back — the slab's confirmation status is NOT changed to the new value.
+    const before = await admin.from("slabs").select("visual_confirmation_status").eq("id", id).single();
+    const rolledBack = await adminClient.rpc("record_pricecharting_confirmation", {
+      p_slab_id: id,
+      p_patch: patch({ visual_confirmation_status: "user_rejected", visual_rejection_reason: "wrong_card" }),
+      p_event: { event_type: "NOT_A_VALID_EVENT", product_id: "x", source: null, detail: {} },
+    });
+    expect(rolledBack.error).not.toBeNull();
+    const after = await admin.from("slabs").select("visual_confirmation_status").eq("id", id).single();
+    expect(after.data!.visual_confirmation_status).toBe(before.data!.visual_confirmation_status); // unchanged → rollback
+
+    // 4. CHECK constraint: an invalid enum on the slab column is rejected.
+    const badEnum = await adminClient.rpc("record_pricecharting_confirmation", {
+      p_slab_id: id, p_patch: patch({ visual_confirmation_status: "totally_made_up" }),
+      p_event: { event_type: "visual_confirmed", product_id: "x", source: null, detail: {} },
+    });
+    expect(badEnum.error).not.toBeNull();
+
+    // 5. Append-only: the events table exposes no UPDATE or DELETE path to an admin user.
+    const upd = await adminClient.from("slab_pricecharting_events").update({ event_type: "image_refreshed" }).eq("slab_id", id);
+    expect(upd.error ?? upd.count === 0).toBeTruthy();
+    const delErr = await adminClient.from("slab_pricecharting_events").delete().eq("slab_id", id);
+    expect(delErr.error ?? delErr.count === 0).toBeTruthy();
+    const { data: stillThere } = await admin.from("slab_pricecharting_events").select("id").eq("slab_id", id);
+    expect(stillThere!.length).toBeGreaterThanOrEqual(1); // history preserved
+  });
 });

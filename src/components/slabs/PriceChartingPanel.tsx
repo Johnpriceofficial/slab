@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { VISUAL_REJECTION_REASONS } from "@/lib/slabs/constants";
 import { toast } from "sonner";
 import { Search, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
 import {
@@ -58,9 +60,11 @@ interface PriceChartingPanelProps {
     status: "user_confirmed" | "user_rejected",
     imageUrl: string | null,
     imageSource: ImageSource,
+    rejectionReason?: string | null,
+    rejectionNote?: string | null,
   ) => void;
-  /** Called when the operator visually REJECTS the linked candidate — clear the link. */
-  onReject?: () => void;
+  /** Called when the operator REJECTS the linked candidate — clear the link. Carries the structured reason + note. */
+  onReject?: (reason: string, note: string) => void;
 }
 
 /** Map a single resolved link-status tone to a Badge variant. */
@@ -95,6 +99,8 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   // §5 Confirmed-product-first review: the decision + fetched product for a slab
   // that already has a confirmed id. Fuzzy search is gated behind this.
   const [confirmedReview, setConfirmedReview] = useState<{ decision: ConfirmedProductDecision; lookup: LookupResponse | null } | null>(null);
+  // §2 structured rejection: the open reject form for a candidate (reason + note).
+  const [rejectForm, setRejectForm] = useState<{ product_id: string; reason: string; note: string } | null>(null);
 
   // A recovered result was identity-checked against the identity AT LOOKUP TIME.
   // If the operator edits identity fields afterward, invalidate it so a stale
@@ -462,38 +468,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                         ) : null}
                       </div>
                     </div>
-                    {offerImage && offerImage.product_id === c.product_id && offerImage.url ? (
-                      <div className="mt-2 flex items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
-                          onClick={() => {
-                            setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
-                            onVisualStatus?.(c.product_id, "user_confirmed", offerImage.url, offerImage.source);
-                          }}
-                        >
-                          Yes — same exact artwork
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => {
-                            // Reject → record it AND clear the link so a rejected
-                            // product never drives Final Value or is stored as confirmed.
-                            onVisualStatus?.(c.product_id, "user_rejected", offerImage.url, offerImage.source);
-                            setVisualStatus(null);
-                            onReject?.();
-                          }}
-                        >
-                          No — reject &amp; unlink
-                        </Button>
-                        {visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" && (
-                          <span className="text-xs text-muted-foreground">Recorded: user-confirmed</span>
-                        )}
-                      </div>
-                    ) : (
+                    {!(offerImage && offerImage.product_id === c.product_id && offerImage.url) && (
                       // No marketplace photo from the connected source → the visual
                       // "Yes — same exact artwork" affordance is disabled entirely.
                       <p className="mt-2 text-xs italic text-muted-foreground">
@@ -501,6 +476,78 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                         source (the Prices API exposes no official catalog image, and no marketplace seller photo was
                         found). Confirm by the metadata fields only.
                       </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {offerImage && offerImage.product_id === c.product_id && offerImage.url && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" ? "default" : "outline"}
+                          onClick={() => {
+                            setVisualStatus({ product_id: c.product_id, status: "user_confirmed" });
+                            setRejectForm(null);
+                            onVisualStatus?.(c.product_id, "user_confirmed", offerImage.url, offerImage.source);
+                          }}
+                        >
+                          Yes — same exact artwork
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRejectForm({ product_id: c.product_id, reason: "", note: "" })}
+                      >
+                        No — reject &amp; unlink
+                      </Button>
+                      {visualStatus?.product_id === c.product_id && visualStatus.status === "user_confirmed" && (
+                        <span className="text-xs text-muted-foreground">Recorded: user-confirmed</span>
+                      )}
+                    </div>
+
+                    {/* §2 Structured rejection — reason (required) + optional note.
+                        The candidate is not unlinked until a reason is chosen, so the
+                        rejection is always captured for the audit trail. */}
+                    {rejectForm?.product_id === c.product_id && (
+                      <div className="mt-2 space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-2">
+                        <p className="text-xs font-medium">Why is this not the right product?</p>
+                        <Select value={rejectForm.reason} onValueChange={(v) => setRejectForm((f) => (f ? { ...f, reason: v } : f))}>
+                          <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Select a reason…" /></SelectTrigger>
+                          <SelectContent>
+                            {VISUAL_REJECTION_REASONS.map((r) => (
+                              <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          value={rejectForm.note}
+                          onChange={(e) => setRejectForm((f) => (f ? { ...f, note: e.target.value } : f))}
+                          placeholder="Optional note (details)"
+                          className="h-8 text-sm"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            disabled={!rejectForm.reason}
+                            onClick={() => {
+                              const { reason, note } = rejectForm;
+                              const imgUrl = offerImage && offerImage.product_id === c.product_id ? offerImage.url : null;
+                              const imgSrc = offerImage && offerImage.product_id === c.product_id ? offerImage.source : "none";
+                              onVisualStatus?.(c.product_id, "user_rejected", imgUrl, imgSrc, reason, note);
+                              setVisualStatus(null);
+                              setRejectForm(null);
+                              onReject?.(reason, note);
+                            }}
+                          >
+                            Confirm rejection
+                          </Button>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => setRejectForm(null)}>
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}

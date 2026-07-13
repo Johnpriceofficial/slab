@@ -25,6 +25,7 @@ export function buildConfirmationPatch(
     visual_confirmation_at: isUser ? now : null,
     visual_confirmation_by: isUser ? actor : null,
     visual_rejection_reason: rejected ? c.visual_rejection_reason : null,
+    visual_rejection_note: rejected ? c.visual_rejection_note : null,
     product_confirmation_source: c.product_confirmation_source,
     // A rejected product is NOT a confirmed product — never stamp a confirmation.
     product_confirmed_at: c.product_id && !rejected ? now : null,
@@ -35,4 +36,13 @@ export function buildConfirmationPatch(
 /** The audit event type implied by the confirmation status. */
 export function confirmationEventType(status: string): string {
   return status === "user_confirmed" ? "visual_confirmed" : status === "user_rejected" ? "visual_rejected" : "product_confirmed";
+}
+
+/**
+ * Is a confirmation-write failure worth retrying? A constraint violation, an auth
+ * failure, or a missing slab is deterministic and will fail again identically — no
+ * point retrying. Anything else (network, timeout, transient) is retryable.
+ */
+export function isRetryableConfirmationError(message: string | null | undefined): boolean {
+  return !/violates|not authorized|not found|check constraint|duplicate key|invalid input/i.test(message ?? "");
 }

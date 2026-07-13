@@ -35,6 +35,22 @@ export const VALUATION_CONFIDENCE = [
   { value: "manual", label: "Manual" },
 ] as const;
 
+/**
+ * Structured reasons for visually REJECTING a PriceCharting candidate. Kept in
+ * lockstep with the slabs_visual_rejection_reason_chk DB constraint.
+ */
+export const VISUAL_REJECTION_REASONS = [
+  { value: "wrong_card", label: "Wrong card" },
+  { value: "wrong_character", label: "Wrong character" },
+  { value: "wrong_number", label: "Wrong collector number" },
+  { value: "wrong_set", label: "Wrong set" },
+  { value: "wrong_year", label: "Wrong year" },
+  { value: "wrong_language", label: "Wrong language" },
+  { value: "wrong_variation", label: "Wrong variation / print" },
+  { value: "image_mismatch", label: "Image does not match" },
+  { value: "other", label: "Other (see note)" },
+] as const;
+
 export const DUPLICATE_STATUSES = [
   { value: "unique", label: "Unique" },
   { value: "duplicate_attempt", label: "Duplicate attempt (kept)" },

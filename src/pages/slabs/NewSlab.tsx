@@ -14,7 +14,7 @@ import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/sla
 import type { ImageSource } from "@/server/pricecharting/handler";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
-import { analyzeSlab, recordPricechartingConfirmation } from "@/lib/slabs/data";
+import { analyzeSlab, recordPricechartingConfirmation, type PricechartingConfirmation } from "@/lib/slabs/data";
 import { SCORING_VERSION } from "@/lib/pricecharting/matching";
 import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
@@ -73,6 +73,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const [val, setVal] = useState(EMPTY_VALUATION);
   const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
   const [visual, setVisual] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected"; imageUrl: string | null; imageSource: ImageSource } | null>(null);
+  // §2 A visually-rejected candidate is remembered (even after its link is cleared)
+  // so the rejection — with its structured reason — is written to the audit trail on save.
+  const [rejected, setRejected] = useState<{ product_id: string; imageUrl: string | null; imageSource: ImageSource; reason: string; note: string } | null>(null);
   const [dup, setDup] = useState<{ id: string; inventory_number: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
@@ -212,6 +215,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // dropped, never silently trusted.
   useEffect(() => {
     setVisual(null);
+    setRejected(null); // a rejection is tied to the identity it was made against
     setPcStale(true); // only surfaced while a confirmed product is linked
     if (provenanceRef.current === "manual") {
       setValStale(true); // preserve manual figures, warn (surfaced only when figures exist)
@@ -307,6 +311,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     if (priorWasDerived || !hasManualFigures()) setValProvenance("source");
     setValStale(false);
     setPcStale(false);
+    setRejected(null); // selecting a product supersedes any prior rejection
   };
 
   // True when any money figure is currently populated (used to decide whether a
@@ -345,6 +350,63 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     duplicate_status: "unique",
   });
 
+  // §2 Build the confirmation/rejection record persisted on save. A confirmed
+  // product records its (auto or user) visual state; a rejected candidate records
+  // the rejection + structured reason so it lands in the append-only audit trail.
+  const buildConfirmationRecord = (): PricechartingConfirmation | null => {
+    if (pc) {
+      const reviewed = visual && visual.product_id === pc.product_id;
+      const source =
+        pc.match_status === "manual_product_id" || pc.match_status === "manual_product_url"
+          ? pc.match_status
+          : "search_manual";
+      return {
+        product_id: pc.product_id,
+        candidate_image_url: reviewed ? visual!.imageUrl : null,
+        candidate_image_source: reviewed ? visual!.imageSource : "none",
+        candidate_image_type: "marketplace_offer_image",
+        candidate_image_available: reviewed ? !!visual!.imageUrl : false,
+        visual_confirmation_status: reviewed ? visual!.status : "metadata_auto_confirmed",
+        visual_confirmation_method: reviewed ? "side_by_side" : null,
+        visual_rejection_reason: null,
+        visual_rejection_note: null,
+        product_confirmation_source: source,
+        scoring_version: SCORING_VERSION,
+      };
+    }
+    if (rejected) {
+      return {
+        product_id: rejected.product_id,
+        candidate_image_url: rejected.imageUrl,
+        candidate_image_source: rejected.imageSource,
+        candidate_image_type: "marketplace_offer_image",
+        candidate_image_available: !!rejected.imageUrl,
+        visual_confirmation_status: "user_rejected",
+        visual_confirmation_method: "side_by_side",
+        visual_rejection_reason: rejected.reason,
+        visual_rejection_note: rejected.note.trim() || null,
+        product_confirmation_source: null,
+        scoring_version: SCORING_VERSION,
+      };
+    }
+    return null;
+  };
+
+  // Record via the transactional RPC, retrying transient failures. The slab is
+  // already saved, so a persistent failure is surfaced (never swallowed) rather
+  // than blocking navigation.
+  const recordConfirmationWithRetry = async (
+    slabId: string,
+    c: PricechartingConfirmation,
+    attempt = 0,
+  ): Promise<void> => {
+    const res = await recordPricechartingConfirmation(slabId, c);
+    if (res.status === "error") {
+      if (res.retryable && attempt < 2) return recordConfirmationWithRetry(slabId, c, attempt + 1);
+      toast.error(`Saved, but recording the PriceCharting confirmation failed: ${res.message}`);
+    }
+  };
+
   const canSubmit = !dup && !saving;
 
   const handleSave = async () => {
@@ -381,25 +443,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         pricingWrite,
       );
       if (result.status === "success") {
-        // §4 persist confirmation state + audit event (best-effort, non-fatal).
-        if (pc) {
-          const reviewed = visual && visual.product_id === pc.product_id;
-          const source =
-            pc.match_status === "manual_product_id" || pc.match_status === "manual_product_url"
-              ? pc.match_status
-              : "search_manual";
-          await recordPricechartingConfirmation(result.slab.id, {
-            product_id: pc.product_id,
-            candidate_image_url: reviewed ? visual!.imageUrl : null,
-            candidate_image_source: reviewed ? visual!.imageSource : "none",
-            candidate_image_type: "marketplace_offer_image",
-            candidate_image_available: reviewed ? !!visual!.imageUrl : false,
-            visual_confirmation_status: reviewed ? visual!.status : "metadata_auto_confirmed",
-            visual_confirmation_method: reviewed ? "side_by_side" : null,
-            visual_rejection_reason: null,
-            product_confirmation_source: source,
-            scoring_version: SCORING_VERSION,
-          }).catch(() => {});
+        // §2 persist confirmation/rejection state + append-only audit event via the
+        // ONE transactional RPC. Errors are surfaced (never swallowed) and retried
+        // for transient failures; the slab itself is already saved.
+        const confirmation = buildConfirmationRecord();
+        if (confirmation) {
+          await recordConfirmationWithRetry(result.slab.id, confirmation);
         }
         toast.success(`Saved as Inventory #${result.slab.inventory_number}`);
         navigate(`/slabs/${result.slab.id}`);
@@ -558,7 +607,15 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
               selectedProductId={pc?.product_id ?? null}
               onSelect={onSelectPc}
               frontImageUrl={front?.previewUrl ?? null}
-              onVisualStatus={(product_id, status, imageUrl, imageSource) => setVisual({ product_id, status, imageUrl, imageSource })}
+              onVisualStatus={(product_id, status, imageUrl, imageSource, rejectionReason, rejectionNote) => {
+                if (status === "user_rejected") {
+                  setVisual(null);
+                  setRejected({ product_id, imageUrl, imageSource, reason: rejectionReason ?? "other", note: rejectionNote ?? "" });
+                } else {
+                  setRejected(null);
+                  setVisual({ product_id, status, imageUrl, imageSource });
+                }
+              }}
               onReject={rejectPc}
             />
           </CardContent>

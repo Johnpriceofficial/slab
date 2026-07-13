@@ -54,6 +54,7 @@ export interface Slab {
   visual_confirmation_at?: string | null;
   visual_confirmation_by?: string | null;
   visual_rejection_reason?: string | null;
+  visual_rejection_note?: string | null;
   product_confirmation_source?: string | null;
   product_confirmed_at?: string | null;
   scoring_version?: number | null;
