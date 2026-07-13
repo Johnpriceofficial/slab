@@ -5,10 +5,11 @@
  * Confidence, source, unreadable flags, and label/card mismatch are all shown.
  */
 
-import { AlertTriangle, Check, Sparkles } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ImageDown, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ANALYZE_FIELD_KEYS, type AnalyzeFieldKey, type AnalyzeResult } from "@/server/analyze-slab/handler";
+import { assessFrontImageSufficiency } from "@/lib/slabs/image-sufficiency";
 
 const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
   card_name: "Card Name",
@@ -27,12 +28,22 @@ const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
 
 export interface SlabAnalysisPanelProps {
   result: AnalyzeResult;
+  /** Whether a back image was part of this analysis — tunes the recapture advice. */
+  backProvided?: boolean;
   onApplyField: (key: AnalyzeFieldKey, value: string) => void;
   onApplyAll: (values: Partial<Record<AnalyzeFieldKey, string>>) => void;
 }
 
-export function SlabAnalysisPanel({ result, onApplyField, onApplyAll }: SlabAnalysisPanelProps) {
+const SUFFICIENCY_STYLE = {
+  sufficient: { border: "border-emerald-500/40", bg: "bg-emerald-500/5", text: "text-emerald-700", Icon: CheckCircle2 },
+  sufficient_with_warnings: { border: "border-amber-500/40", bg: "bg-amber-500/5", text: "text-amber-700", Icon: ImageDown },
+  insufficient: { border: "border-destructive/40", bg: "bg-destructive/5", text: "text-destructive", Icon: AlertTriangle },
+} as const;
+
+export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyAll }: SlabAnalysisPanelProps) {
   const readableKeys = ANALYZE_FIELD_KEYS.filter((k) => result.proposed[k].readable);
+  const sufficiency = assessFrontImageSufficiency(result, { backProvided });
+  const suffStyle = SUFFICIENCY_STYLE[sufficiency.level];
 
   const applyAll = () => {
     const values: Partial<Record<AnalyzeFieldKey, string>> = {};
@@ -54,6 +65,12 @@ export function SlabAnalysisPanel({ result, onApplyField, onApplyAll }: SlabAnal
         <Button type="button" size="sm" variant="outline" onClick={applyAll} disabled={readableKeys.length === 0}>
           <Check className="mr-1 h-4 w-4" /> Apply all readable
         </Button>
+      </div>
+
+      {/* Front-image sufficiency — is the front enough, or is the back needed? */}
+      <div className={`flex items-start gap-2 rounded-md border ${suffStyle.border} ${suffStyle.bg} p-2 text-sm ${suffStyle.text}`}>
+        <suffStyle.Icon className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{sufficiency.message}</span>
       </div>
 
       {result.warnings.length > 0 && (

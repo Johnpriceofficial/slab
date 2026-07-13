@@ -290,7 +290,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         {/* AI analysis proposals (never auto-applied; operator confirms/edits) */}
         {analysis && (
           <div className="lg:col-span-2">
-            <SlabAnalysisPanel result={analysis} onApplyField={applyAnalysisField} onApplyAll={applyAnalysisAll} />
+            <SlabAnalysisPanel
+              result={analysis}
+              backProvided={!!back}
+              onApplyField={applyAnalysisField}
+              onApplyAll={applyAnalysisAll}
+            />
           </div>
         )}
 
