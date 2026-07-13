@@ -13,6 +13,7 @@ import type {
   SearchResponse,
   ValueResponse,
   OfferImageResponse,
+  LookupResponse,
   HandlerErrorBody,
 } from "@/server/pricecharting/handler";
 import type { AnalyzeResult, AnalyzeErrorBody, AnalyzeInput } from "@/server/analyze-slab/handler";
@@ -369,6 +370,28 @@ export async function priceChartingOfferImage(
   });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as OfferImageResponse | HandlerErrorBody;
+}
+
+/**
+ * Manual recovery / confirmed-id-first lookup: fetch one product by id or URL and
+ * validate it against the slab identity (same hard-conflict protections). Returns
+ * the product + conflicts + a best-effort offer image + whether it's safe to link.
+ */
+export async function priceChartingLookup(
+  idOrUrl: string,
+  identity: PriceChartingSearchArgs,
+): Promise<LookupResponse | HandlerErrorBody> {
+  const trimmed = idOrUrl.trim();
+  const isUrl = /^https?:\/\//i.test(trimmed) || trimmed.includes("/");
+  const { data, error } = await sb.functions.invoke("pricecharting-search", {
+    body: {
+      action: "lookup",
+      ...identity,
+      ...(isUrl ? { product_url: trimmed } : { product_id: trimmed }),
+    },
+  });
+  if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
+  return data as LookupResponse | HandlerErrorBody;
 }
 
 export interface RefreshPricingResult {

@@ -32,7 +32,7 @@ import type { CardItemInput, GradingCompany, RawProduct } from "../../lib/pricec
 
 /** Fields the browser is allowed to send. NO token, NO product internals. */
 export interface SlabSearchInput {
-  action?: "search" | "value" | "offer_image";
+  action?: "search" | "value" | "offer_image" | "lookup";
   card_name?: string;
   set?: string;
   card_number?: string;
@@ -41,8 +41,27 @@ export interface SlabSearchInput {
   variation?: string;
   grader?: string;
   grade?: string | number;
-  /** Required for action "value": the product the user explicitly confirmed. */
+  /** Required for action "value"/"lookup": a PriceCharting product id. */
   product_id?: string;
+  /** For action "lookup": a full PriceCharting product URL (id extracted if present). */
+  product_url?: string;
+}
+
+/**
+ * Parse a PriceCharting product id from a raw id or URL. PriceCharting product
+ * URLs are slugs WITHOUT the numeric id, so a slug-only URL yields null (the
+ * caller must supply the numeric id). A `?id=` query or a 5+ digit path segment
+ * is accepted.
+ */
+export function parseProductId(input: { product_id?: string; product_url?: string }): string | null {
+  const direct = (input.product_id ?? "").trim();
+  if (/^\d+$/.test(direct)) return direct;
+  const url = (input.product_url ?? "").trim();
+  if (url) {
+    const m = /[?&]id=(\d+)/.exec(url) ?? /(?:^|[/=])(\d{5,})(?:[/?#]|$)/.exec(url);
+    if (m) return m[1];
+  }
+  return null;
 }
 
 export interface HandlerDeps {
@@ -118,6 +137,36 @@ export interface OfferImageResponse {
   warnings: string[];
 }
 
+/**
+ * Result of looking up ONE explicitly-supplied product (manual recovery, or a
+ * slab's previously confirmed id). The product is fetched exactly, then run
+ * through the SAME identity protections as a search candidate — the hard-conflict
+ * gates (wrong character/number/promo-suffix) are never bypassed.
+ */
+export interface LookupResponse {
+  status: "success";
+  action: "lookup";
+  product_id: string;
+  product_name: string;
+  console_or_category: string | null;
+  score: number;
+  disqualified: boolean;
+  conflicts: string[];
+  character_exact: boolean;
+  number_exact_full: boolean;
+  grade_field: string | null;
+  guide_value_cents: number | null;
+  company_specific: boolean;
+  is_estimate: boolean;
+  sales_volume: number | null;
+  available_values_cents: Record<string, number | null>;
+  offer_image_url: string | null;
+  offer_listing_count: number;
+  /** True when identity is not safe to auto-confirm (conflict or below threshold). */
+  requires_confirmation: boolean;
+  warnings: string[];
+}
+
 export interface HandlerErrorBody {
   status: "error";
   error_code: string;
@@ -128,7 +177,7 @@ export interface HandlerErrorBody {
 
 export interface HandlerResult {
   statusCode: number;
-  body: SearchResponse | ValueResponse | OfferImageResponse | HandlerErrorBody;
+  body: SearchResponse | ValueResponse | OfferImageResponse | LookupResponse | HandlerErrorBody;
 }
 
 /** HTTP status for a normalized error code. */
@@ -245,6 +294,9 @@ export async function handlePriceChartingRequest(
     }
     if (action === "offer_image") {
       return await handleOfferImage(client, input);
+    }
+    if (action === "lookup") {
+      return await handleLookup(client, input);
     }
     return await handleSearch(client, input);
   } catch (err) {
@@ -461,6 +513,87 @@ async function handleOfferImage(client: PriceChartingClient, input: SlabSearchIn
     warnings: [
       "Seller listing photo from the PriceCharting Marketplace — a copy of this product offered by a seller, " +
         "not a canonical image and not proof this is your exact card. Confirm identity by the metadata fields.",
+    ],
+  };
+  return { statusCode: 200, body };
+}
+
+/**
+ * Look up ONE product by id (or a URL that carries one) and validate it against
+ * the slab identity. Powers manual recovery and confirmed-id-first refresh. The
+ * fetched product is scored with scoreCandidate, so wrong-character / wrong-
+ * number / wrong-promo-suffix hard conflicts are surfaced and it is flagged as
+ * requiring confirmation when not safe to auto-link. A best-effort offer image
+ * is attached for visual review.
+ */
+async function handleLookup(client: PriceChartingClient, input: SlabSearchInput): Promise<HandlerResult> {
+  const id = parseProductId(input);
+  if (!id) {
+    throw new PriceChartingError(
+      "INVALID_PARAMETER",
+      "Enter a numeric PriceCharting product id (e.g. 5427932). A PriceCharting product URL without an id cannot be resolved to a product.",
+    );
+  }
+
+  const raw = await client.request<RawProduct>({ endpoint: "product", method: "GET", params: { id } });
+  const product = normalizeProduct(raw);
+  if (!product.pricecharting_id) {
+    throw new PriceChartingError("PRODUCT_NOT_FOUND", `No PriceCharting product found for id ${id}.`);
+  }
+
+  const item = toCardInput(input);
+  const scored = scoreCandidate(item, product); // SAME identity protections as search
+  const grader = item.grading_company;
+  const grade = item.grade ?? null;
+  const lookup = getValueForRequestedGrade(product, grader, grade, { category: "card" });
+  const availableCents: Record<string, number | null> = {};
+  for (const [k, v] of Object.entries(lookup.nearby_values)) availableCents[k] = v === null ? null : Math.round(v * 100);
+  const salesVolume = numberOrNull(
+    raw["sales-volume"] ?? raw["sale-volume"] ?? raw["salesVolume"] ?? raw["sales_volume"],
+  );
+
+  let offerImageUrl: string | null = null;
+  let offerListingCount = 0;
+  try {
+    const img = await getBestOfferImageForProduct(client, id);
+    if (!("status" in img) || img.status !== "error") {
+      const i = img as { image_url: string | null; listing_count: number };
+      offerImageUrl = i.image_url;
+      offerListingCount = i.listing_count;
+    }
+  } catch {
+    /* image is best-effort; never fails the lookup */
+  }
+
+  const threshold = requiresHighConfidence(item) ? 85 : 70;
+  const requiresConfirmation = scored.disqualified || scored.score < threshold;
+
+  const body: LookupResponse = {
+    status: "success",
+    action: "lookup",
+    product_id: product.pricecharting_id,
+    product_name: product.name,
+    console_or_category: product.console_or_category,
+    score: scored.score,
+    disqualified: scored.disqualified,
+    conflicts: scored.conflicts,
+    character_exact: scored.characterExact,
+    number_exact_full: scored.numberExactFull,
+    grade_field: lookup.field_used,
+    guide_value_cents: lookup.value_pennies,
+    company_specific: lookup.company_specific,
+    is_estimate: lookup.is_estimate,
+    sales_volume: salesVolume,
+    available_values_cents: availableCents,
+    offer_image_url: offerImageUrl,
+    offer_listing_count: offerListingCount,
+    requires_confirmation: requiresConfirmation,
+    warnings: [
+      "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
+      ...(scored.disqualified
+        ? [`This product HARD-CONFLICTS with the slab identity (${scored.conflicts.join("; ")}) — do not link without review.`]
+        : []),
+      ...lookup.warnings,
     ],
   };
   return { statusCode: 200, body };

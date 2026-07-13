@@ -1,14 +1,17 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Search, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
 import {
   priceChartingSearch,
   priceChartingValue,
   priceChartingOfferImage,
+  priceChartingLookup,
   type PriceChartingSearchArgs,
 } from "@/lib/slabs/data";
+import type { LookupResponse } from "@/server/pricecharting/handler";
 import { formatCents } from "@/lib/slabs/format";
 import {
   deriveCandidateStatus,
@@ -63,6 +66,48 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
     count: number;
     loading: boolean;
   } | null>(null);
+  // Manual product-id / URL recovery.
+  const [recoverInput, setRecoverInput] = useState("");
+  const [recovering, setRecovering] = useState(false);
+  const [recovered, setRecovered] = useState<LookupResponse | null>(null);
+  const [recoverError, setRecoverError] = useState<string | null>(null);
+
+  const runRecover = async () => {
+    if (!recoverInput.trim()) return;
+    setRecovering(true);
+    setRecoverError(null);
+    setRecovered(null);
+    try {
+      const res = await priceChartingLookup(recoverInput, identity);
+      if (res.status === "error") {
+        setRecoverError(res.message);
+        return;
+      }
+      setRecovered(res);
+    } catch (e) {
+      setRecoverError(e instanceof Error ? e.message : "Lookup failed");
+    } finally {
+      setRecovering(false);
+    }
+  };
+
+  const confirmRecovered = (r: LookupResponse) => {
+    const source = /^https?:\/\//i.test(recoverInput.trim()) || recoverInput.includes("/") ? "manual_product_url" : "manual_product_id";
+    onSelect({
+      product_id: r.product_id,
+      product_name: r.product_name,
+      grade_field: r.grade_field,
+      value_cents: r.guide_value_cents,
+      sales_volume: r.sales_volume,
+      match_status: source,
+      confidence_score: r.score,
+      is_estimate: r.is_estimate,
+      available_values_cents: r.available_values_cents ?? {},
+      value_response: r,
+    });
+    setOfferImage({ product_id: r.product_id, url: r.offer_image_url, count: r.offer_listing_count, loading: false });
+    toast.success(`Linked to ${r.product_name} (manual recovery)`);
+  };
 
   const runSearch = async () => {
     setLoading(true);
@@ -315,6 +360,78 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
           </div>
         </details>
       )}
+
+      {/* Manual recovery — fetch an exact product by id/URL, still identity-checked. */}
+      <details className="rounded-lg border">
+        <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
+          Recover by PriceCharting product ID or URL
+        </summary>
+        <div className="space-y-2 border-t p-3">
+          <div className="flex gap-2">
+            <Input
+              value={recoverInput}
+              onChange={(e) => setRecoverInput(e.target.value)}
+              placeholder="e.g. 5427932  (or a PriceCharting product URL containing an id)"
+              className="text-sm"
+            />
+            <Button type="button" size="sm" variant="outline" onClick={runRecover} disabled={recovering || !recoverInput.trim()}>
+              {recovering ? <Loader2 className="h-4 w-4 animate-spin" /> : "Look up"}
+            </Button>
+          </div>
+          {recoverError && (
+            <p className="flex items-start gap-1 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" /> {recoverError}
+            </p>
+          )}
+          {recovered && (
+            <div className={`rounded-md border p-2 text-sm ${recovered.disqualified ? "border-destructive/30 bg-destructive/5" : "border-primary/30 bg-primary/5"}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{recovered.product_name}</span>
+                <Badge variant={recovered.disqualified ? "destructive" : "default"}>
+                  {recovered.disqualified ? "Hard conflict" : recovered.requires_confirmation ? "Needs confirmation" : "Identity OK"}
+                </Badge>
+                <span className="text-xs text-muted-foreground">ID: {recovered.product_id} · score {recovered.score}</span>
+              </div>
+              {recovered.conflicts.length > 0 && (
+                <p className="mt-1 text-xs text-destructive">Conflicts: {recovered.conflicts.join("; ")}</p>
+              )}
+              <p className="mt-1 text-xs text-muted-foreground">
+                Character: {recovered.character_exact ? "exact" : "unconfirmed"} · Full number:{" "}
+                {recovered.number_exact_full ? "exact" : "not exact"} · Guide: {formatCents(recovered.guide_value_cents)}
+              </p>
+              {recovered.offer_image_url ? (
+                <img
+                  src={recovered.offer_image_url}
+                  alt={`Seller listing photo for ${recovered.product_name}`}
+                  loading="lazy"
+                  className="mt-2 max-h-40 rounded border object-contain"
+                />
+              ) : (
+                <p className="mt-2 text-xs italic text-muted-foreground">PriceCharting image unavailable.</p>
+              )}
+              <div className="mt-2 flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={recovered.disqualified}
+                  onClick={() => confirmRecovered(recovered)}
+                  title={recovered.disqualified ? "Blocked — this product conflicts with the slab identity" : "Link this product"}
+                >
+                  <CheckCircle2 className="mr-1 h-4 w-4" /> Confirm exact card
+                </Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => setRecovered(null)}>
+                  Reject
+                </Button>
+              </div>
+              {recovered.disqualified && (
+                <p className="mt-1 text-[11px] text-destructive">
+                  Confirmation is blocked: this product hard-conflicts with the slab identity.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
