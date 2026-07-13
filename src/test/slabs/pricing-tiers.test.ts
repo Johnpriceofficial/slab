@@ -8,6 +8,7 @@ import {
 } from "@/lib/slabs/pricing-tiers";
 
 const CGC10_PRISTINE = { grader: "CGC", grade: "10", grade_label: "PRISTINE" };
+const CGC10_PERFECT = { grader: "CGC", grade: "10", grade_label: "PERFECT" };
 const CGC10_PLAIN = { grader: "CGC", grade: "10", grade_label: null };
 const CGC10_GEM = { grader: "CGC", grade: "10", grade_label: "Gem Mint" };
 
@@ -40,6 +41,28 @@ describe("buildPriceTiers — CGC 10 Pristine is a DISTINCT tier (never a decora
     expect(pristine.value_cents).toBe(6000);
     expect(pristine.available).toBe(true);
     expect(pristine.exact_match).toBe(true);
+  });
+
+  it("keeps CGC Perfect distinct from both Pristine and ordinary CGC 10", () => {
+    const tiers = buildPriceTiers(
+      { cgc_10: 4250, cgc_10_pristine: 6000, cgc_10_perfect: 9000 },
+      CGC10_PERFECT,
+    );
+    expect(tiers.find((t) => t.tier === "cgc_10_perfect")).toMatchObject({
+      value_cents: 9000,
+      designation: "Perfect",
+      exact_match: true,
+    });
+    expect(tiers.find((t) => t.tier === "cgc_10_pristine")?.exact_match).toBe(false);
+    expect(tiers.find((t) => t.tier === "cgc_10")?.exact_match).toBe(false);
+  });
+
+  it("never copies a Pristine value into the Perfect tier", () => {
+    const perfect = buildPriceTiers({ cgc_10: 4250, cgc_10_pristine: 6000 }, CGC10_PERFECT)
+      .find((t) => t.tier === "cgc_10_perfect")!;
+    expect(perfect.value_cents).toBeNull();
+    expect(perfect.available).toBe(false);
+    expect(perfect.exact_match).toBe(true);
   });
 
   it("treats a plain or Gem-Mint CGC 10 as the exact ordinary tier (no Pristine row)", () => {

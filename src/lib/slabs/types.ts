@@ -4,6 +4,7 @@
  */
 
 import type { PricingPersist } from "./pricing-tiers";
+import type { ValuationProvenance } from "./valuation-provenance";
 
 export interface Slab {
   id: string;
@@ -30,6 +31,7 @@ export interface Slab {
   label_accuracy: string | null;
   verification_status: string | null;
   valuation_confidence: string | null;
+  valuation_provenance?: ValuationProvenance | null;
   duplicate_status: string | null;
   pricecharting_product_id: string | null;
   pricecharting_product_name: string | null;
@@ -121,6 +123,7 @@ export interface SlabInput {
   replacement_value_cents: number | null;
 
   valuation_confidence: string | null;
+  valuation_provenance: ValuationProvenance;
   price_variance_percent: number | null;
   notes: string | null;
   date_valued: string | null;

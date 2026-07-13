@@ -25,6 +25,7 @@ function slab(n: number, over: Partial<Slab> = {}): Slab {
     label_accuracy: "accurate",
     verification_status: "verified",
     valuation_confidence: "high",
+    valuation_provenance: "pricecharting_exact_tier",
     duplicate_status: "unique",
     pricecharting_product_id: "6910",
     pricecharting_product_name: "Charizard #4",
@@ -65,13 +66,14 @@ describe("excel — structure & column order", () => {
     expect(wb.worksheets.map((w) => w.name)).toEqual(["Master Inventory", "Sales Comps", "Summary"]);
   });
 
-  it("uses the exact 28-column Master Inventory order with Final Value right after Card Name", () => {
+  it("uses the canonical Master Inventory order with Final Value right after Card Name", () => {
     const wb = buildInventoryWorkbook([slab(1)], []);
     const ws = wb.getWorksheet("Master Inventory")!;
     const header = (ws.getRow(1).values as unknown[]).slice(1);
     expect(header).toEqual(EXCEL_MASTER_COLUMNS.map((c) => c.label));
     expect(header[1]).toBe("Card Name");
     expect(header[2]).toBe("Final Value");
+    expect(header).toContain("Valuation Provenance");
   });
 
   it("freezes the header row and enables filters", () => {

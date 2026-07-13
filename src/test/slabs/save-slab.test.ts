@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { saveSlab, validateSlabInput, verifiedBlockers } from "@/lib/slabs/save-slab";
+import { persistRequiredConfirmation, saveSlab, validateSlabInput, verifiedBlockers } from "@/lib/slabs/save-slab";
 import { normalizeImageExt } from "@/lib/slabs/constants";
 import { makeMockDao, validInput, image } from "./helpers";
 
@@ -110,6 +110,72 @@ describe("saveSlab — failure cleanup", () => {
     }
     expect(state.uploads).toEqual(["slabs/1/front.png", "slabs/1/back.png"]);
     expect(state.deletedRows).toHaveLength(0);
+  });
+
+  it("surfaces failed image and row cleanup with retryable orphan details", async () => {
+    const { dao } = makeMockDao({ failUpload: "front", failImageCleanup: true, failRowCleanup: true });
+    const result = await saveSlab(validInput(), image(), image(), dao);
+    expect(result.status).toBe("error");
+    if (result.status === "error") {
+      expect(result.slab_id).toBe("slab-1");
+      expect(result.warnings.map((w) => w.code)).toEqual(["image_cleanup_failed", "row_cleanup_failed"]);
+      expect(result.warnings[0].orphaned_paths).toEqual(["slabs/1/front.jpg"]);
+      expect(result.warnings.every((w) => w.retryable)).toBe(true);
+    }
+  });
+});
+
+describe("saveSlab — pricing persistence visibility", () => {
+  const pricing = {
+    persist: { source: "PriceCharting", retrieved_at: "2026-07-13T00:00:00Z", tiers: [] },
+    raw: { product_id: "6910" },
+  };
+
+  it("keeps the slab but returns a retryable warning when pricing persistence throws", async () => {
+    const { dao } = makeMockDao({ failPricing: true });
+    const result = await saveSlab(validInput(), image(), null, dao, pricing);
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.warnings).toEqual([expect.objectContaining({ code: "pricing_persistence_failed", retryable: true })]);
+    }
+  });
+
+  it("keeps the slab but exposes a stale-write rejection for retry/review", async () => {
+    const { dao } = makeMockDao({ stalePricing: true });
+    const result = await saveSlab(validInput(), image(), null, dao, pricing);
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.warnings).toEqual([expect.objectContaining({ code: "pricing_stale", retryable: true })]);
+    }
+  });
+});
+
+describe("required confirmation persistence", () => {
+  it("retries transient failures and preserves the slab id/payload", async () => {
+    const calls: Array<[string, { product_id: string }]> = [];
+    const result = await persistRequiredConfirmation(
+      "slab-9",
+      { product_id: "5427932" },
+      async (id, payload) => {
+        calls.push([id, payload]);
+        return calls.length < 3
+          ? { status: "error", message: "timeout", retryable: true }
+          : { status: "success" };
+      },
+    );
+    expect(result).toEqual({ status: "success", attempts: 3 });
+    expect(calls).toHaveLength(3);
+    expect(calls.every(([id]) => id === "slab-9")).toBe(true);
+  });
+
+  it("does not retry deterministic confirmation failures", async () => {
+    let calls = 0;
+    const result = await persistRequiredConfirmation("slab-9", {}, async () => {
+      calls += 1;
+      return { status: "error", message: "check constraint", retryable: false };
+    });
+    expect(result).toEqual({ status: "error", attempts: 1, message: "check constraint", retryable: false });
+    expect(calls).toBe(1);
   });
 });
 

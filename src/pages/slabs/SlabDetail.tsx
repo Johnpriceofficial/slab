@@ -22,12 +22,18 @@ import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import { hydratePriceTiers, tierLabelOf } from "@/lib/slabs/pricing-tiers";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
+import {
+  identityChangeAction,
+  isAutoDerived,
+  type ValuationProvenance,
+} from "@/lib/slabs/valuation-provenance";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import {
   fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
+  supabaseSlabDataAccess,
 } from "@/lib/slabs/data";
 import { centsToInputString, dollarsToCents } from "@/lib/slabs/format";
-import { VERIFICATION_STATUSES, VALUATION_CONFIDENCE, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
+import { VERIFICATION_STATUSES, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
 import type { Slab } from "@/lib/slabs/types";
 
 export default function SlabDetail() {
@@ -128,7 +134,7 @@ export default function SlabDetail() {
               <span>Next <ChevronRight className="h-4 w-4" /></span>
             )}
           </Button>
-          <EditSlabDialog slab={slab} onSaved={() => queryClient.invalidateQueries({ queryKey: ["slab", id] })} />
+          <EditSlabDialog key={slab.id} slab={slab} onSaved={() => queryClient.invalidateQueries({ queryKey: ["slab", id] })} />
         </div>
       </div>
 
@@ -214,6 +220,7 @@ export default function SlabDetail() {
                 quick_cents: slab.quick_sale_value_cents,
                 replacement_cents: slab.replacement_value_cents,
                 valuation_confidence: slab.valuation_confidence,
+                valuation_provenance: slab.valuation_provenance,
                 price_variance_percent: slab.price_variance_percent,
                 grader: slab.grader,
                 grade: slab.grade,
@@ -280,39 +287,155 @@ function Detail({
   );
 }
 
-function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) {
+export function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const persistedProvenance: ValuationProvenance = slab.valuation_provenance
+    ?? (slab.pricecharting_value_cents !== null ? "manual_guide"
+      : slab.final_value_cents !== null ? "manual_value" : "tier_unavailable");
   const [form, setForm] = useState({
+    card_name: slab.card_name ?? "",
+    set_name: slab.set_name ?? "",
+    card_number: slab.card_number ?? "",
+    year: slab.year?.toString() ?? "",
+    language: slab.language ?? "",
+    rarity: slab.rarity ?? "",
+    variation: slab.variation ?? "",
+    grader: slab.grader ?? "",
+    grade: slab.grade ?? "",
+    grade_label: slab.grade_label ?? "",
+    certification_number: slab.certification_number ?? "",
+    label_description: slab.label_description ?? "",
     final: centsToInputString(slab.final_value_cents),
     quick: centsToInputString(slab.quick_sale_value_cents),
     replacement: centsToInputString(slab.replacement_value_cents),
     guide: centsToInputString(slab.pricecharting_value_cents),
     verification_status: slab.verification_status ?? "unverified",
-    valuation_confidence: slab.valuation_confidence ?? "manual",
+    valuation_confidence: slab.valuation_confidence ?? "",
+    valuation_provenance: persistedProvenance,
     duplicate_status: slab.duplicate_status ?? "unique",
     label_accuracy: slab.label_accuracy ?? "accurate",
     notes: slab.notes ?? "",
   });
 
+  const identityChanged = (
+    form.card_name.trim() !== (slab.card_name ?? "").trim()
+    || form.set_name.trim() !== (slab.set_name ?? "").trim()
+    || form.card_number.trim() !== (slab.card_number ?? "").trim()
+    || form.year.trim() !== (slab.year?.toString() ?? "")
+    || form.language.trim() !== (slab.language ?? "").trim()
+    || form.rarity.trim() !== (slab.rarity ?? "").trim()
+    || form.variation.trim() !== (slab.variation ?? "").trim()
+    || form.grader.trim() !== (slab.grader ?? "").trim()
+    || form.grade.trim() !== (slab.grade ?? "").trim()
+    || form.grade_label.trim() !== (slab.grade_label ?? "").trim()
+    || form.certification_number.trim() !== (slab.certification_number ?? "").trim()
+  );
+  const valuationTouched = form.guide !== centsToInputString(slab.pricecharting_value_cents)
+    || form.final !== centsToInputString(slab.final_value_cents)
+    || form.quick !== centsToInputString(slab.quick_sale_value_cents)
+    || form.replacement !== centsToInputString(slab.replacement_value_cents);
+  const blockers = verifiedBlockers(form, !!slab.front_image_path);
+
   const save = async () => {
+    if (form.verification_status === "verified" && blockers.length > 0) {
+      toast.error(`Cannot verify: add ${blockers.join(", ")}.`);
+      return;
+    }
     setSaving(true);
     try {
+      const graderOrCertChanged = form.grader.trim() !== (slab.grader ?? "").trim()
+        || form.certification_number.trim() !== (slab.certification_number ?? "").trim();
+      if (graderOrCertChanged && form.grader.trim() && form.certification_number.trim()) {
+        const duplicate = await supabaseSlabDataAccess.checkCertification(
+          form.grader.trim(),
+          form.certification_number.trim(),
+        );
+        if (duplicate && duplicate.id !== slab.id) {
+          toast.error(`Certification already exists as Inventory #${duplicate.inventory_number}.`);
+          return;
+        }
+      }
+
       const guideCents = dollarsToCents(form.guide);
-      await updateSlab(slab.id, {
+      let provenance = form.valuation_provenance;
+      let confidence: string | null = form.valuation_confidence || null;
+      const patch: Partial<Slab> = {
+        card_name: form.card_name.trim() || null,
+        set_name: form.set_name.trim() || null,
+        card_number: form.card_number.trim() || null,
+        year: form.year.trim() ? Number(form.year.replace(/[^0-9]/g, "").slice(0, 4)) : null,
+        language: form.language.trim() || null,
+        rarity: form.rarity.trim() || null,
+        variation: form.variation.trim() || null,
+        grader: form.grader.trim() || null,
+        grade: form.grade.trim() || null,
+        grade_label: form.grade_label.trim() || null,
+        certification_number: form.certification_number.trim() || null,
+        label_description: form.label_description.trim() || null,
         final_value_cents: dollarsToCents(form.final),
         quick_sale_value_cents: dollarsToCents(form.quick),
         replacement_value_cents: dollarsToCents(form.replacement),
-        // Graded guide entered by hand (the API has no tier for many cards). This
-        // becomes the exact-tier value the pricing card renders.
         pricecharting_value_cents: guideCents,
         price_variance_percent: priceVariancePercent(dollarsToCents(form.final), guideCents),
         verification_status: form.verification_status,
-        valuation_confidence: form.valuation_confidence,
         duplicate_status: form.duplicate_status,
         label_accuracy: form.label_accuracy,
         notes: form.notes || null,
-      });
+      };
+
+      if (valuationTouched) {
+        provenance = guideCents !== null ? "manual_guide"
+          : patch.final_value_cents !== null ? "manual_value" : "tier_unavailable";
+        confidence = provenance === "tier_unavailable" ? null : "manual";
+      }
+
+      if (identityChanged) {
+        const action = identityChangeAction(persistedProvenance);
+        const replaceWithManual = valuationTouched && !isAutoDerived(provenance);
+        if (action.clearAutoValuation && !replaceWithManual) {
+          Object.assign(patch, {
+            final_value_cents: null,
+            quick_sale_value_cents: null,
+            replacement_value_cents: null,
+            pricecharting_product_id: null,
+            pricecharting_product_name: null,
+            pricecharting_grade_field: null,
+            pricecharting_value_cents: null,
+            pricecharting_sales_volume: null,
+            pricecharting_match_status: null,
+            pricecharting_tiers: null,
+            pricecharting_raw: null,
+            pricecharting_priced_at: null,
+            price_variance_percent: null,
+          });
+          provenance = "tier_unavailable";
+          confidence = null;
+          toast.warning("Identity changed; the prior auto-derived pricing was cleared.");
+        } else {
+          patch.pricecharting_match_status = "stale_identity_changed";
+          toast.warning("Identity changed; the manual valuation was preserved and marked for review.");
+        }
+        Object.assign(patch, {
+          candidate_image_url: null,
+          candidate_image_source: "none",
+          candidate_image_type: null,
+          candidate_image_retrieved_at: null,
+          candidate_image_available: false,
+          visual_confirmation_status: "not_reviewed",
+          visual_confirmation_method: null,
+          visual_confirmation_at: null,
+          visual_confirmation_by: null,
+          visual_rejection_reason: null,
+          visual_rejection_note: null,
+          product_confirmation_source: null,
+          product_confirmed_at: null,
+        });
+      }
+
+      patch.valuation_provenance = provenance;
+      patch.valuation_confidence = confidence;
+      await updateSlab(slab.id, patch);
       toast.success("Slab updated");
       setOpen(false);
       onSaved();
@@ -325,9 +448,8 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
 
   const set = (k: keyof typeof form, v: string) => setForm((s) => ({ ...s, [k]: v }));
 
-  // Evaluate the hand-entered guide as the slab's EXACT tier (e.g. CGC 10
-  // Pristine) → Verified, with Quick-Sale/Replacement/notes derived, matching
-  // the intake screen's behaviour.
+  // An operator-entered guide is explicitly manual; it can never inherit an
+  // exact-source or Verified label from the previously linked product.
   const evaluateFromGuide = () => {
     const guideCents = dollarsToCents(form.guide);
     if (guideCents === null) {
@@ -337,14 +459,16 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
     const derived = deriveValuation({
       guide_cents: guideCents,
       confidence_score: null,
-      exact_tier_label: tierLabelOf({ grader: slab.grader, grade: slab.grade, grade_label: slab.grade_label }) || null,
+      provenance: "manual_guide",
+      field_meaning: tierLabelOf({ grader: form.grader, grade: form.grade, grade_label: form.grade_label }) || null,
     });
     setForm((s) => ({
       ...s,
       final: centsToInputString(derived.suggested_final_cents),
       quick: centsToInputString(derived.quick_sale_cents),
       replacement: centsToInputString(derived.replacement_cents),
-      valuation_confidence: derived.confidence,
+      valuation_confidence: derived.confidence ?? "",
+      valuation_provenance: "manual_guide",
       notes: derived.method,
     }));
   };
@@ -354,25 +478,37 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
       <DialogTrigger asChild>
         <Button size="sm"><Pencil className="mr-1 h-4 w-4" /> Edit</Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader><DialogTitle>Edit Slab #{slab.inventory_number}</DialogTitle></DialogHeader>
         <div className="grid grid-cols-2 gap-3">
+          <EditField label="Card Name" className="col-span-2"><Input value={form.card_name} onChange={(e) => set("card_name", e.target.value)} /></EditField>
+          <EditField label="Set"><Input value={form.set_name} onChange={(e) => set("set_name", e.target.value)} /></EditField>
+          <EditField label="Card #"><Input value={form.card_number} onChange={(e) => set("card_number", e.target.value)} /></EditField>
+          <EditField label="Year"><Input value={form.year} onChange={(e) => set("year", e.target.value)} inputMode="numeric" /></EditField>
+          <EditField label="Language"><Input value={form.language} onChange={(e) => set("language", e.target.value)} /></EditField>
+          <EditField label="Rarity"><Input value={form.rarity} onChange={(e) => set("rarity", e.target.value)} /></EditField>
+          <EditField label="Variation"><Input value={form.variation} onChange={(e) => set("variation", e.target.value)} /></EditField>
+          <EditField label="Grader"><Input value={form.grader} onChange={(e) => set("grader", e.target.value)} /></EditField>
+          <EditField label="Grade"><Input value={form.grade} onChange={(e) => set("grade", e.target.value)} /></EditField>
+          <EditField label="Grade Label"><Input value={form.grade_label} onChange={(e) => set("grade_label", e.target.value)} placeholder="e.g. PRISTINE or PERFECT" /></EditField>
+          <EditField label="Certification #"><Input value={form.certification_number} onChange={(e) => set("certification_number", e.target.value)} /></EditField>
+          <EditField label="Label Description" className="col-span-2"><Input value={form.label_description} onChange={(e) => set("label_description", e.target.value)} /></EditField>
           <EditField label="PriceCharting Guide Value ($)" className="col-span-2">
-            <Input value={form.guide} onChange={(e) => set("guide", e.target.value)} inputMode="decimal" placeholder="e.g. 42.50 (read from PriceCharting for this grade)" />
+            <Input value={form.guide} onChange={(e) => setForm((s) => ({ ...s, guide: e.target.value, valuation_provenance: "manual_guide", valuation_confidence: "manual" }))} inputMode="decimal" placeholder="e.g. 42.50 (operator-entered guide)" />
           </EditField>
           <div className="col-span-2 -mt-1">
             <Button type="button" variant="secondary" size="sm" onClick={evaluateFromGuide} disabled={!form.guide}>
-              Evaluate as {tierLabelOf({ grader: slab.grader, grade: slab.grade, grade_label: slab.grade_label }) || "exact tier"} → Final / Quick-Sale (80%) / Replacement (110%)
+              Evaluate manual {tierLabelOf({ grader: form.grader, grade: form.grade, grade_label: form.grade_label }) || "guide"} → Final / Quick-Sale (80%) / Replacement (110%)
             </Button>
           </div>
-          <EditField label="Final Value ($)"><Input value={form.final} onChange={(e) => set("final", e.target.value)} inputMode="decimal" /></EditField>
+          <EditField label="Final Value ($)"><Input value={form.final} onChange={(e) => setForm((s) => ({ ...s, final: e.target.value, valuation_provenance: "manual_value", valuation_confidence: "manual" }))} inputMode="decimal" /></EditField>
           <EditField label="Quick-Sale ($)"><Input value={form.quick} onChange={(e) => set("quick", e.target.value)} inputMode="decimal" /></EditField>
           <EditField label="Replacement ($)"><Input value={form.replacement} onChange={(e) => set("replacement", e.target.value)} inputMode="decimal" /></EditField>
           <EditField label="Verification">
             <EditSelect value={form.verification_status} onChange={(v) => set("verification_status", v)} options={VERIFICATION_STATUSES} />
           </EditField>
-          <EditField label="Confidence">
-            <EditSelect value={form.valuation_confidence} onChange={(v) => set("valuation_confidence", v)} options={VALUATION_CONFIDENCE} />
+          <EditField label="Confidence / Provenance">
+            <Input value={`${form.valuation_confidence || "Unavailable"} · ${form.valuation_provenance}`} readOnly />
           </EditField>
           <EditField label="Duplicate Status">
             <EditSelect value={form.duplicate_status} onChange={(v) => set("duplicate_status", v)} options={DUPLICATE_STATUSES} />
@@ -383,10 +519,20 @@ function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => void }) 
           <EditField label="Notes" className="col-span-2">
             <Textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={3} />
           </EditField>
+          {identityChanged && (
+            <div className="col-span-2 rounded border border-amber-400/50 bg-amber-50 p-2 text-xs text-amber-800">
+              Identity changed. Connected pricing and image confirmation will be invalidated; manual values are preserved but marked for review.
+            </div>
+          )}
+          {form.verification_status === "verified" && blockers.length > 0 && (
+            <div className="col-span-2 rounded border border-destructive/40 p-2 text-xs text-destructive">
+              Cannot verify until you add: {blockers.join(", ")}.
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-          <Button onClick={save} disabled={saving}>{saving ? "Saving..." : "Save changes"}</Button>
+          <Button onClick={save} disabled={saving || (form.verification_status === "verified" && blockers.length > 0)}>{saving ? "Saving..." : "Save changes"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

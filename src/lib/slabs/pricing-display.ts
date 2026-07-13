@@ -20,6 +20,7 @@ import { QUICK_SALE_PERCENTAGE, REPLACEMENT_VALUE_PERCENTAGE } from "./valuation
 import { VALUATION_CONFIDENCE, canonicalConfidence } from "./constants";
 import { buildPriceTiers, graderTenKey, tierLabelOf, titleCase, type PriceTier } from "./pricing-tiers";
 import { normalizeDesignation } from "@/lib/pricecharting/grade-mapping";
+import type { ValuationProvenance } from "./valuation-provenance";
 
 export type PricingMatchKind = "exact" | "compatible" | "estimated" | "manual" | "unavailable";
 
@@ -29,6 +30,7 @@ export interface PricingInputs {
   quick_cents: number | null;
   replacement_cents: number | null;
   valuation_confidence: string | null;
+  valuation_provenance?: ValuationProvenance | null;
   price_variance_percent: number | null;
   grader: string | null;
   grade: string | null;
@@ -175,7 +177,15 @@ export function buildPricingModel(i: PricingInputs): PricingModel {
     (desig === "pristine" || desig === "perfect") && i.designation_exact !== true;
 
   let match_kind: PricingMatchKind;
-  if (i.guide_cents === null && i.final_cents === null) match_kind = "unavailable";
+  if (i.valuation_provenance === "pricecharting_exact_tier") match_kind = "exact";
+  else if (i.valuation_provenance === "pricecharting_compatible_tier") match_kind = "compatible";
+  else if (i.valuation_provenance === "pricecharting_estimate") match_kind = "estimated";
+  else if (i.valuation_provenance === "manual_guide" || i.valuation_provenance === "manual_value") match_kind = "manual";
+  else if (i.valuation_provenance === "tier_unavailable") match_kind = "unavailable";
+  // Backward-compatible display for rows saved before provenance existed. Keep
+  // the old inference conservative: a designation that was not explicitly
+  // distinguished can never appear exact.
+  else if (i.guide_cents === null && i.final_cents === null) match_kind = "unavailable";
   else if (i.guide_cents !== null)
     match_kind = i.comparison_tier_label ? "estimated" : designationNotDistinguished ? "compatible" : "exact";
   else match_kind = "manual";

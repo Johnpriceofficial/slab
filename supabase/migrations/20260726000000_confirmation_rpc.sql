@@ -119,4 +119,9 @@ begin
 end;
 $$;
 
+-- Functions are executable by PUBLIC by default. This writer crosses RLS under
+-- SECURITY DEFINER, so remove all implicit/client grants before adding the one
+-- role allowed to reach the function; the body still performs its admin check.
+revoke all on function public.record_pricecharting_confirmation(uuid, jsonb, jsonb) from public;
+revoke all on function public.record_pricecharting_confirmation(uuid, jsonb, jsonb) from anon;
 grant execute on function public.record_pricecharting_confirmation(uuid, jsonb, jsonb) to authenticated;

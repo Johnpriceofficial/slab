@@ -135,7 +135,8 @@ export const INVENTORY_TABLE_COLUMNS: ColumnDef[] = [
 ];
 
 /**
- * Excel Master Inventory column order (Phase 8). EXACT order required — 28 cols.
+ * Excel Master Inventory column order (Phase 8). Provenance is exported next to
+ * confidence so a value can be audited without inferring its source.
  */
 export const EXCEL_MASTER_COLUMNS: ColumnDef[] = [
   { key: "inventory_number", label: "Inventory #", type: "number" },
@@ -154,6 +155,7 @@ export const EXCEL_MASTER_COLUMNS: ColumnDef[] = [
   { key: "label_description", label: "Label Description", type: "text" },
   { key: "label_accuracy", label: "Label Accuracy", type: "text" },
   { key: "valuation_confidence", label: "Valuation Confidence", type: "text" },
+  { key: "valuation_provenance", label: "Valuation Provenance", type: "text" },
   { key: "quick_sale_value_cents", label: "Quick-Sale Value", type: "currency" },
   { key: "replacement_value_cents", label: "Replacement/Retail Value", type: "currency" },
   { key: "date_valued", label: "Date Valued", type: "date" },

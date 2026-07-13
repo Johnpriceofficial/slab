@@ -76,11 +76,13 @@ export const supabaseSlabDataAccess: SlabDataAccess = {
 
   async deleteImages(paths: string[]) {
     if (paths.length === 0) return;
-    await sb.storage.from(BUCKET).remove(paths);
+    const { error } = await sb.storage.from(BUCKET).remove(paths);
+    if (error) throw new Error(`Image cleanup failed for ${paths.join(", ")}: ${error.message}`);
   },
 
   async deleteSlabRow(id: string) {
-    await sb.from("slabs").delete().eq("id", id);
+    const { error } = await sb.from("slabs").delete().eq("id", id);
+    if (error) throw new Error(`Slab-row cleanup failed for ${id}: ${error.message}`);
   },
 
   async applySlabPricing(slabId: string, pricing) {
