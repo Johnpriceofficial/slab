@@ -29,6 +29,7 @@ export const VALUATION_CONFIDENCE = [
   { value: "verified", label: "Verified" },
   { value: "exact", label: "Exact" },
   { value: "high", label: "High" },
+  { value: "moderate", label: "Moderate" },
   { value: "probable", label: "Probable" },
   { value: "low", label: "Low" },
   { value: "manual", label: "Manual" },

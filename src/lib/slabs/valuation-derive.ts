@@ -18,7 +18,62 @@
  * "manual" is the only non-derived value — every other level means the figure
  * was derived from a scored PriceCharting match.
  */
-export type ValuationConfidence = "verified" | "exact" | "high" | "probable" | "low" | "manual";
+export type ValuationConfidence = "verified" | "exact" | "high" | "moderate" | "probable" | "low" | "manual";
+
+/** §6 Multi-signal valuation-confidence inputs. */
+export interface ConfidenceSignals {
+  /** A usable guide value exists for the requested grade. */
+  guide_available: boolean;
+  /** The product identity was confirmed (auto or by the user). */
+  identity_confirmed: boolean;
+  /** The exact grader+grade/designation pricing tier was used. */
+  exact_tier: boolean;
+  /** An interpolated/adjusted estimate was used instead of an exact tier. */
+  interpolated: boolean;
+  /** The user visually confirmed the image matches. */
+  visual_confirmed: boolean;
+  /** Age of the pricing data in days, if known. */
+  pricing_age_days: number | null;
+  /** The user manually entered or overrode the value. */
+  manual_override: boolean;
+}
+
+// The §6 confidence ladder (5 levels). Legacy "exact"/"probable" are never
+// produced by computeValuationConfidence.
+const RANK: ValuationConfidence[] = ["manual", "low", "moderate", "high", "verified"];
+function downgrade(c: ValuationConfidence): ValuationConfidence {
+  const i = RANK.indexOf(c);
+  return i > 1 ? RANK[i - 1] : c; // never below "low" via a downgrade
+}
+function capAt(c: ValuationConfidence, max: ValuationConfidence): ValuationConfidence {
+  return RANK.indexOf(c) > RANK.indexOf(max) ? max : c;
+}
+
+/**
+ * Compute the overall valuation confidence from all signals. Key rules:
+ *  - "manual" ONLY when the user manually entered/overrode (or there is no usable
+ *    guide value to derive from).
+ *  - Identity confirmation alone never yields Verified/High — a value must exist,
+ *    from an exact tier or a documented estimate.
+ *  - Stale pricing and unconfirmed identity/visuals downgrade the result.
+ */
+export function computeValuationConfidence(s: ConfidenceSignals): ValuationConfidence {
+  if (s.manual_override) return "manual";
+  if (!s.guide_available) return "manual"; // nothing to derive → value must be entered by hand
+
+  let level: ValuationConfidence;
+  if (s.exact_tier && s.identity_confirmed) level = s.visual_confirmed ? "verified" : "high";
+  else if (s.exact_tier) level = "high";
+  else if (s.interpolated) level = "moderate";
+  else level = "moderate";
+
+  // Stale pricing reduces confidence one step.
+  if (s.pricing_age_days !== null && s.pricing_age_days > 30) level = downgrade(level);
+  // Unconfirmed identity caps confidence at Moderate — a value is not "High/Verified"
+  // just because a price exists if we're unsure which product it belongs to.
+  if (!s.identity_confirmed) level = capAt(level, "moderate");
+  return level;
+}
 
 /**
  * DOCUMENTED valuation ratios, applied to the Current PriceCharting Guide Value.
