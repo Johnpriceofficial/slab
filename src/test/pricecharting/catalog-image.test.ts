@@ -31,6 +31,13 @@ describe("PriceCharting public-page catalog image fallback", () => {
     );
   });
 
+  it("extracts PriceCharting's live Main Image markup when social metadata is absent", () => {
+    const html = '<img alt="Main Image | Charizard [Incorrect Holo Error] Pokemon Japanese VMAX Climax" src="https://storage.googleapis.com/images.pricecharting.com/catalog/charizard/240.jpg">';
+    expect(extractCatalogImage(html)).toBe(
+      "https://storage.googleapis.com/images.pricecharting.com/catalog/charizard/240.jpg",
+    );
+  });
+
   it("rejects images from untrusted hosts", () => {
     expect(extractCatalogImage('<meta property="og:image" content="https://evil.example/card.jpg">')).toBeNull();
   });
