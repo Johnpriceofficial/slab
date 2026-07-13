@@ -17,7 +17,8 @@ export type ConfirmedProductState =
   | "retained" // confirmed product still matches → keep + refresh
   | "soft_review" // soft uncertainty only → keep link, show warning, no fuzzy replace
   | "confirmation_invalidated" // HARD conflict → keep history, mark invalid, offer fuzzy
-  | "unavailable"; // product no longer exists → keep history, mark unavailable, offer fuzzy
+  | "unavailable" // confirmed 404/not-found → keep history, mark unavailable, offer fuzzy
+  | "refresh_error"; // transient network/upstream failure → preserve id, do not fuzzy
 
 /** The subset of a lookup result the state machine needs. */
 export interface ConfirmedLookup {
@@ -47,8 +48,18 @@ export function evaluateConfirmedProduct(
   if (!confirmedProductId) {
     return { state: "no_confirmed_id", reason: "No confirmed product is linked.", allow_fuzzy: true, preserve_link: false };
   }
-  // A confirmed product could not be fetched → it no longer exists.
-  if (!lookup || !lookup.found) {
+  // No lookup result means the refresh itself failed. It is NOT evidence that
+  // the product disappeared, and must never unlock automatic fuzzy replacement.
+  if (!lookup) {
+    return {
+      state: "refresh_error",
+      reason: "The confirmed product could not be refreshed. Its id is preserved; retry before searching for a replacement.",
+      allow_fuzzy: false,
+      preserve_link: true,
+    };
+  }
+  // A confirmed, explicit not-found response means the product is unavailable.
+  if (!lookup.found) {
     return {
       state: "unavailable",
       reason: "The confirmed PriceCharting product is no longer available. Its id is preserved; fuzzy recovery is offered.",

@@ -123,6 +123,12 @@ describe("buildPricingModel — grade table classification (never interchangeabl
 });
 
 describe("buildPricingModel — value-source priority states", () => {
+  it("uses persisted provenance before legacy value-shape inference", () => {
+    expect(buildPricingModel({ ...exactBase, valuation_provenance: "manual_guide" }).match_kind).toBe("manual");
+    expect(buildPricingModel({ ...exactBase, valuation_provenance: "pricecharting_compatible_tier" }).match_kind).toBe("compatible");
+    expect(buildPricingModel({ ...exactBase, valuation_provenance: "tier_unavailable" }).match_kind).toBe("unavailable");
+  });
+
   it("estimated: a comparison tier stands in for a missing exact tier", () => {
     const m = buildPricingModel({ ...exactBase, valuation_confidence: "probable", comparison_tier_label: "CGC 9.5" });
     expect(m.match_kind).toBe("estimated");

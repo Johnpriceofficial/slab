@@ -1,16 +1,26 @@
 /**
- * §1E valuation provenance — pure decisions extracted from the intake page so the
- * identity-change and product-switch rules are unit-testable.
- *
- *   - "source":  figures came from a confirmed PriceCharting product's tier value
- *   - "formula": figures were computed from an operator-entered guide value
- *   - "manual":  figures were typed directly by the operator
+ * Canonical valuation provenance. Availability and confidence are intentionally
+ * separate: `tier_unavailable` means the connected source supplied no usable
+ * graded tier; it never implies an operator entered a value.
  */
-export type ValuationProvenance = "source" | "formula" | "manual";
+export const VALUATION_PROVENANCE = [
+  "pricecharting_exact_tier",
+  "pricecharting_compatible_tier",
+  "pricecharting_estimate",
+  "manual_guide",
+  "manual_value",
+  "tier_unavailable",
+] as const;
+
+export type ValuationProvenance = (typeof VALUATION_PROVENANCE)[number];
 
 /** True when the current figures are AUTO-derived (source or formula), not manual. */
 export function isAutoDerived(provenance: ValuationProvenance): boolean {
-  return provenance === "source" || provenance === "formula";
+  return provenance.startsWith("pricecharting_");
+}
+
+export function isManualProvenance(provenance: ValuationProvenance): boolean {
+  return provenance === "manual_guide" || provenance === "manual_value";
 }
 
 /**
@@ -22,8 +32,8 @@ export function identityChangeAction(provenance: ValuationProvenance): {
   clearAutoValuation: boolean;
   warnManualStale: boolean;
 } {
-  const manual = provenance === "manual";
-  return { clearAutoValuation: !manual, warnManualStale: manual };
+  const manual = isManualProvenance(provenance);
+  return { clearAutoValuation: isAutoDerived(provenance), warnManualStale: manual };
 }
 
 /**

@@ -8,9 +8,8 @@
  *   - Unavailable tiers are stored with value_cents = null, never $0.
  *   - Tiers absent from the API keep a null value — a value is never fabricated.
  *   - PSA 10 / CGC 10 / BGS 10 / SGC 10 are distinct graders and never merged.
- *   - "CGC 10" and "CGC 10 Pristine" are DISTINCT tiers. The Pristine tier is
- *     only ever represented as a distinct row; the ordinary CGC 10 tier is never
- *     decorated with a "Pristine" designation to fake a Pristine value.
+ *   - CGC 10, CGC 10 Pristine, and CGC 10 Perfect are DISTINCT tiers. A
+ *     designation tier is never synthesized from the ordinary CGC 10 value.
  */
 
 import { normalizeDesignation } from "@/lib/pricecharting/grade-mapping";
@@ -94,14 +93,15 @@ export const CARD_TIER_META: ReadonlyArray<TierMeta> = [
 ];
 
 /**
- * Distinct top-designation tiers (e.g. "CGC 10 Pristine"). These are modelled as
+ * Distinct top-designation tiers (e.g. "CGC 10 Pristine/Perfect"). These are modelled as
  * their OWN tiers, separate from the ordinary grade-10 tier. The connected
  * PriceCharting API has no field for them, so their value is null unless the
- * value map explicitly carries a distinct Pristine value — we never synthesize
+ * value map explicitly carries a distinct designation value — we never synthesize
  * one by copying the ordinary grade-10 value.
  */
-export const PRISTINE_TIER_META: ReadonlyArray<TierMeta> = [
+export const DESIGNATION_TIER_META: ReadonlyArray<TierMeta> = [
   { key: "cgc_10_pristine", label: "CGC 10 Pristine", grader: "CGC", grade: "10", designation: "Pristine" },
+  { key: "cgc_10_perfect", label: "CGC 10 Perfect", grader: "CGC", grade: "10", designation: "Perfect" },
   { key: "bgs_10_pristine", label: "BGS 10 Pristine", grader: "BGS", grade: "10", designation: "Pristine" },
 ];
 
@@ -135,8 +135,8 @@ export function exactTierKey(id: TierIdentity): string | null {
   if (!base) return null;
   const desig = normalizeDesignation(id.grade_label);
   if (desig === "pristine" || desig === "perfect") {
-    const pristineKey = `${base}_pristine`;
-    return PRISTINE_TIER_META.some((m) => m.key === pristineKey) ? pristineKey : base;
+    const designationKey = `${base}_${desig}`;
+    return DESIGNATION_TIER_META.some((m) => m.key === designationKey) ? designationKey : base;
   }
   return base;
 }
@@ -180,10 +180,10 @@ export function buildPriceTiers(
 
   const tiers = CARD_TIER_META.map(toTier);
 
-  // Represent a distinct Pristine tier ONLY when the source supplies a value for
+  // Represent a distinct designation tier ONLY when the source supplies a value for
   // it OR it is the slab's own exact tier (so the exact tier is shown honestly,
   // as unavailable, rather than by decorating the ordinary grade-10 tier).
-  for (const meta of PRISTINE_TIER_META) {
+  for (const meta of DESIGNATION_TIER_META) {
     const sourceHasValue = values[meta.key] !== null && values[meta.key] !== undefined;
     if (sourceHasValue || meta.key === exactKey) tiers.push(toTier(meta));
   }

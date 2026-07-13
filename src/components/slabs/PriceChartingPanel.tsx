@@ -106,7 +106,11 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   // If the operator edits identity fields afterward, invalidate it so a stale
   // check can't be confirmed.
   useEffect(() => {
-    // Identity changed → any prior recovery/visual review is no longer current.
+    // Identity changed → every search/recovery/visual result is stale. Grade
+    // label is material because CGC Perfect and Pristine are distinct tiers.
+    setResult(null);
+    setError(null);
+    setConfirmingId(null);
     setRecovered(null);
     setRecoverError(null);
     setVisualStatus(null);
@@ -115,6 +119,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   }, [
     identity.card_name, identity.set, identity.card_number, identity.year,
     identity.language, identity.variation, identity.grader, identity.grade,
+    identity.grade_label,
   ]);
 
   const runRecover = async () => {
@@ -191,9 +196,19 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
     try {
       const look = await priceChartingLookup(confirmedId, identity);
       if (look.status === "error") {
-        // Refresh failed (network/upstream) — DO NOT erase the confirmed id.
+        // Only an explicit product-not-found response means unavailable. A
+        // timeout/network/rate-limit/upstream error is a refresh_error and must
+        // preserve the id without enabling fuzzy replacement.
+        const decision = look.error_code === "PRODUCT_NOT_FOUND"
+          ? evaluateConfirmedProduct(confirmedId, {
+              found: false,
+              disqualified: false,
+              requires_confirmation: true,
+              conflicts: [],
+            })
+          : evaluateConfirmedProduct(confirmedId, null);
         setConfirmedReview({
-          decision: evaluateConfirmedProduct(confirmedId, null),
+          decision,
           lookup: null,
         });
         setError(`Could not refresh the confirmed product (${look.message}). Its link is preserved.`);

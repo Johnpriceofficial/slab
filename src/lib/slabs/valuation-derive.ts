@@ -9,9 +9,10 @@
  * numbers must be reproducible from a DOCUMENTED, single-source config.
  *
  * This module is pure and framework-agnostic. It never invents a value when
- * there is no guide (returns nulls + "manual"); it never presents an interpolated
- * grade estimate as anything better than "Moderate".
+ * there is no guide, and it keeps source availability separate from confidence.
  */
+
+import type { ValuationProvenance } from "./valuation-provenance";
 
 /**
  * The single canonical Valuation Confidence enum, mirroring VALUATION_CONFIDENCE
@@ -33,6 +34,10 @@ export interface ConfidenceSignals {
   exact_tier: boolean;
   /** An interpolated/adjusted estimate was used instead of an exact tier. */
   interpolated: boolean;
+  /** A real but non-exact compatible tier was used. */
+  compatible?: boolean;
+  /** The pricing basis is weak but still usable. */
+  weak_derived?: boolean;
   /** The user visually confirmed the image matches. */
   visual_confirmed: boolean;
   /** Age of the pricing data in days, if known. */
@@ -60,15 +65,16 @@ function capAt(c: ValuationConfidence, max: ValuationConfidence): ValuationConfi
  *    from an exact tier or a documented estimate.
  *  - Stale pricing and unconfirmed identity/visuals downgrade the result.
  */
-export function computeValuationConfidence(s: ConfidenceSignals): ValuationConfidence {
+export function computeValuationConfidence(s: ConfidenceSignals): ValuationConfidence | null {
   if (s.manual_override) return "manual";
-  if (!s.guide_available) return "manual"; // nothing to derive → value must be entered by hand
+  if (!s.guide_available) return null;
 
   let level: ValuationConfidence;
   if (s.exact_tier && s.identity_confirmed) level = s.visual_confirmed ? "verified" : "high";
-  else if (s.exact_tier) level = "high";
-  else if (s.interpolated) level = "moderate";
-  else level = "moderate";
+  else if ((s.compatible || s.interpolated) && s.identity_confirmed) level = "moderate";
+  else level = "low";
+
+  if (s.weak_derived) level = "low";
 
   // Stale pricing reduces confidence one step.
   if (s.pricing_age_days !== null && s.pricing_age_days > 30) level = downgrade(level);
@@ -103,14 +109,14 @@ export interface ValuationDeriveInput {
   is_estimate?: boolean;
   /** Human label of the price tier used (e.g. "CGC 10", "General Grade 9"). */
   field_meaning?: string | null;
-  /**
-   * When set, the guide value IS the exact PriceCharting tier for the slab's own
-   * grade (e.g. "CGC 10 Pristine"), whether provided by the API or entered by the
-   * operator from the PriceCharting site. This makes it a Verified exact-tier
-   * match — confidence "verified", method "Exact graded-price match" — regardless
-   * of any identity-match score. Ignored when the guide is null.
-   */
-  exact_tier_label?: string | null;
+  /** Explicit persisted source/availability provenance. */
+  provenance: ValuationProvenance;
+  /** Product identity is confirmed independently of the price tier. */
+  identity_confirmed?: boolean;
+  /** Positive operator artwork confirmation. */
+  visual_confirmed?: boolean;
+  /** Age of the connected-source pricing, when known. */
+  pricing_age_days?: number | null;
 }
 
 export interface DerivedValuation {
@@ -119,8 +125,9 @@ export interface DerivedValuation {
   replacement_cents: number | null;
   /** Suggested Final Value — the guide itself (0% variance) until the operator edits it. */
   suggested_final_cents: number | null;
-  /** Never "manual" when a guide value was actually derived from PriceCharting. */
-  confidence: ValuationConfidence;
+  confidence: ValuationConfidence | null;
+  availability: "available" | "tier_unavailable";
+  provenance: ValuationProvenance;
   /** True when the guide is an interpolated estimate (confidence capped at "moderate"). */
   is_estimate: boolean;
   /** Plain-English explanation of exactly how these numbers were produced. */
@@ -137,7 +144,7 @@ export function mapMatchConfidenceToValuationConfidence(
   score: number | null,
   isEstimate: boolean,
 ): ValuationConfidence {
-  if (score === null || !Number.isFinite(score)) return "manual";
+  if (score === null || !Number.isFinite(score)) return "low";
   let level: ValuationConfidence;
   if (score >= 85) level = "high";
   else if (score >= 70) level = "moderate";
@@ -168,10 +175,12 @@ export function deriveValuation(input: ValuationDeriveInput): DerivedValuation {
       quick_sale_cents: null,
       replacement_cents: null,
       suggested_final_cents: null,
-      confidence: "manual",
+      confidence: null,
+      availability: "tier_unavailable",
+      provenance: "tier_unavailable",
       is_estimate: isEstimate,
       method:
-        "No PriceCharting guide value is available for this grade — enter the valuation manually.",
+        "Exact graded tier unavailable from the connected source — values remain blank until an operator enters one.",
     };
   }
 
@@ -179,29 +188,43 @@ export function deriveValuation(input: ValuationDeriveInput): DerivedValuation {
   const replacement = pct(guide_cents, REPLACEMENT_VALUE_PERCENTAGE);
   const quickPctLabel = `${Math.round(QUICK_SALE_PERCENTAGE * 100)}%`;
   const replPctLabel = `${Math.round(REPLACEMENT_VALUE_PERCENTAGE * 100)}%`;
-  const exactTier = input.exact_tier_label?.trim();
-
-  // Exact-tier guide (API tier for the slab's grade, or the operator's entry of
-  // the site figure for that grade) → Verified exact graded-price match.
-  if (exactTier && !isEstimate) {
+  if (input.provenance === "manual_guide" || input.provenance === "manual_value") {
     return {
       guide_cents,
       quick_sale_cents: quick,
       replacement_cents: replacement,
       suggested_final_cents: guide_cents,
-      confidence: "verified",
-      is_estimate: false,
+      confidence: "manual",
+      availability: "available",
+      provenance: input.provenance,
+      is_estimate: isEstimate,
       method:
-        `Exact graded-price match — ${exactTier} guide tier. ` +
+        `Operator-entered ${input.provenance === "manual_guide" ? "guide" : "value"}. ` +
         `Final = guide (0% variance until edited); ` +
         `Quick-Sale = ${quickPctLabel} of Final; Replacement = ${replPctLabel} of Final.`,
     };
   }
 
-  const confidence = mapMatchConfidenceToValuationConfidence(confidence_score, isEstimate);
-  const basis = isEstimate
-    ? `interpolated grade estimate${tier ? ` (${tier})` : ""}`
-    : `confirmed PriceCharting value${tier ? ` (${tier})` : ""}`;
+  const exact = input.provenance === "pricecharting_exact_tier" && !isEstimate;
+  const compatible = input.provenance === "pricecharting_compatible_tier";
+  const estimate = input.provenance === "pricecharting_estimate" || isEstimate;
+  const identityConfirmed = input.identity_confirmed ?? (confidence_score !== null && confidence_score >= 85);
+  const confidence = computeValuationConfidence({
+    guide_available: true,
+    identity_confirmed: identityConfirmed,
+    exact_tier: exact,
+    interpolated: estimate,
+    compatible,
+    weak_derived: !exact && !compatible && !estimate,
+    visual_confirmed: input.visual_confirmed ?? false,
+    pricing_age_days: input.pricing_age_days ?? null,
+    manual_override: false,
+  });
+  const basis = exact
+    ? `exact PriceCharting tier${tier ? ` (${tier})` : ""}`
+    : compatible
+      ? `compatible PriceCharting tier${tier ? ` (${tier})` : ""}`
+      : `documented PriceCharting estimate${tier ? ` (${tier})` : ""}`;
 
   return {
     guide_cents,
@@ -209,7 +232,9 @@ export function deriveValuation(input: ValuationDeriveInput): DerivedValuation {
     replacement_cents: replacement,
     suggested_final_cents: guide_cents,
     confidence,
-    is_estimate: isEstimate,
+    availability: "available",
+    provenance: input.provenance,
+    is_estimate: estimate,
     method:
       `Auto-derived from the ${basis}. ` +
       `Final = guide (0% variance until edited); ` +

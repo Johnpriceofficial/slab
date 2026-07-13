@@ -122,10 +122,11 @@ describe("§4 confirmed-id-first", () => {
     expect(explicit.allow_fuzzy).toBe(true);
   });
 
-  it("a failed refresh (product unavailable) preserves the confirmed id", () => {
+  it("a failed refresh is not misclassified as product unavailable and preserves the id", () => {
     const d = evaluateConfirmedProduct("3472875", null);
-    expect(d.state).toBe("unavailable");
+    expect(d.state).toBe("refresh_error");
     expect(d.preserve_link).toBe(true);
+    expect(d.allow_fuzzy).toBe(false);
   });
 });
 
@@ -174,15 +175,16 @@ describe("§4 tiers & valuation", () => {
 // ── Provenance (identity edits / switching) ─────────────────────────────────
 describe("§4 valuation provenance", () => {
   it("13/14. an identity edit clears AUTO valuation but preserves MANUAL with a warning", () => {
-    expect(identityChangeAction("source")).toEqual({ clearAutoValuation: true, warnManualStale: false });
-    expect(identityChangeAction("formula")).toEqual({ clearAutoValuation: true, warnManualStale: false });
-    expect(identityChangeAction("manual")).toEqual({ clearAutoValuation: false, warnManualStale: true });
+    expect(identityChangeAction("pricecharting_exact_tier")).toEqual({ clearAutoValuation: true, warnManualStale: false });
+    expect(identityChangeAction("pricecharting_estimate")).toEqual({ clearAutoValuation: true, warnManualStale: false });
+    expect(identityChangeAction("manual_value")).toEqual({ clearAutoValuation: false, warnManualStale: true });
+    expect(identityChangeAction("tier_unavailable")).toEqual({ clearAutoValuation: false, warnManualStale: false });
   });
 
   it("15. switching products replaces a DERIVED valuation but never a MANUAL one", () => {
-    expect(productSwitchReplacesDerived("source")).toBe(true);
-    expect(productSwitchReplacesDerived("formula")).toBe(true);
-    expect(productSwitchReplacesDerived("manual")).toBe(false);
+    expect(productSwitchReplacesDerived("pricecharting_exact_tier")).toBe(true);
+    expect(productSwitchReplacesDerived("pricecharting_compatible_tier")).toBe(true);
+    expect(productSwitchReplacesDerived("manual_guide")).toBe(false);
   });
 });
 

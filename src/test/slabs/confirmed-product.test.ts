@@ -40,6 +40,16 @@ describe("§5 confirmed-product-id-first state machine", () => {
     expect(d.allow_fuzzy).toBe(true);
   });
 
+  it.each(["network error", "timeout", "rate limit", "upstream failure"])(
+    "%s → refresh_error, id preserved, and no automatic fuzzy replacement",
+    () => {
+      const d = evaluateConfirmedProduct("5427932", null);
+      expect(d.state).toBe("refresh_error");
+      expect(d.preserve_link).toBe(true);
+      expect(d.allow_fuzzy).toBe(false);
+    },
+  );
+
   it("explicit 'Search again' allows fuzzy even on a retained product", () => {
     const d = evaluateConfirmedProduct("5427932", ok, true);
     expect(d.state).toBe("retained");
@@ -67,17 +77,17 @@ describe("§6 multi-signal valuation confidence", () => {
     expect(computeValuationConfidence({ ...base, exact_tier: false, interpolated: true })).toBe("moderate");
   });
 
-  it("no usable guide value → Manual (identity confirmation alone is NOT enough)", () => {
+  it("no usable guide value → no confidence (identity confirmation alone is NOT enough)", () => {
     // 5427932 shape: identity confirmed, but CGC-10 tier unavailable.
-    expect(computeValuationConfidence({ ...base, guide_available: false })).toBe("manual");
+    expect(computeValuationConfidence({ ...base, guide_available: false })).toBeNull();
   });
 
   it("a user override is always Manual", () => {
     expect(computeValuationConfidence({ ...base, manual_override: true })).toBe("manual");
   });
 
-  it("stale pricing downgrades one step; unconfirmed identity caps at Moderate", () => {
+  it("stale pricing downgrades one step; unconfirmed exact identity is Low", () => {
     expect(computeValuationConfidence({ ...base, visual_confirmed: true, pricing_age_days: 90 })).toBe("high"); // verified → high
-    expect(computeValuationConfidence({ ...base, identity_confirmed: false })).toBe("moderate"); // high capped to moderate
+    expect(computeValuationConfidence({ ...base, identity_confirmed: false })).toBe("low");
   });
 });
