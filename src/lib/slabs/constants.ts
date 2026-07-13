@@ -25,15 +25,33 @@ export const LABEL_ACCURACY = [
   { value: "possible_error", label: "Possible error" },
 ] as const;
 
+/**
+ * The single canonical Valuation Confidence enum (five levels). "Unavailable" is a
+ * separate DISPLAY state (no usable guide value), never a confidence value here.
+ * Legacy "exact"/"probable" were consolidated into this set — see
+ * LEGACY_CONFIDENCE_MAP and migration 20260727_confidence_consolidation.
+ */
 export const VALUATION_CONFIDENCE = [
   { value: "verified", label: "Verified" },
-  { value: "exact", label: "Exact" },
   { value: "high", label: "High" },
   { value: "moderate", label: "Moderate" },
-  { value: "probable", label: "Probable" },
   { value: "low", label: "Low" },
   { value: "manual", label: "Manual" },
 ] as const;
+
+/**
+ * How legacy confidence values map onto the canonical enum, WITHOUT changing
+ * meaning: "exact" was a top identity match (not a tier-verified value) → "high";
+ * "probable" was a mid match → "moderate". Used to normalize any value read back
+ * before the DB migration has run.
+ */
+export const LEGACY_CONFIDENCE_MAP: Record<string, string> = { exact: "high", probable: "moderate" };
+
+/** Normalize any (possibly legacy) confidence value to the canonical enum. */
+export function canonicalConfidence(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return LEGACY_CONFIDENCE_MAP[value] ?? value;
+}
 
 /**
  * Structured reasons for visually REJECTING a PriceCharting candidate. Kept in

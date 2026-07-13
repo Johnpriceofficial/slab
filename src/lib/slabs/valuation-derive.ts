@@ -10,15 +10,18 @@
  *
  * This module is pure and framework-agnostic. It never invents a value when
  * there is no guide (returns nulls + "manual"); it never presents an interpolated
- * grade estimate as anything better than "Probable".
+ * grade estimate as anything better than "Moderate".
  */
 
 /**
- * The Valuation Confidence enum, mirroring VALUATION_CONFIDENCE in constants.ts.
- * "manual" is the only non-derived value — every other level means the figure
- * was derived from a scored PriceCharting match.
+ * The single canonical Valuation Confidence enum, mirroring VALUATION_CONFIDENCE
+ * in constants.ts. Five levels only. "manual" is the only non-derived value —
+ * every other level means the figure was derived from a scored PriceCharting
+ * match. Legacy "exact"/"probable" were consolidated (exact→high, probable→
+ * moderate) and are never produced; "Unavailable" is a display state, not a
+ * confidence, so it is NOT a member here.
  */
-export type ValuationConfidence = "verified" | "exact" | "high" | "moderate" | "probable" | "low" | "manual";
+export type ValuationConfidence = "verified" | "high" | "moderate" | "low" | "manual";
 
 /** §6 Multi-signal valuation-confidence inputs. */
 export interface ConfidenceSignals {
@@ -118,16 +121,17 @@ export interface DerivedValuation {
   suggested_final_cents: number | null;
   /** Never "manual" when a guide value was actually derived from PriceCharting. */
   confidence: ValuationConfidence;
-  /** True when the guide is an interpolated estimate (confidence capped at "probable"). */
+  /** True when the guide is an interpolated estimate (confidence capped at "moderate"). */
   is_estimate: boolean;
   /** Plain-English explanation of exactly how these numbers were produced. */
   method: string;
 }
 
 /**
- * Map a 0–100 identity-match confidence to the slab's Valuation Confidence enum.
- * An interpolated grade estimate is capped at "probable" — it is never "exact"
- * or "high" no matter how certain the product identity is.
+ * Map a 0–100 identity-match confidence to the canonical Valuation Confidence
+ * enum. A pure identity match (no exact tier) never reaches "verified" — that is
+ * reserved for an exact-tier match. An interpolated grade estimate is capped at
+ * "moderate": it is never "high" no matter how certain the product identity is.
  */
 export function mapMatchConfidenceToValuationConfidence(
   score: number | null,
@@ -135,11 +139,10 @@ export function mapMatchConfidenceToValuationConfidence(
 ): ValuationConfidence {
   if (score === null || !Number.isFinite(score)) return "manual";
   let level: ValuationConfidence;
-  if (score >= 95) level = "exact";
-  else if (score >= 85) level = "high";
-  else if (score >= 70) level = "probable";
+  if (score >= 85) level = "high";
+  else if (score >= 70) level = "moderate";
   else level = "low";
-  if (isEstimate && (level === "exact" || level === "high")) level = "probable";
+  if (isEstimate && level === "high") level = "moderate";
   return level;
 }
 

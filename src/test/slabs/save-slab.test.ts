@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { saveSlab, validateSlabInput } from "@/lib/slabs/save-slab";
+import { saveSlab, validateSlabInput, verifiedBlockers } from "@/lib/slabs/save-slab";
 import { normalizeImageExt } from "@/lib/slabs/constants";
 import { makeMockDao, validInput, image } from "./helpers";
 
@@ -201,5 +201,44 @@ describe("saveSlab — validation", () => {
     const result = await saveSlab(validInput({ card_name: "" }), image(), image(), dao);
     expect(result.status).toBe("validation_error");
     expect(state.createdNumbers).toHaveLength(0);
+  });
+});
+
+describe("§3 draft vs verified save", () => {
+  it("a DRAFT requires only the front image — cert/grade/name may be missing", () => {
+    const bare = { ...validInput(), card_name: "", grader: "", grade: "", certification_number: "" };
+    expect(validateSlabInput(bare, true, false, "draft")).toEqual([]); // front present → ok
+    expect(validateSlabInput(bare, false, false, "draft")).toEqual(["Front image is required."]);
+  });
+
+  it("a VERIFIED save still requires the full identity", () => {
+    const bare = { ...validInput(), card_name: "", grader: "", grade: "", certification_number: "" };
+    const errors = validateSlabInput(bare, true, false, "verified");
+    expect(errors).toEqual(
+      expect.arrayContaining(["Card name is required.", "Grader is required.", "Grade is required.", "Certification number is required."]),
+    );
+  });
+
+  it("saves a front-only draft with no cert to the database", async () => {
+    const { dao, state } = makeMockDao();
+    const result = await saveSlab(
+      { ...validInput(), card_name: "", certification_number: null } as never,
+      image(),
+      null,
+      dao,
+      null,
+      "draft",
+    );
+    expect(result.status).toBe("success");
+    expect(state.createdNumbers).toHaveLength(1);
+  });
+
+  it("verifiedBlockers lists exactly the missing verified requirements", () => {
+    expect(verifiedBlockers({ card_name: "Charizard", grader: "CGC", grade: "10", certification_number: "123" }, true)).toEqual([]);
+    expect(verifiedBlockers({ card_name: "", grader: "CGC", grade: "10", certification_number: "" }, false)).toEqual([
+      "Card name",
+      "Certification number",
+      "Front image",
+    ]);
   });
 });

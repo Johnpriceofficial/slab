@@ -29,7 +29,7 @@ import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import { buildPricingPersist, tierLabelOf, type SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
-import { saveSlab, validateSlabInput, type SlabDataAccess } from "@/lib/slabs/save-slab";
+import { saveSlab, validateSlabInput, verifiedBlockers, type SlabDataAccess, type SaveMode } from "@/lib/slabs/save-slab";
 import { supabaseSlabDataAccess } from "@/lib/slabs/data";
 import type { SlabInput } from "@/lib/slabs/types";
 
@@ -319,7 +319,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const hasManualFigures = () =>
     val.final.trim() !== "" || val.quick.trim() !== "" || val.replacement.trim() !== "";
 
-  const buildInput = (): SlabInput => ({
+  const buildInput = (mode: SaveMode): SlabInput => ({
     card_name: id.card_name.trim() || null,
     set_name: id.set_name.trim() || null,
     card_number: id.card_number.trim() || null,
@@ -333,7 +333,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     certification_number: id.certification_number.trim() || null,
     label_description: id.label_description.trim() || null,
     label_accuracy: id.label_accuracy || null,
-    verification_status: id.verification_status || null,
+    // The save action drives the stored verification state: a verified record is
+    // "verified"; a draft is "unverified" so its unresolved requirements display.
+    verification_status: mode === "verified" ? "verified" : "unverified",
     final_value_cents: dollarsToCents(val.final),
     quick_sale_value_cents: dollarsToCents(val.quick),
     replacement_value_cents: dollarsToCents(val.replacement),
@@ -407,15 +409,28 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     }
   };
 
-  const canSubmit = !dup && !saving;
+  // §3 Save-action gating. A DRAFT needs only a front image (and no duplicate
+  // cert); a VERIFIED record needs the full identity plus all blockers resolved.
+  const verifiedMissing = verifiedBlockers(buildInput("verified"), !!front);
+  const verifyBlockers = [
+    ...(verifiedMissing.length ? [`missing ${verifiedMissing.join(", ").toLowerCase()}`] : []),
+    ...(dup ? [`a duplicate certification (Inventory #${dup.inventory_number})`] : []),
+    ...(pc && pcStale ? ["an unresolved (stale) PriceCharting link — re-check it"] : []),
+  ];
+  const canVerify = verifyBlockers.length === 0 && !saving;
+  const draftBlockers = [
+    ...(!front ? ["a front image"] : []),
+    ...(dup ? [`a duplicate certification (Inventory #${dup.inventory_number})`] : []),
+  ];
+  const canDraft = draftBlockers.length === 0 && !saving;
 
-  const handleSave = async () => {
+  const handleSave = async (mode: SaveMode) => {
     if (dup) {
       toast.error(`Certification already exists as Inventory #${dup.inventory_number}. Open that record instead.`);
       return;
     }
-    const input = buildInput();
-    const problems = validateSlabInput(input, !!front, !!back);
+    const input = buildInput(mode);
+    const problems = validateSlabInput(input, !!front, !!back, mode);
     if (problems.length > 0) {
       toast.error(problems[0]);
       return;
@@ -441,6 +456,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         back ? { blob: back.file, ext: back.ext } : null,
         dao,
         pricingWrite,
+        mode,
       );
       if (result.status === "success") {
         // §2 persist confirmation/rejection state + append-only audit event via the
@@ -450,7 +466,11 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         if (confirmation) {
           await recordConfirmationWithRetry(result.slab.id, confirmation);
         }
-        toast.success(`Saved as Inventory #${result.slab.inventory_number}`);
+        toast.success(
+          mode === "verified"
+            ? `Saved verified record as Inventory #${result.slab.inventory_number}`
+            : `Saved draft as Inventory #${result.slab.inventory_number} — complete it later to verify`,
+        );
         navigate(`/slabs/${result.slab.id}`);
       } else if (result.status === "duplicate") {
         toast.error(`Duplicate certification — already Inventory #${result.existing_inventory_number}.`);
@@ -673,14 +693,36 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         </Card>
       </div>
 
-      <div className="mt-6 flex justify-end gap-3">
-        <Button variant="outline" asChild>
-          <Link to="/slabs">Cancel</Link>
-        </Button>
-        <Button onClick={handleSave} disabled={!canSubmit}>
-          {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
-          Save Slab
-        </Button>
+      {/* §3 Two save actions, each with its exact disabled reason shown beside it. */}
+      <div className="mt-6 flex flex-col items-end gap-2">
+        <div className="flex justify-end gap-3">
+          <Button variant="outline" asChild>
+            <Link to="/slabs">Cancel</Link>
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => handleSave("draft")}
+            disabled={!canDraft}
+            title={canDraft ? "Save an unverified draft you can complete later" : `Needs ${draftBlockers.join(" and ")}`}
+          >
+            {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+            Save as unverified draft
+          </Button>
+          <Button
+            onClick={() => handleSave("verified")}
+            disabled={!canVerify}
+            title={canVerify ? "Save a fully verified record" : `Can't verify yet: ${verifyBlockers.join("; ")}`}
+          >
+            {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+            Save verified record
+          </Button>
+        </div>
+        {/* Exact, always-visible disabled reasons (not just tooltips). */}
+        <div className="text-right text-xs text-muted-foreground">
+          {!canDraft && <p>Draft needs {draftBlockers.join(" and ")}.</p>}
+          {canDraft && !canVerify && <p>To verify: resolve {verifyBlockers.join("; ")}.</p>}
+          {canVerify && <p>Ready to save a verified record.</p>}
+        </div>
       </div>
     </div>
   );

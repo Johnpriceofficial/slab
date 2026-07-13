@@ -7,16 +7,16 @@ import {
 } from "@/lib/slabs/valuation-derive";
 
 describe("mapMatchConfidenceToValuationConfidence", () => {
-  it("maps the score bands to the valuation-confidence enum (never 'manual' for a real score)", () => {
-    expect(mapMatchConfidenceToValuationConfidence(96, false)).toBe("exact");
+  it("maps the score bands to the canonical enum (a pure identity match tops out at 'high', never 'verified')", () => {
+    expect(mapMatchConfidenceToValuationConfidence(96, false)).toBe("high"); // legacy 'exact' → 'high'
     expect(mapMatchConfidenceToValuationConfidence(88, false)).toBe("high");
-    expect(mapMatchConfidenceToValuationConfidence(72, false)).toBe("probable");
+    expect(mapMatchConfidenceToValuationConfidence(72, false)).toBe("moderate"); // legacy 'probable' → 'moderate'
     expect(mapMatchConfidenceToValuationConfidence(40, false)).toBe("low");
   });
 
-  it("caps an interpolated estimate at 'probable' no matter how high the identity score", () => {
-    expect(mapMatchConfidenceToValuationConfidence(99, true)).toBe("probable");
-    expect(mapMatchConfidenceToValuationConfidence(88, true)).toBe("probable");
+  it("caps an interpolated estimate at 'moderate' no matter how high the identity score", () => {
+    expect(mapMatchConfidenceToValuationConfidence(99, true)).toBe("moderate");
+    expect(mapMatchConfidenceToValuationConfidence(88, true)).toBe("moderate");
     // Below the estimate cap it is unaffected.
     expect(mapMatchConfidenceToValuationConfidence(40, true)).toBe("low");
   });
@@ -56,7 +56,7 @@ describe("deriveValuation", () => {
 
   it("does not upgrade an INTERPOLATED value to Verified even if a tier label is passed", () => {
     const d = deriveValuation({ guide_cents: 4250, confidence_score: 96, is_estimate: true, exact_tier_label: "CGC 10" });
-    expect(d.confidence).toBe("probable"); // estimate cap wins; not 'verified'
+    expect(d.confidence).toBe("moderate"); // estimate cap wins; not 'verified'
     expect(d.method).toMatch(/interpolated grade estimate/);
   });
 
@@ -69,10 +69,10 @@ describe("deriveValuation", () => {
     expect(d.method).toMatch(/Replacement = 110% of guide/);
   });
 
-  it("labels an interpolated estimate as such and caps confidence at 'probable'", () => {
+  it("labels an interpolated estimate as such and caps confidence at 'moderate'", () => {
     const d = deriveValuation({ guide_cents: 8000, confidence_score: 99, is_estimate: true, field_meaning: "grade 9.9" });
     expect(d.is_estimate).toBe(true);
-    expect(d.confidence).toBe("probable");
+    expect(d.confidence).toBe("moderate");
     expect(d.method).toMatch(/interpolated grade estimate/);
   });
 

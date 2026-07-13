@@ -17,7 +17,7 @@
 
 import { formatCents } from "./format";
 import { QUICK_SALE_PERCENTAGE, REPLACEMENT_VALUE_PERCENTAGE } from "./valuation-derive";
-import { VALUATION_CONFIDENCE } from "./constants";
+import { VALUATION_CONFIDENCE, canonicalConfidence } from "./constants";
 import { buildPriceTiers, graderTenKey, tierLabelOf, titleCase, type PriceTier } from "./pricing-tiers";
 import { normalizeDesignation } from "@/lib/pricecharting/grade-mapping";
 
@@ -91,8 +91,9 @@ export interface PricingModel {
 const DISCLAIMER = "Current PriceCharting Guide Value — not a last-sold or eBay-sold price.";
 
 function confidenceLabel(v: string | null): string {
-  if (!v) return "—";
-  return VALUATION_CONFIDENCE.find((c) => c.value === v)?.label ?? titleCase(v);
+  const canonical = canonicalConfidence(v);
+  if (!canonical) return "—";
+  return VALUATION_CONFIDENCE.find((c) => c.value === canonical)?.label ?? titleCase(canonical);
 }
 
 /** Classify a canonical tier into a display row. */
