@@ -6,9 +6,9 @@ on:
   pull_request:
 
 # Every quality gate that verify-live.sh runs locally, now enforced on every
-# push/PR so nothing reaches main unchecked. (Live integration tests still run
-# only via verify-live.sh against a dedicated project — they skip here without
-# SLABVAULT_TEST_* env, by design.)
+# push/PR so nothing reaches main unchecked. Database integration tests use a
+# disposable Supabase stack on the GitHub-hosted runner; no hosted project,
+# production credentials, or deployment permissions are involved.
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -64,3 +64,43 @@ jobs:
             exit 1
           fi
           echo "secret scan clean"
+
+  supabase-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.84.2
+
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Start disposable Supabase stack
+        run: supabase start
+
+      - name: Reset database from migrations
+        run: supabase db reset --local --no-seed
+
+      - name: Run SlabVault database integration tests
+        run: |
+          eval "$(supabase status -o env)"
+          TEST_ANON_KEY="${ANON_KEY:-$PUBLISHABLE_KEY}"
+          TEST_SERVICE_KEY="${SERVICE_ROLE_KEY:-$SECRET_KEY}"
+          test -n "$API_URL"
+          test -n "$TEST_ANON_KEY"
+          test -n "$TEST_SERVICE_KEY"
+          SLABVAULT_TEST_URL="$API_URL" \
+          SLABVAULT_TEST_ANON_KEY="$TEST_ANON_KEY" \
+          SLABVAULT_TEST_SERVICE_KEY="$TEST_SERVICE_KEY" \
+            bunx vitest run src/test/integration/slabvault.integration.test.ts
+
+      - name: Stop disposable Supabase stack
+        if: always()
+        run: supabase stop --no-backup
