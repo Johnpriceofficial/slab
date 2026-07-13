@@ -62,7 +62,20 @@ export function parseCardNumber(raw: string | null | undefined): ParsedCardNumbe
       numerator = body.slice(0, slash).trim() || null;
       denominator = body.slice(slash + 1).trim() || null;
     } else {
-      numerator = body || null;
+      // Prefix-then-number promos where the SET CODE comes first and is
+      // whitespace-separated from the number: "SM-P 289", "S-P 289", "SWSH 020"
+      // → the collector number is the trailing pure-digit segment ("289").
+      // Contiguous alphanumerics ("SWSH123", "TG12") are left whole — there the
+      // whole token IS the collector number.
+      const segs = body.split(/\s+/).filter(Boolean);
+      const last = segs[segs.length - 1];
+      const hasSetCodePrefix = segs.slice(0, -1).some((s) => /[a-z]/i.test(s));
+      if (segs.length > 1 && /^\d+$/.test(last) && hasSetCodePrefix) {
+        numerator = last;
+        denominator = segs.slice(0, -1).join(" ");
+      } else {
+        numerator = body || null;
+      }
     }
   }
 

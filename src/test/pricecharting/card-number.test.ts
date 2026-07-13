@@ -54,3 +54,24 @@ describe("cardNumbersEquivalent", () => {
     expect(cardNumbersEquivalent(undefined, undefined)).toBe(false);
   });
 });
+
+describe("prefix-then-number promos (set code before the number)", () => {
+  it("resolves a whitespace-separated set-code prefix to the trailing number", () => {
+    expect(cardNumberToken("SM-P 289")).toBe("289");
+    expect(cardNumberToken("S-P 289")).toBe("289");
+    expect(cardNumbersEquivalent("SM-P 289", "#289")).toBe(true);
+    expect(cardNumbersEquivalent("SM-P 289", "289/S-P")).toBe(true); // same card, either format
+    expect(cardNumbersEquivalent("SM-P 289", "#290")).toBe(false);
+  });
+
+  it("leaves CONTIGUOUS alphanumeric promos whole (the token IS the number)", () => {
+    expect(cardNumberToken("SWSH123")).toBe("swsh123");
+    expect(cardNumberToken("TG12")).toBe("tg12");
+    // not equal to a bare numeric #123 — a contiguous promo id is its own card
+    expect(cardNumbersEquivalent("SWSH123", "#123")).toBe(false);
+  });
+
+  it("strips leading zeros in the extracted trailing number", () => {
+    expect(cardNumberToken("S-P 001")).toBe("1");
+  });
+});
