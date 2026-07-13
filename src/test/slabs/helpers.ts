@@ -16,6 +16,9 @@ export interface MockDaoOptions {
   existingCerts?: Record<string, number>;
   /** When true, applySlabPricing throws — verifies tier persistence is non-fatal. */
   failPricing?: boolean;
+  stalePricing?: boolean;
+  failImageCleanup?: boolean;
+  failRowCleanup?: boolean;
 }
 
 export interface MockDaoState {
@@ -50,6 +53,7 @@ function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: stri
     label_accuracy: input.label_accuracy,
     verification_status: input.verification_status,
     valuation_confidence: input.valuation_confidence,
+    valuation_provenance: input.valuation_provenance,
     duplicate_status: input.duplicate_status,
     pricecharting_product_id: input.pricecharting_product_id,
     pricecharting_product_name: input.pricecharting_product_name,
@@ -109,14 +113,16 @@ export function makeMockDao(opts: MockDaoOptions = {}): { dao: SlabDataAccess; s
     },
     async deleteImages(paths) {
       state.deletedImages.push(...paths);
+      if (opts.failImageCleanup) throw new Error("image cleanup failed");
     },
     async deleteSlabRow(id) {
       state.deletedRows.push(id);
+      if (opts.failRowCleanup) throw new Error("row cleanup failed");
     },
     async applySlabPricing(slabId, write) {
       if (opts.failPricing) throw new Error("pricing write failed");
       state.pricingWrites.push({ slabId, write });
-      return true;
+      return !opts.stalePricing;
     },
   };
 
@@ -144,6 +150,7 @@ export function validInput(overrides: Partial<SlabInput> = {}): SlabInput {
     quick_sale_value_cents: 10000,
     replacement_value_cents: 15000,
     valuation_confidence: "high",
+    valuation_provenance: "pricecharting_exact_tier",
     price_variance_percent: 0,
     notes: null,
     date_valued: "2026-07-10T00:00:00Z",

@@ -58,17 +58,53 @@ export interface SlabDataAccess {
   deleteSlabRow(id: string): Promise<void>;
   /**
    * Persist the confirmed PriceCharting tier table (stale-write guarded in the
-   * DB). Optional: non-critical enrichment, never blocks or fails a save.
+   * DB). The slab remains valid if this enrichment fails, but the failure is
+   * returned as a structured retryable warning and must not be hidden.
    * Resolves to whether the write was applied (false when stale-rejected).
    */
   applySlabPricing?(slabId: string, pricing: SlabPricingWrite): Promise<boolean>;
 }
 
 export type SaveSlabResult =
-  | { status: "success"; slab: Slab }
+  | { status: "success"; slab: Slab; warnings: SaveWarning[] }
   | { status: "duplicate"; existing_inventory_number: number }
   | { status: "validation_error"; errors: string[] }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; slab_id?: string; warnings: SaveWarning[] };
+
+export type SaveWarningCode =
+  | "pricing_persistence_failed"
+  | "pricing_stale"
+  | "image_cleanup_failed"
+  | "row_cleanup_failed";
+
+export interface SaveWarning {
+  code: SaveWarningCode;
+  message: string;
+  retryable: boolean;
+  orphaned_paths?: string[];
+}
+
+export type RequiredConfirmationResult =
+  | { status: "success"; attempts: number }
+  | { status: "error"; attempts: number; message: string; retryable: boolean };
+
+/** Retry a required confirmation/audit write without losing the created slab id. */
+export async function persistRequiredConfirmation<T>(
+  slabId: string,
+  payload: T,
+  writer: (id: string, value: T) => Promise<{ status: "success" } | { status: "error"; message: string; retryable: boolean }>,
+  maxRetries = 2,
+): Promise<RequiredConfirmationResult> {
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    const result = await writer(slabId, payload);
+    if (result.status === "success") return { status: "success", attempts };
+    if (!result.retryable || attempts > maxRetries) {
+      return { status: "error", attempts, message: result.message, retryable: result.retryable };
+    }
+  }
+}
 
 /**
  * Two save modes:
@@ -166,59 +202,81 @@ export async function saveSlab(
     if (error.code === "DUPLICATE_CERTIFICATION") {
       return { status: "duplicate", existing_inventory_number: error.existing_inventory_number ?? -1 };
     }
-    return { status: "error", message: error.message };
+    return { status: "error", message: error.message, warnings: [] };
   }
-  if (!slab) return { status: "error", message: "Slab row was not returned by the database." };
+  if (!slab) return { status: "error", message: "Slab row was not returned by the database.", warnings: [] };
 
   const frontPath = slab.front_image_path;
   const backPath = slab.back_image_path;
   if (!frontPath) {
-    await safeCleanup(dao, slab.id, []);
-    return { status: "error", message: "Database did not return the front image path." };
+    const warnings = await safeCleanup(dao, slab.id, []);
+    return { status: "error", message: "Database did not return the front image path.", slab_id: slab.id, warnings };
   }
   if (back && !backPath) {
-    await safeCleanup(dao, slab.id, [frontPath]);
-    return { status: "error", message: "Database did not return the back image path." };
+    const warnings = await safeCleanup(dao, slab.id, [frontPath]);
+    return { status: "error", message: "Database did not return the back image path.", slab_id: slab.id, warnings };
   }
 
   // 2. Upload the front image (always) and the back image (only if provided).
   const frontUp = await dao.uploadImage(frontPath, front!.blob);
   if (frontUp.error) {
-    await safeCleanup(dao, slab.id, [frontPath]);
-    return { status: "error", message: `Front image upload failed: ${frontUp.error.message}` };
+    const warnings = await safeCleanup(dao, slab.id, [frontPath]);
+    return { status: "error", message: `Front image upload failed: ${frontUp.error.message}`, slab_id: slab.id, warnings };
   }
   if (back && backPath) {
     const backUp = await dao.uploadImage(backPath, back.blob);
     if (backUp.error) {
-      await safeCleanup(dao, slab.id, [frontPath, backPath]);
-      return { status: "error", message: `Back image upload failed: ${backUp.error.message}` };
+      const warnings = await safeCleanup(dao, slab.id, [frontPath, backPath]);
+      return { status: "error", message: `Back image upload failed: ${backUp.error.message}`, slab_id: slab.id, warnings };
     }
   }
 
-  // 3. Persist the confirmed PriceCharting tier table (best-effort enrichment).
-  //    A failure here NEVER fails the save — the slab is complete without it and
-  //    the detail page falls back to the sparse display.
+  // 3. Persist the confirmed PriceCharting tier table. A failure does not destroy
+  //    the valid slab, but is returned explicitly so the UI can keep recovery.
+  const warnings: SaveWarning[] = [];
   if (pricing && dao.applySlabPricing) {
     try {
-      await dao.applySlabPricing(slab.id, pricing);
-    } catch {
-      /* ignore — tier persistence is non-critical */
+      const applied = await dao.applySlabPricing(slab.id, pricing);
+      if (!applied) {
+        warnings.push({
+          code: "pricing_stale",
+          message: "Pricing enrichment was not applied because a newer pricing write already exists.",
+          retryable: true,
+        });
+      }
+    } catch (error) {
+      warnings.push({
+        code: "pricing_persistence_failed",
+        message: error instanceof Error ? error.message : "Pricing enrichment failed.",
+        retryable: true,
+      });
     }
   }
 
-  return { status: "success", slab };
+  return { status: "success", slab, warnings };
 }
 
-/** Best-effort compensating cleanup; never throws. */
-async function safeCleanup(dao: SlabDataAccess, slabId: string, paths: string[]): Promise<void> {
+/** Compensating cleanup with explicit orphan warnings; never throws. */
+async function safeCleanup(dao: SlabDataAccess, slabId: string, paths: string[]): Promise<SaveWarning[]> {
+  const warnings: SaveWarning[] = [];
   try {
     if (paths.length > 0) await dao.deleteImages(paths);
-  } catch {
-    /* ignore — cleanup is best-effort */
+  } catch (error) {
+    warnings.push({
+      code: "image_cleanup_failed",
+      message: error instanceof Error ? error.message : "Image cleanup failed.",
+      retryable: true,
+      orphaned_paths: [...paths],
+    });
   }
   try {
     await dao.deleteSlabRow(slabId);
-  } catch {
-    /* ignore — cleanup is best-effort */
+  } catch (error) {
+    warnings.push({
+      code: "row_cleanup_failed",
+      message: error instanceof Error ? error.message : "Slab-row cleanup failed.",
+      retryable: true,
+    });
   }
+  return warnings;
 }
