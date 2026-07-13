@@ -21,7 +21,7 @@ import {
   LABEL_ACCURACY,
   VALUATION_CONFIDENCE,
 } from "@/lib/slabs/constants";
-import { dollarsToCents, centsToInputString } from "@/lib/slabs/format";
+import { dollarsToCents, centsToInputString, formatCents } from "@/lib/slabs/format";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { saveSlab, validateSlabInput, type SlabDataAccess } from "@/lib/slabs/save-slab";
@@ -54,6 +54,19 @@ const EMPTY_VALUATION = {
   notes: "",
   date_valued: new Date().toISOString().slice(0, 10),
 };
+
+/** Human labels + display order for the PriceCharting card price tiers. */
+const PC_TIER_LABELS: Array<[string, string]> = [
+  ["ungraded", "Ungraded"],
+  ["grade_7_to_7_5", "Grade 7–7.5"],
+  ["grade_8_to_8_5", "Grade 8–8.5"],
+  ["grade_9_general", "Grade 9 (general)"],
+  ["grade_9_5_general", "Grade 9.5 (general)"],
+  ["psa_10", "PSA 10"],
+  ["cgc_10", "CGC 10"],
+  ["bgs_10", "BGS 10"],
+  ["sgc_10", "SGC 10"],
+];
 
 interface NewSlabPageProps {
   /** Injectable for tests; defaults to the Supabase-backed implementation. */
@@ -414,6 +427,48 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
               The PriceCharting figure is the <strong>Current PriceCharting Guide Value</strong> — not a last-sold,
               eBay-sold, confirmed, or historical sale.
             </p>
+
+            {/* What PriceCharting ACTUALLY has for this product. Shown so a blank
+                guide value (no price for this exact grade) is an informed manual
+                decision, not a dead end. PriceCharting often carries only the
+                ungraded value — a graded slab is typically worth more, so these
+                are reference points, not the answer. */}
+            {pc && (
+              <div className="col-span-2 rounded-md border bg-muted/30 p-3 sm:col-span-4">
+                {(() => {
+                  const tiers = PC_TIER_LABELS.map(([k, label]) => [label, pc.available_values_cents[k]] as const).filter(
+                    ([, v]) => v !== null && v !== undefined,
+                  );
+                  if (tiers.length === 0) {
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        PriceCharting has <strong>no price of any kind</strong> for “{pc.product_name}”. Value this slab
+                        from sold comps or your own judgement.
+                      </p>
+                    );
+                  }
+                  return (
+                    <>
+                      <p className="mb-2 text-xs font-medium">
+                        PriceCharting values for “{pc.product_name}” (reference)
+                        {val.guide ? "" : " — no price for this exact grade; use these to value manually"}
+                      </p>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                        {tiers.map(([label, v]) => (
+                          <span key={label} className="text-muted-foreground">
+                            {label}: <span className="font-medium text-foreground">{formatCents(v as number)}</span>
+                          </span>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-[11px] text-muted-foreground">
+                        A graded slab is usually worth more than the ungraded value. These are current PriceCharting
+                        guide figures, not sold prices.
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -27,6 +27,12 @@ export interface SelectedPriceCharting {
   confidence_score: number;
   /** True when the guide value is an interpolated grade estimate, not a direct tier. */
   is_estimate: boolean;
+  /**
+   * Every price tier PriceCharting actually has for this product, in cents
+   * (ungraded, Grade 9, PSA 10, CGC 10, …). Populated so the operator can value
+   * manually from real data when their exact grade has no tier.
+   */
+  available_values_cents: Record<string, number | null>;
 }
 
 interface PriceChartingPanelProps {
@@ -99,6 +105,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect }: Pr
         match_status: c.match_status,
         confidence_score: c.confidence_score,
         is_estimate: res.is_estimate,
+        available_values_cents: res.available_values_cents ?? {},
       });
       toast.success(`Linked to ${res.product_name}`);
       // Best-effort seller listing photo for visual (metadata + photo) confirmation.
