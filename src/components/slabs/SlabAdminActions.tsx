@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Archive, ArchiveRestore, Trash2, AlertTriangle } from "lucide-react";
 import { archiveSlab, unarchiveSlab, hardDeleteSlab } from "@/lib/slabs/data";
+import { useAuth } from "@/auth/AuthProvider";
 import type { Slab } from "@/lib/slabs/types";
 
 /**
@@ -27,7 +28,11 @@ const HARD_DELETE_ENABLED =
 export function SlabAdminActions({ slab }: { slab: Slab }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { status } = useAuth();
   const isArchived = !!slab.archived_at;
+  // An owner may archive their own slab (archival is part of maintaining an
+  // inventory). Permanent destruction stays an administrative tool.
+  const canHardDelete = HARD_DELETE_ENABLED && status === "admin";
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["slab", slab.id] });
 
@@ -51,7 +56,7 @@ export function SlabAdminActions({ slab }: { slab: Slab }) {
       <Button variant="outline" size="sm" onClick={toggleArchive}>
         {isArchived ? <><ArchiveRestore className="mr-1 h-4 w-4" /> Unarchive</> : <><Archive className="mr-1 h-4 w-4" /> Archive</>}
       </Button>
-      {HARD_DELETE_ENABLED && <HardDeleteDialog slab={slab} onDeleted={() => navigate("/slabs")} />}
+      {canHardDelete && <HardDeleteDialog slab={slab} onDeleted={() => navigate("/slabs")} />}
     </div>
   );
 }

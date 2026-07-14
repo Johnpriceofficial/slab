@@ -34,11 +34,13 @@ function AppHeader() {
         <Link to={status === "admin" ? "/dashboard" : "/scan-card"} className="font-semibold">
           GradedCardValue.com
         </Link>
+        {/* A customer's world is: scan a slab, keep their own inventory, sign out.
+            Administrative surfaces (dashboard, card inventory) stay admin-only. */}
         <nav className="order-3 flex w-full items-center justify-center gap-1 border-t pt-2 sm:order-none sm:w-auto sm:border-0 sm:pt-0" aria-label="Main navigation">
           <Button variant="ghost" size="sm" asChild><Link to="/scan-card"><Camera /> Scan Card</Link></Button>
-          <Button variant="ghost" size="sm" asChild><Link to="/cards"><Images /> Cards</Link></Button>
+          <Button variant="ghost" size="sm" asChild><Link to="/slabs"><PackageSearch /> My Slabs</Link></Button>
+          {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/cards"><Images /> Cards</Link></Button>}
           {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/dashboard"><LayoutDashboard /> Dashboard</Link></Button>}
-          {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/slabs"><PackageSearch /> Slabs</Link></Button>}
         </nav>
         <div className="flex items-center gap-3 text-sm">
           {user?.email && <span className="text-muted-foreground">{user.email}</span>}
@@ -83,16 +85,21 @@ export default function App() {
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/" element={<Navigate to="/scan-card" replace />} />
+              {/* Verified customers own a private slab inventory: they scan, complete
+                  intake, and manage their own slabs. Row-level security — not this
+                  route table — is what confines them to their own rows. */}
               <Route element={<ProtectedUserLayout />}>
                 <Route path="/scan-card" element={<ScanCard />} />
-                <Route path="/cards" element={<CardList />} />
-                <Route path="/cards/:id" element={<CardDetail />} />
-              </Route>
-              <Route element={<ProtectedAdminLayout />}>
-                <Route path="/dashboard" element={<SlabDashboard />} />
                 <Route path="/slabs" element={<SlabList />} />
                 <Route path="/slabs/new" element={<NewSlab />} />
                 <Route path="/slabs/:id" element={<SlabDetail />} />
+              </Route>
+              {/* Administrative tools stay admin-only: dashboard, card inventory,
+                  marketplace, eBay, exports, bulk actions, and system settings. */}
+              <Route element={<ProtectedAdminLayout />}>
+                <Route path="/dashboard" element={<SlabDashboard />} />
+                <Route path="/cards" element={<CardList />} />
+                <Route path="/cards/:id" element={<CardDetail />} />
               </Route>
               <Route path="*" element={<Navigate to="/scan-card" replace />} />
             </Routes>

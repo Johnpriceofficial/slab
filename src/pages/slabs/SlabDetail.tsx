@@ -16,6 +16,7 @@ import {
 import { LoadingState } from "@/components/shared/LoadingState";
 import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
 import { verifiedBlockers } from "@/lib/slabs/save-slab";
+import { useAuth } from "@/auth/AuthProvider";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
@@ -42,6 +43,8 @@ import type { Slab } from "@/lib/slabs/types";
 export default function SlabDetail() {
   const { id = "" } = useParams();
   const queryClient = useQueryClient();
+  const { status } = useAuth();
+  const isAdmin = status === "admin";
 
   const { data: slab, isLoading } = useQuery({
     queryKey: ["slab", id],
@@ -246,9 +249,12 @@ export default function SlabDetail() {
 
       <SlabEvidencePanel slab={slab} />
 
-      <PriceChartingMarketplacePanel slab={slab} />
+      {/* Marketplace + eBay selling are administrative tools, not part of a
+          customer's private inventory. RLS keeps the underlying tables
+          admin-only; this hides the UI that would only ever error for them. */}
+      {isAdmin && <PriceChartingMarketplacePanel slab={slab} />}
 
-      <EbaySellerPanel slab={slab} />
+      {isAdmin && <EbaySellerPanel slab={slab} />}
 
       {/* Notes */}
       <Card className="mt-6">
