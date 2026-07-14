@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { useAuth } from "@/auth/AuthProvider";
 import { Plus, Download, ArrowUpDown, Loader2 } from "lucide-react";
 import { INVENTORY_TABLE_COLUMNS, GRADERS, LANGUAGES, VERIFICATION_STATUSES, DUPLICATE_STATUSES } from "@/lib/slabs/constants";
 import { fetchSlabs, fetchAllSlabs, fetchAllComps, type SlabQuery } from "@/lib/slabs/data";
@@ -27,6 +28,8 @@ function renderCell(slab: Slab, col: (typeof INVENTORY_TABLE_COLUMNS)[number]): 
 }
 
 export default function SlabList() {
+  const { status } = useAuth();
+  const isAdmin = status === "admin";
   const [search, setSearch] = useState("");
   const [grader, setGrader] = useState("");
   const [grade, setGrade] = useState("");
@@ -102,7 +105,7 @@ export default function SlabList() {
       <PageHead title="Graded Card Inventory · GradedCardValue.com" noindex />
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Slab Inventory</h1>
+          <h1 className="text-2xl font-bold">{isAdmin ? "Slab Inventory" : "My Slabs"}</h1>
           <p className="text-sm text-muted-foreground">{total} slabs</p>
         </div>
         <div className="flex gap-2">
@@ -112,10 +115,13 @@ export default function SlabList() {
           >
             {includeArchived ? "Hide archived" : "Show archived"}
           </Button>
-          <Button variant="outline" onClick={handleExport} disabled={exporting}>
-            {exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
-            Export Inventory
-          </Button>
+          {/* Excel export is an administrative bulk tool. */}
+          {isAdmin && (
+            <Button variant="outline" onClick={handleExport} disabled={exporting}>
+              {exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
+              Export Inventory
+            </Button>
+          )}
           <Button asChild>
             <Link to="/slabs/new">
               <Plus className="mr-1 h-4 w-4" /> Add Slab
