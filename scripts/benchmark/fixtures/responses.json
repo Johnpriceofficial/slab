@@ -1,0 +1,74 @@
+{
+  "cgc-pristine-1": {
+    "status": "success",
+    "model": "dry-run",
+    "request_ids": ["dry-cgc-1"],
+    "overall_confidence": 0.96,
+    "label_matches_card": true,
+    "requires_confirmation": true,
+    "warnings": [],
+    "proposed": {
+      "card_name": { "value": "Mega Dragonite ex", "confidence": 0.95, "source": "card", "readable": true },
+      "set": { "value": "Mega Dream ex", "confidence": 0.9, "source": "card", "readable": true },
+      "card_number": { "value": "232/193", "confidence": 0.93, "source": "card", "readable": true },
+      "year": { "value": "2025", "confidence": 0.9, "source": "label", "readable": true },
+      "language": { "value": "Japanese", "confidence": 0.97, "source": "label", "readable": true },
+      "rarity": { "value": "Mega Attack Rare", "confidence": 0.9, "source": "card", "readable": true },
+      "finish": { "value": "Holo", "confidence": 0.9, "source": "card", "readable": true },
+      "variation": { "value": "Mega Attack Rare - Holo", "confidence": 0.9, "source": "card", "readable": true },
+      "grader": { "value": "CGC", "confidence": 0.99, "source": "label", "readable": true },
+      "grade": { "value": "10", "confidence": 0.99, "source": "label", "readable": true },
+      "grade_label": { "value": "PRISTINE", "confidence": 0.98, "source": "label", "readable": true },
+      "certification_number": { "value": "4012345678", "confidence": 0.9, "source": "label", "readable": true },
+      "label_description": { "value": "", "confidence": 0, "source": "unknown", "readable": false }
+    }
+  },
+  "psa-red-1": {
+    "status": "success",
+    "model": "dry-run",
+    "request_ids": ["dry-psa-1"],
+    "overall_confidence": 0.97,
+    "label_matches_card": true,
+    "requires_confirmation": true,
+    "warnings": [],
+    "proposed": {
+      "card_name": { "value": "Charizard", "confidence": 0.98, "source": "card", "readable": true },
+      "set": { "value": "Base Set", "confidence": 0.95, "source": "card", "readable": true },
+      "card_number": { "value": "4/102", "confidence": 0.95, "source": "card", "readable": true },
+      "year": { "value": "1999", "confidence": 0.9, "source": "label", "readable": true },
+      "language": { "value": "English", "confidence": 0.98, "source": "label", "readable": true },
+      "rarity": { "value": "Holo Rare", "confidence": 0.9, "source": "card", "readable": true },
+      "finish": { "value": "Holo", "confidence": 0.9, "source": "card", "readable": true },
+      "variation": { "value": "Holo Rare - Holo", "confidence": 0.9, "source": "card", "readable": true },
+      "grader": { "value": "PSA", "confidence": 0.99, "source": "label", "readable": true },
+      "grade": { "value": "10", "confidence": 0.99, "source": "label", "readable": true },
+      "grade_label": { "value": "GEM MT", "confidence": 0.97, "source": "label", "readable": true },
+      "certification_number": { "value": "00087654321", "confidence": 0.92, "source": "label", "readable": true },
+      "label_description": { "value": "", "confidence": 0, "source": "unknown", "readable": false }
+    }
+  },
+  "bgs-blur-cert": {
+    "status": "success",
+    "model": "dry-run",
+    "request_ids": ["dry-bgs-1"],
+    "overall_confidence": 0.82,
+    "label_matches_card": true,
+    "requires_confirmation": true,
+    "warnings": [],
+    "proposed": {
+      "card_name": { "value": "Pikachu", "confidence": 0.9, "source": "card", "readable": true },
+      "set": { "value": "Jungle", "confidence": 0.88, "source": "card", "readable": true },
+      "card_number": { "value": "60/64", "confidence": 0.85, "source": "card", "readable": true },
+      "year": { "value": "1999", "confidence": 0.8, "source": "label", "readable": true },
+      "language": { "value": "English", "confidence": 0.95, "source": "label", "readable": true },
+      "rarity": { "value": "Common", "confidence": 0.85, "source": "card", "readable": true },
+      "finish": { "value": "Non-Holo", "confidence": 0.85, "source": "card", "readable": true },
+      "variation": { "value": "Common", "confidence": 0.85, "source": "card", "readable": true },
+      "grader": { "value": "BGS", "confidence": 0.98, "source": "label", "readable": true },
+      "grade": { "value": "9.5", "confidence": 0.97, "source": "label", "readable": true },
+      "grade_label": { "value": "GEM MINT", "confidence": 0.95, "source": "label", "readable": true },
+      "certification_number": { "value": "0098765432", "confidence": 0.9, "source": "label", "readable": true },
+      "label_description": { "value": "", "confidence": 0, "source": "unknown", "readable": false }
+    }
+  }
+}

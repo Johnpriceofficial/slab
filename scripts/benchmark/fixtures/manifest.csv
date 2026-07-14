@@ -1,0 +1,4 @@
+sample_id,front_image_path,back_image_path,grader,grade,grade_label,certification_number,card_name,set_name,card_number,language,rarity,finish,variation,label_color,lighting_condition,orientation,notes,glare,blur,crop_quality
+cgc-pristine-1,cgc-pristine-1-front.jpg,,CGC,10,PRISTINE,4012345678,Mega Dragonite ex,Mega Dream ex,232/193,Japanese,Mega Attack Rare,Holo,Mega Attack Rare - Holo,gold,studio,vertical,,none,none,tight
+psa-red-1,psa-red-1-front.jpg,psa-red-1-back.jpg,PSA,10,GEM MT,00087654321,Charizard,Base Set,4/102,English,Holo Rare,Holo,Holo Rare - Holo,red,indoor,horizontal,,none,slight,ok
+bgs-blur-cert,bgs-blur-cert-front.jpg,,BGS,9.5,GEM MINT,0098765432,Pikachu,Jungle,60/64,English,Common,Non-Holo,Common,black,low,vertical,cert too small,heavy,heavy,loose
