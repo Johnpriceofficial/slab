@@ -14,7 +14,9 @@
     "lint": "eslint .",
     "build:edge-bundle": "node scripts/build-pricecharting-edge-bundle.mjs",
     "build:analyze-bundle": "node scripts/build-analyze-slab-edge-bundle.mjs",
-    "build:marketplace-bundle": "node scripts/build-pricecharting-marketplace-edge-bundle.mjs"
+    "build:marketplace-bundle": "node scripts/build-pricecharting-marketplace-edge-bundle.mjs",
+    "benchmark": "bun scripts/benchmark/run.ts",
+    "benchmark:dry-run": "bun scripts/benchmark/run.ts --manifest scripts/benchmark/fixtures/manifest.csv --dry-run --fixtures scripts/benchmark/fixtures/responses.json --out benchmark-results"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.14",
