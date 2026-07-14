@@ -68,10 +68,20 @@ suite("GradedCardValue.com live integration", () => {
 
   async function makeUser(email: string, makeAdmin: boolean): Promise<SupabaseClient> {
     const password = "Test-" + email;
-    const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+    // public.is_admin() reads auth.users.raw_app_meta_data and NOTHING else —
+    // the 20260729 migration made app_metadata the sole admin authority. Seeding
+    // slab_admins alone (as this helper used to) produced a "admin" whose
+    // is_admin() was false, so every admin-gated RPC returned NOT_AUTHORIZED.
+    const { data, error } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      app_metadata: makeAdmin ? { graded_card_value_admin: true } : {},
+    });
     if (error) throw error;
     createdUserIds.push(data.user!.id);
     if (makeAdmin) {
+      // Kept in sync for any legacy reader of the allowlist table.
       const { error: e } = await admin.from("slab_admins").insert({ user_id: data.user!.id });
       if (e) throw e;
     }

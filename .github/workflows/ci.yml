@@ -88,7 +88,10 @@ jobs:
       - name: Reset database from migrations
         run: supabase db reset --local --no-seed
 
-      - name: Run SlabVault database integration tests
+      # The whole directory, not one hard-coded file: a new integration suite must
+      # RUN, not sit skipped while CI reports green. `db reset` above applied every
+      # migration, so these exercise the real schema, RLS, and RPCs.
+      - name: Run database integration tests
         run: |
           eval "$(supabase status -o env)"
           TEST_ANON_KEY="${ANON_KEY:-$PUBLISHABLE_KEY}"
@@ -99,7 +102,25 @@ jobs:
           SLABVAULT_TEST_URL="$API_URL" \
           SLABVAULT_TEST_ANON_KEY="$TEST_ANON_KEY" \
           SLABVAULT_TEST_SERVICE_KEY="$TEST_SERVICE_KEY" \
-            bunx vitest run src/test/integration/slabvault.integration.test.ts
+            bunx vitest run src/test/integration \
+              --reporter=verbose --reporter=json --outputFile=/tmp/integration.json
+
+      # A skipped integration suite proves nothing. If the live-Supabase env ever
+      # stops reaching vitest, every test would silently skip and CI would still
+      # report green — so fail loudly on any skip.
+      - name: Assert no integration test was skipped
+        run: |
+          SKIPPED=$(bun -e "const r = await Bun.file('/tmp/integration.json').json(); console.log(r.numPendingTests + r.numTodoTests)")
+          TOTAL=$(bun -e "const r = await Bun.file('/tmp/integration.json').json(); console.log(r.numTotalTests)")
+          echo "integration tests: total=$TOTAL skipped=$SKIPPED"
+          if [ "$SKIPPED" != "0" ]; then
+            echo "::error::$SKIPPED integration test(s) were SKIPPED — the live Supabase env did not reach vitest, so nothing was proved."
+            exit 1
+          fi
+          if [ "$TOTAL" = "0" ]; then
+            echo "::error::No integration tests ran at all."
+            exit 1
+          fi
 
       - name: Stop disposable Supabase stack
         if: always()
