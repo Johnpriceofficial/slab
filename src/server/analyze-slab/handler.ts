@@ -45,6 +45,8 @@
  *     the operator searches is the whole point.
  */
 
+import { reconcileIdentity } from "../../lib/slabs/identity-normalize";
+
 export type FieldSource = "front" | "back" | "label" | "card" | "unknown";
 
 export interface ProposedField {
@@ -63,6 +65,7 @@ export const ANALYZE_FIELD_KEYS = [
   "year",
   "language",
   "rarity",
+  "finish",
   "variation",
   "grader",
   "grade",
@@ -173,6 +176,14 @@ const INSTRUCTION =
   "grader's DESIGNATION/TIER printed with it — e.g. CGC \"PRISTINE\" or \"GEM MINT\", PSA " +
   "\"GEM MT\", BGS \"PRISTINE\"/\"BLACK LABEL\". From a label reading \"PRISTINE 10\", grade=\"10\" " +
   "and grade_label=\"PRISTINE\". NEVER drop the designation or fold it into grade. " +
+  "rarity is the printed rarity (e.g. \"Mega Attack Rare\"). finish is the print treatment " +
+  "(e.g. \"Holo\", \"Reverse Holo\", \"Non-Holo\"). variation is the combined descriptor when the " +
+  "card shows one (e.g. \"Mega Attack Rare - Holo\"). " +
+  "COMPATIBLE READINGS ARE NOT CONFLICTS. A numeric grade \"10\" alongside a label \"PRISTINE\" " +
+  "is grade=\"10\", grade_label=\"PRISTINE\" — never report that as a grade conflict. A rarity " +
+  "\"Mega Attack Rare\" alongside a finish \"Holo\" may combine into variation " +
+  "\"Mega Attack Rare - Holo\" — never report that as a variation conflict. Only a genuine " +
+  "front-vs-back or label-vs-card DISAGREEMENT on the same field is a conflict. " +
   "If the label and the visible card disagree, " +
   "set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.";
 
@@ -409,6 +420,48 @@ async function reverifyCriticalIdentity(
   }
 }
 
+/**
+ * Fold the deterministic identity reconciliation back into the proposal IN
+ * PLACE. A field whose value normalization DERIVED from other present evidence
+ * (e.g. variation composed from rarity + finish, or a designation split out of
+ * "PRISTINE 10") becomes readable, carrying the confidence of the field it was
+ * derived from — never higher, and never invented from nothing.
+ */
+function applyIdentityReconciliation(proposed: AnalyzeProposal): void {
+  const reconciled = reconcileIdentity({
+    grade: proposed.grade.value,
+    grade_label: proposed.grade_label.value,
+    rarity: proposed.rarity.value,
+    finish: proposed.finish.value,
+    variation: proposed.variation.value,
+  });
+
+  const sourceConfidence = Math.max(
+    proposed.rarity.confidence,
+    proposed.finish.confidence,
+    proposed.variation.confidence,
+    proposed.grade.confidence,
+    proposed.grade_label.confidence,
+  );
+
+  const fold = (key: "grade" | "grade_label" | "rarity" | "finish" | "variation") => {
+    const next = reconciled[key];
+    const current = proposed[key];
+    if (next.value === "") return; // reconciliation never blanks a field
+    if (next.value === current.value) return; // unchanged
+    proposed[key] = {
+      value: next.value,
+      // A derived value inherits the confidence of its source evidence; a value
+      // merely split/canonicalized keeps at least its own confidence.
+      confidence: next.derived ? Math.min(sourceConfidence, current.readable ? current.confidence || sourceConfidence : sourceConfidence) : Math.max(current.confidence, sourceConfidence),
+      source: current.readable ? current.source : "label",
+      readable: true,
+    };
+  };
+
+  (["grade", "grade_label", "rarity", "finish", "variation"] as const).forEach(fold);
+}
+
 export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps): Promise<AnalyzeHandlerResult> {
   const images: AnalyzeModelRequest["images"] = [];
 
@@ -474,6 +527,12 @@ export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps):
   if (input.strict_multi_pass) {
     await reverifyCriticalIdentity(deps, images, proposed, warnings);
   }
+
+  // Deterministic reconciliation of compatible readings (grade vs designation,
+  // rarity/finish vs combined variation). Runs after every model pass so the
+  // final proposal never presents "10" vs "PRISTINE 10" or "Holo" vs "Mega
+  // Attack Rare - Holo" as a conflict — those are one fact, split or combined.
+  applyIdentityReconciliation(proposed);
 
   // Surface unreadable fields explicitly so the operator knows what to fill in
   // (computed AFTER re-verification, since that step can clear card_number).

@@ -48,6 +48,7 @@ const LABELS: Record<AnalyzeFieldKey, string> = {
   year: "year",
   language: "language",
   rarity: "rarity",
+  finish: "finish",
   variation: "variation",
   grader: "grader",
   grade: "grade",

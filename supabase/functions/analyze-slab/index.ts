@@ -45,7 +45,7 @@ const evidenceField = {
 const FIELD_KEYS = [
   "card_name", "set", "set_code", "card_number", "collector_number_raw",
   "collector_number_numerator", "collector_number_denominator", "year", "language",
-  "rarity", "variation", "error_designation", "grader", "grade", "grade_label",
+  "rarity", "finish", "variation", "error_designation", "grader", "grade", "grade_label",
   "certification_number", "label_description", "front_or_back",
 ] as const;
 

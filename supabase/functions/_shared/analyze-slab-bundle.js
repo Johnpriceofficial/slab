@@ -2,6 +2,60 @@
 // Regenerate with: node scripts/build-analyze-slab-edge-bundle.mjs
 
 
+// src/lib/slabs/identity-normalize.ts
+function normalizeGrade(raw) {
+  const text = (raw ?? "").trim();
+  if (!text) return { grade: "", grade_label: "" };
+  const match = text.match(/(?<![\d.])\d{1,2}(?:\.\d)?(?![\d.])/);
+  const grade = match ? match[0] : "";
+  const label = (match ? text.replace(match[0], " ") : text).replace(/\s+/g, " ").trim();
+  return { grade, grade_label: label };
+}
+function normalizeVariation(parts) {
+  let rarity = (parts.rarity ?? "").trim();
+  let finish = (parts.finish ?? "").trim();
+  let variation = (parts.variation ?? "").trim();
+  if (!variation && rarity && finish) {
+    variation = `${rarity} - ${finish}`;
+  } else if (!variation && rarity && !finish) {
+    variation = rarity;
+  }
+  if (variation.includes(" - ")) {
+    const [head, ...rest] = variation.split(" - ");
+    const tail = rest.join(" - ").trim();
+    if (!rarity && head.trim()) rarity = head.trim();
+    if (!finish && tail) finish = tail;
+  } else if (variation && finish && !rarity && variation.toLowerCase().endsWith(finish.toLowerCase())) {
+    const stripped = variation.slice(0, variation.length - finish.length).replace(/[-\s]+$/, "").trim();
+    if (stripped) rarity = stripped;
+  }
+  return { rarity, finish, variation };
+}
+function reconcileIdentity(input) {
+  const rawGrade = (input.grade ?? "").trim();
+  const rawLabel = (input.grade_label ?? "").trim();
+  const fromGrade = normalizeGrade(rawGrade);
+  const fromLabel = normalizeGrade(rawLabel);
+  const grade = fromGrade.grade || fromLabel.grade;
+  const grade_label = fromLabel.grade_label || fromGrade.grade_label;
+  const variation = normalizeVariation({
+    rarity: input.rarity,
+    finish: input.finish,
+    variation: input.variation
+  });
+  const field = (value, ...sources) => ({
+    value,
+    derived: value !== "" && !sources.some((s) => (s ?? "").trim() === value)
+  });
+  return {
+    grade: field(grade, rawGrade),
+    grade_label: field(grade_label, rawLabel),
+    rarity: field(variation.rarity, input.rarity),
+    finish: field(variation.finish, input.finish),
+    variation: field(variation.variation, input.variation)
+  };
+}
+
 // src/server/analyze-slab/handler.ts
 var ANALYZE_FIELD_KEYS = [
   "card_name",
@@ -10,6 +64,7 @@ var ANALYZE_FIELD_KEYS = [
   "year",
   "language",
   "rarity",
+  "finish",
   "variation",
   "grader",
   "grade",
@@ -30,7 +85,7 @@ var INSTRUCTION = `Extract these fields from the slab photos and return JSON wit
   "warnings": [ <string> ]
 }
 Fields: ${ANALYZE_FIELD_KEYS.join(", ")}.
-Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
+Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. rarity is the printed rarity (e.g. "Mega Attack Rare"). finish is the print treatment (e.g. "Holo", "Reverse Holo", "Non-Holo"). variation is the combined descriptor when the card shows one (e.g. "Mega Attack Rare - Holo"). COMPATIBLE READINGS ARE NOT CONFLICTS. A numeric grade "10" alongside a label "PRISTINE" is grade="10", grade_label="PRISTINE" — never report that as a grade conflict. A rarity "Mega Attack Rare" alongside a finish "Holo" may combine into variation "Mega Attack Rare - Holo" — never report that as a variation conflict. Only a genuine front-vs-back or label-vs-card DISAGREEMENT on the same field is a conflict. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
 var VERIFY_CARD_NUMBER_SYSTEM_PROMPT = 'You are independently re-verifying ONE specific field on a graded trading-card slab label: the card_number (numerator/denominator, e.g. "016/064"). Treat this as a fresh, independent examination — you have no memory of any prior reading, and you must not anchor on what a first pass might have guessed. You return ONLY strict JSON, no prose.';
 var VERIFY_CARD_NUMBER_INSTRUCTION = 'Look ONLY at the card_number printed on the slab label. Read every digit individually. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the most common source of a wrong reading; scrutinize each digit against these confusable pairs before deciding. Return ONLY this exact JSON shape: { "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, set readable=false and value=null — never guess the closest-looking digit.';
 var VERIFY_CERTIFICATION_SYSTEM_PROMPT = "You are independently re-verifying ONE field on a graded-card label: the certification_number. This is a fresh examination. You are not shown and must not infer any earlier prediction. Return only schema-conforming output.";
@@ -164,6 +219,37 @@ async function reverifyCriticalIdentity(deps, images, proposed, warnings) {
     proposed[key] = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
   }
 }
+function applyIdentityReconciliation(proposed) {
+  const reconciled = reconcileIdentity({
+    grade: proposed.grade.value,
+    grade_label: proposed.grade_label.value,
+    rarity: proposed.rarity.value,
+    finish: proposed.finish.value,
+    variation: proposed.variation.value
+  });
+  const sourceConfidence = Math.max(
+    proposed.rarity.confidence,
+    proposed.finish.confidence,
+    proposed.variation.confidence,
+    proposed.grade.confidence,
+    proposed.grade_label.confidence
+  );
+  const fold = (key) => {
+    const next = reconciled[key];
+    const current = proposed[key];
+    if (next.value === "") return;
+    if (next.value === current.value) return;
+    proposed[key] = {
+      value: next.value,
+      // A derived value inherits the confidence of its source evidence; a value
+      // merely split/canonicalized keeps at least its own confidence.
+      confidence: next.derived ? Math.min(sourceConfidence, current.readable ? current.confidence || sourceConfidence : sourceConfidence) : Math.max(current.confidence, sourceConfidence),
+      source: current.readable ? current.source : "label",
+      readable: true
+    };
+  };
+  ["grade", "grade_label", "rarity", "finish", "variation"].forEach(fold);
+}
 async function analyzeSlabImages(input, deps) {
   const images = [];
   if (!input.front_image_base64 || !input.front_mime) {
@@ -214,6 +300,7 @@ async function analyzeSlabImages(input, deps) {
   if (input.strict_multi_pass) {
     await reverifyCriticalIdentity(deps, images, proposed, warnings);
   }
+  applyIdentityReconciliation(proposed);
   const unreadable = ANALYZE_FIELD_KEYS.filter((k) => !proposed[k].readable);
   if (unreadable.length > 0) {
     warnings.push(`Could not read: ${unreadable.join(", ")}. Enter these manually.`);

@@ -56,6 +56,7 @@ const EMPTY_IDENTITY = {
   year: "",
   language: "English",
   rarity: "",
+  finish: "",
   variation: "",
   grader: "PSA",
   grade: "",
@@ -139,6 +140,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     year: "year",
     language: "language",
     rarity: "rarity",
+    finish: "finish",
     variation: "variation",
     grader: "grader",
     grade: "grade",
@@ -181,6 +183,18 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       setAnalyzing(false);
     }
   };
+
+  // Replacing or clearing an image invalidates any existing verification — the
+  // proposal described the OLD photo. Drop it so the operator must re-run
+  // analysis against the current image rather than trusting a stale reading.
+  const changeImage = (side: "front" | "back") => (next: SlabImageState | null) => {
+    (side === "front" ? setFront : setBack)(next);
+    if (analysis) {
+      setAnalysis(null);
+      toast.info("Image changed — re-run analysis to verify the new photo.");
+    }
+  };
+
   const setValField = (k: keyof typeof EMPTY_VALUATION, v: string) => {
     if (NUMERIC_VAL_FIELDS.includes(k)) {
       const next = { ...val, [k]: v };
@@ -701,12 +715,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Slab Photographs</CardTitle>
             <Button type="button" variant="outline" size="sm" onClick={handleAnalyze} disabled={!front || analyzing}>
               {analyzing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
-              Analyze Images
+              {analysis ? "Reanalyze Images" : "Analyze Images"}
             </Button>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            <ImageUploader label="Front" side="front" image={front} onChange={setFront} />
-            <ImageUploader label="Back" side="back" image={back} onChange={setBack} />
+            <ImageUploader label="Front" side="front" image={front} onChange={changeImage("front")} />
+            <ImageUploader label="Back" side="back" image={back} onChange={changeImage("back")} />
           </CardContent>
         </Card>
 
@@ -746,7 +760,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <Field label="Rarity">
               <Input value={id.rarity} onChange={(e) => setIdField("rarity", e.target.value)} />
             </Field>
-            <Field label="Variation">
+            {/* Finish (e.g. Holo) composes into Variation; it is a reading aid,
+                not a stored column — Variation is what persists. */}
+            <Field label="Finish">
+              <Input value={id.finish} onChange={(e) => setIdField("finish", e.target.value)} placeholder="e.g. Holo, Reverse Holo" />
+            </Field>
+            <Field label="Variation" className="col-span-2">
               <Input value={id.variation} onChange={(e) => setIdField("variation", e.target.value)} />
             </Field>
             <Field label="Grader">

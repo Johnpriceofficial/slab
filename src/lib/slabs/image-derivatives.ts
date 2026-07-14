@@ -1,6 +1,12 @@
 /** Deterministic, non-generative image variants used only as reading aids. */
 
-export type DerivativeKind = "label_contrast" | "label_grayscale" | "collector_threshold" | "certification_sharpened";
+export type DerivativeKind =
+  | "label_contrast"
+  | "label_grayscale"
+  | "collector_threshold"
+  | "certification_sharpened"
+  | "grade_box"
+  | "card_title";
 
 export interface AnalysisVariant {
   label: DerivativeKind;
@@ -15,7 +21,13 @@ export const DETERMINISTIC_TRANSFORMS: Record<DerivativeKind, Record<string, unk
   label_contrast: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1.35, sharpen: true, interpolation: "bicubic" },
   label_grayscale: { version: 1, crop: [0, 0, 1, 0.32], grayscale: true, contrast: 1.5, sharpen: false, interpolation: "bicubic" },
   collector_threshold: { version: 1, crop: [0.48, 0.55, 0.52, 0.45], grayscale: true, threshold: 0.58, sharpen: false, interpolation: "bicubic" },
-  certification_sharpened: { version: 1, crop: [0.45, 0, 0.55, 0.25], grayscale: false, contrast: 1.25, sharpen: true, interpolation: "bicubic" },
+  certification_sharpened: { version: 1, crop: [0.45, 0, 0.55, 0.25], grayscale: false, contrast: 1.25, sharpen: true, interpolation: "bicubic", upscale_max: 4 },
+  // Grade box — the small numeric grade + designation, usually top-left of the
+  // label. Kept gentle: contrast only, never a threshold or heavy sharpen that
+  // could invent an edge inside a digit.
+  grade_box: { version: 1, crop: [0, 0, 0.4, 0.2], grayscale: false, contrast: 1.2, sharpen: false, interpolation: "bicubic", upscale_max: 4 },
+  // Card title / set line — upper portion of the card face beneath the label.
+  card_title: { version: 1, crop: [0.1, 0.28, 0.8, 0.18], grayscale: false, contrast: 1.15, sharpen: false, interpolation: "bicubic" },
 };
 
 function clamp(value: number): number {
@@ -73,7 +85,8 @@ export async function buildDeterministicAnalysisVariants(blob: Blob): Promise<An
       const sy = Math.round(sourceHeight * crop[1]);
       const sw = Math.max(1, Math.round(sourceWidth * crop[2]));
       const sh = Math.max(1, Math.round(sourceHeight * crop[3]));
-      const scale = Math.min(3, Math.max(1, 1800 / Math.max(sw, sh)));
+      const upscaleMax = typeof manifest.upscale_max === "number" ? manifest.upscale_max : 3;
+      const scale = Math.min(upscaleMax, Math.max(1, 1800 / Math.max(sw, sh)));
       const width = Math.round(sw * scale);
       const height = Math.round(sh * scale);
       const canvas = document.createElement("canvas");
