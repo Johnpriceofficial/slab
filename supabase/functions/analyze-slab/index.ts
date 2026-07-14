@@ -205,7 +205,11 @@ Deno.serve(async (req) => {
   const telemetry: Array<Record<string, unknown>> = [];
   try {
     const result = await analyzeSlabImages({ ...(input as Record<string, unknown>), strict_multi_pass: true }, { callModel: (modelReq: unknown) => openAIRequest(apiKey, modelReq, telemetry) });
-    if (result.body.status !== "success") return json(result.body, result.statusCode);
+    // `status` is a plain string in the handler's return type, so checking it does
+    // not narrow the success/error union — and every read of `warnings` below then
+    // fails `deno check`. Discriminate on the field we actually consume.
+    const body = result.body;
+    if (body.status !== "success" || !("warnings" in body)) return json(body, result.statusCode);
 
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const totalLatency = telemetry.reduce((sum, row) => sum + Number(row.latency_ms ?? 0), 0);
@@ -214,10 +218,10 @@ Deno.serve(async (req) => {
       model: String(telemetry[0]?.model ?? MODEL),
       schema_version: SCHEMA_VERSION,
       analysis_type: "multi_pass_slab_identity",
-      status: /disagree|could not read/i.test(result.body.warnings.join(" ")) ? "needs_review" : "succeeded",
+      status: /disagree|could not read/i.test(body.warnings.join(" ")) ? "needs_review" : "succeeded",
       request_id: telemetry.map((row) => row.request_id).filter(Boolean).join(",") || null,
       structured_result: {
-        normalized_result: result.body,
+        normalized_result: body,
         provider_outputs: telemetry.map((row) => ({ analysis_type: row.analysis_type, output: row.structured_output })),
       },
       usage: telemetry.map((row) => ({ analysis_type: row.analysis_type, usage: row.usage })),
@@ -246,17 +250,17 @@ Deno.serve(async (req) => {
     }
 
     return json({
-      ...result.body,
+      ...body,
       analysis_version: SCHEMA_VERSION,
       model: String(telemetry[0]?.model ?? MODEL),
       provider: "OPENAI",
       analysis_run_id: run?.id ?? null,
       request_ids: telemetry.map((row) => row.request_id).filter(Boolean),
       latency_ms: totalLatency,
-      overall_status: /disagree|could not read/i.test(result.body.warnings.join(" ")) ? "NEEDS_REVIEW" : "PROPOSED",
+      overall_status: /disagree|could not read/i.test(body.warnings.join(" ")) ? "NEEDS_REVIEW" : "PROPOSED",
       images_evaluated: (input as { back_image_base64?: string }).back_image_base64 ? ["front_original", "back_original"] : ["front_original"],
-      identity_conflicts: result.body.warnings.filter((warning: string) => /disagree|inconsistent|conflict/i.test(warning)),
-      required_user_actions: result.body.warnings.length ? ["Review every flagged field against the original photograph before linking a product."] : [],
+      identity_conflicts: body.warnings.filter((warning: string) => /disagree|inconsistent|conflict/i.test(warning)),
+      required_user_actions: body.warnings.length ? ["Review every flagged field against the original photograph before linking a product."] : [],
       search_queries: ((telemetry.find((row) => row.analysis_type === "slab_identity")?.structured_output as { search_queries?: string[] } | undefined)?.search_queries ?? []),
     }, 200);
   } catch {
