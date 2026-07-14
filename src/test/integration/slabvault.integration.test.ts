@@ -155,10 +155,39 @@ suite("GradedCardValue.com live integration", () => {
     },
   );
 
-  it("a non-admin is rejected by create_slab", async () => {
-    const { error } = await createSlab(userClient, { certification_number: `U${stamp}` });
+  // Customer-owned inventories (20260803) deliberately opened create_slab to
+  // verified customers: a customer creates slabs FOR THEMSELVES. Authorization is
+  // no longer "are you an admin" but "whose row is this" — so the old
+  // "a non-admin is rejected by create_slab" assertion is replaced by the three
+  // cases that actually define the new boundary.
+  it("lets a verified customer create a slab, owned by them", async () => {
+    const { data, error } = await createSlab(userClient, { certification_number: `U${stamp}` });
+    expect(error).toBeNull();
+    expect(data?.id).toBeTruthy();
+    if (data?.id) createdSlabIds.push(data.id);
+
+    const { data: me } = await userClient.auth.getUser();
+    const { data: row } = await admin.from("slabs").select("owner_id").eq("id", data!.id).single();
+    // owner_id comes from auth.uid(), never from the client payload.
+    expect(row!.owner_id).toBe(me.user!.id);
+  });
+
+  it("rejects an anonymous caller from create_slab", async () => {
+    const { error } = await createSlab(anonClient, { certification_number: `A${stamp}` });
     expect(error).not.toBeNull();
-    expect(String(error?.message)).toMatch(/NOT_AUTHORIZED|permission|denied/i);
+    expect(String(error?.message)).toMatch(/NOT_AUTHORIZED|permission|denied|JWT/i);
+  });
+
+  it("rejects a suspended account from create_slab", async () => {
+    const { data: me } = await userClient.auth.getUser();
+    await admin.from("customer_profiles").update({ account_status: "suspended" }).eq("id", me.user!.id);
+    try {
+      const { error } = await createSlab(userClient, { certification_number: `S${stamp}` });
+      expect(error).not.toBeNull();
+      expect(String(error?.message)).toMatch(/NOT_AUTHORIZED/i);
+    } finally {
+      await admin.from("customer_profiles").update({ account_status: "active" }).eq("id", me.user!.id);
+    }
   });
 
   it("rejects a grader-scoped normalized duplicate but allows a different grader", async () => {
