@@ -1,5 +1,6 @@
 import { cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, Save, Loader2, Sparkles } from "lucide-react";
 import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUploader";
+import { consumeCameraCapture } from "@/lib/slabs/camera-capture";
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
 import type { ImageSource } from "@/server/pricecharting/handler";
 import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
@@ -81,6 +83,7 @@ interface NewSlabPageProps {
 
 export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPageProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [front, setFront] = useState<SlabImageState | null>(null);
   const [back, setBack] = useState<SlabImageState | null>(null);
   const [id, setId] = useState(EMPTY_IDENTITY);
@@ -112,6 +115,18 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // that effect depend on (and re-run for) every provenance change.
   const provenanceRef = useRef(valProvenance);
   provenanceRef.current = valProvenance;
+
+  // ── Camera hand-off ──────────────────────────────────────────────────────
+  // A capture staged by CardScanner hydrates the Front slot once, on mount, as
+  // the same SlabImageState a manual upload yields — so identity, AI analysis,
+  // PriceCharting, valuation, the duplicate-cert check, and save all run through
+  // the one path below, and a scanned slab is saved exactly once. Consuming
+  // empties the buffer, so a later manual visit to /slabs/new starts blank
+  // rather than re-hydrating a stale photo.
+  useEffect(() => {
+    const captured = consumeCameraCapture();
+    if (captured) setFront(captured);
+  }, []);
 
   const NUMERIC_VAL_FIELDS: ReadonlyArray<keyof typeof EMPTY_VALUATION> = ["final", "quick", "replacement", "guide"];
   const setIdField = (k: keyof typeof EMPTY_IDENTITY, v: string) => setId((s) => ({ ...s, [k]: v }));
@@ -556,6 +571,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
         mode,
       );
       if (result.status === "success") {
+        // The slab row now exists. The inventory list and dashboard are cached
+        // with a 60s staleTime, so without dropping those entries the new slab
+        // would be missing from /slabs for up to a minute after saving. Do this
+        // before any follow-up write can fail — the row is already there.
+        void queryClient.invalidateQueries({ queryKey: ["slabs"] });
+        void queryClient.invalidateQueries({ queryKey: ["dashboard-slabs"] });
         if (analysis?.analysis_run_id) {
           try {
             await linkAnalysisRun(analysis.analysis_run_id, result.slab.id);

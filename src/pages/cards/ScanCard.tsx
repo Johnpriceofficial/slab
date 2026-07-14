@@ -23,13 +23,13 @@ export default function ScanCardPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="flex items-center gap-2 text-2xl font-bold"><Camera className="text-primary" /> Scan Card</h1>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Point your phone at one card, align it, and scan. Captures go straight to your private inventory—nothing is saved to your camera roll.</p>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Point your phone at one slab, align it, and capture. The photo opens straight in Add a Slab with the front image already loaded—nothing is saved to your camera roll.</p>
           </div>
           <Button variant="outline" asChild><Link to="/slabs/new"><ImagePlus /> Manual photo upload</Link></Button>
         </div>
       </div>
 
-      <CardScanner onInventoryChange={refresh} />
+      <CardScanner />
 
       <section className="px-4 py-6 sm:px-0">
         <details className="group" open={reviews.length > 0}>

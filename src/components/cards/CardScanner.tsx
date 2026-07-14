@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, CameraIcon, CheckCircle2, FlipHorizontal2, Loader2, RotateCcw, ShieldAlert, SkipForward } from "lucide-react";
+import { Camera, FlipHorizontal2, Loader2, RotateCcw, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { computeSourceCrop, outputSize } from "@/lib/cards/scanner";
-import { resolveScan, scanCard, type ScanCardResponse } from "@/lib/cards/api";
+import { createSlabImageState } from "@/lib/slabs/image-state";
+import { stageCameraCapture } from "@/lib/slabs/camera-capture";
 
 type CameraState = "starting" | "ready" | "processing" | "error";
+
+/** Where a capture is handed off to. Camera and manual upload share one screen. */
+const INTAKE_ROUTE = "/slabs/new";
 
 function errorMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "SecurityError")) {
@@ -18,22 +20,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The camera could not be started.";
 }
 
-export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => void }) {
+/**
+ * Live capture device for the graded-slab intake flow.
+ *
+ * It identifies nothing and saves nothing: a capture is normalized into the
+ * same `SlabImageState` a manual upload produces, staged, and carried to
+ * /slabs/new, where the existing Add a Slab screen owns identity, AI analysis,
+ * PriceCharting, valuation, the duplicate-certification check, and the save.
+ * Keeping the write path in one place is what guarantees a scan produces exactly
+ * one slab — and no separate /cards inventory row.
+ */
+export function CardScanner() {
+  const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const guideRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const clearTimer = useRef<number>();
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [cameraState, setCameraState] = useState<CameraState>("starting");
   const [cameraError, setCameraError] = useState("");
-  const [scanError, setScanError] = useState("");
-  const [result, setResult] = useState<ScanCardResponse | null>(null);
-  const [thumbnail, setThumbnail] = useState<string | null>(null);
-  const [sessionScanned, setSessionScanned] = useState(0);
-  const [sessionAdded, setSessionAdded] = useState(0);
-  const [corrections, setCorrections] = useState({ card_name: "", set_name: "", card_number: "", rarity: "" });
+  const [captureError, setCaptureError] = useState("");
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -64,22 +71,8 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
 
   useEffect(() => {
     void startCamera();
-    return () => {
-      stopCamera();
-      if (clearTimer.current) window.clearTimeout(clearTimer.current);
-    };
+    return stopCamera;
   }, [startCamera, stopCamera]);
-
-  const clearResult = useCallback((delay = 0) => {
-    if (clearTimer.current) window.clearTimeout(clearTimer.current);
-    const clear = () => {
-      setResult(null);
-      setCorrections({ card_name: "", set_name: "", card_number: "", rarity: "" });
-      setThumbnail((old) => { if (old) URL.revokeObjectURL(old); return null; });
-    };
-    if (delay > 0) clearTimer.current = window.setTimeout(clear, delay);
-    else clear();
-  }, []);
 
   const captureBlob = useCallback(async (): Promise<Blob> => {
     const video = videoRef.current;
@@ -101,58 +94,24 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
     return blob;
   }, []);
 
-  const handleScan = async () => {
-    if (cameraState !== "ready" || result) return;
+  const handleCapture = async () => {
+    if (cameraState !== "ready") return;
     setCameraState("processing");
-    setScanError("");
+    setCaptureError("");
     try {
       const blob = await captureBlob();
-      setThumbnail((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob); });
-      setSessionScanned((count) => count + 1);
-      const response = await scanCard(blob);
-      setResult(response);
-      if (response.extraction) {
-        setCorrections({
-          card_name: response.extraction.card_name,
-          set_name: response.extraction.set_name,
-          card_number: response.extraction.card_number,
-          rarity: response.extraction.rarity,
-        });
-      }
-      if (response.status === "added") {
-        setSessionAdded((count) => count + 1);
-        toast.success(`${response.extraction?.card_name ?? "Card"} added to inventory.`);
-        onInventoryChange?.();
-        clearResult(2600);
-      }
+      const { image, error } = await createSlabImageState(blob, { fallbackName: "camera-capture.jpg" });
+      if (error || !image) throw new Error(error ?? "The captured photo could not be prepared.");
+      // Stage first, then release the camera, then hand off. The form mounts with
+      // the photo already in the Front slot — no re-pick, no second upload.
+      stageCameraCapture(image);
+      stopCamera();
+      toast.success("Photo captured — finish the slab details.");
+      navigate(INTAKE_ROUTE);
     } catch (error) {
       const message = errorMessage(error);
-      setScanError(message);
+      setCaptureError(message);
       toast.error(message);
-      clearResult();
-    } finally {
-      setCameraState("ready");
-    }
-  };
-
-  const resolve = async (action: "confirm" | "skip", addAnyway = false) => {
-    if (!result?.scan_id) return;
-    setCameraState("processing");
-    try {
-      const response = await resolveScan({ action, scan_id: result.scan_id, ...corrections, add_anyway: addAnyway });
-      if (response.status === "possible_duplicate") {
-        setResult(response);
-        return;
-      }
-      if (response.status === "added") {
-        setSessionAdded((count) => count + 1);
-        toast.success("Card confirmed and added to inventory.");
-        onInventoryChange?.();
-      } else toast.success("Scan skipped.");
-      clearResult(1500);
-    } catch (error) {
-      toast.error(errorMessage(error));
-    } finally {
       setCameraState("ready");
     }
   };
@@ -167,7 +126,7 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
           className="pointer-events-none absolute left-1/2 top-1/2 aspect-[5/7] h-[70%] max-h-[560px] -translate-x-1/2 -translate-y-1/2 rounded-[5%] border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.36)]"
         >
           <span className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/55 px-3 py-1 text-xs font-medium">
-            Align one card inside the guide
+            Align the slab inside the guide
           </span>
           <i className="absolute -left-1 -top-1 h-10 w-10 rounded-tl-xl border-l-4 border-t-4 border-secondary" />
           <i className="absolute -right-1 -top-1 h-10 w-10 rounded-tr-xl border-r-4 border-t-4 border-secondary" />
@@ -175,10 +134,7 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
           <i className="absolute -bottom-1 -right-1 h-10 w-10 rounded-br-xl border-b-4 border-r-4 border-secondary" />
         </div>
 
-        <div className="absolute left-3 right-3 top-3 flex items-center justify-between gap-2">
-          <div className="rounded-full bg-black/60 px-3 py-1.5 text-sm backdrop-blur">
-            <strong>{sessionAdded}</strong> added <span className="text-white/60">· {sessionScanned} scanned</span>
-          </div>
+        <div className="absolute left-3 right-3 top-3 flex items-center justify-end gap-2">
           <Button
             type="button" variant="outline" size="icon"
             className="border-white/40 bg-black/50 text-white hover:bg-black/70 hover:text-white"
@@ -197,68 +153,22 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
           </div>
         )}
 
-        {!result && cameraState !== "error" && (
+        {cameraState !== "error" && (
           <div className="absolute bottom-5 left-0 right-0 flex justify-center">
             <Button
               size="lg" className="h-16 rounded-full border-4 border-white bg-primary px-8 text-lg shadow-xl hover:bg-primary/90"
-              onClick={() => void handleScan()} disabled={cameraState !== "ready"}
-            >{cameraState === "processing" ? <><Loader2 className="animate-spin" /> Identifying…</> : <><Camera className="h-6 w-6" /> Scan card</>}</Button>
+              onClick={() => void handleCapture()} disabled={cameraState !== "ready"}
+            >{cameraState === "processing" ? <><Loader2 className="animate-spin" /> Preparing…</> : <><Camera className="h-6 w-6" /> Capture slab</>}</Button>
           </div>
         )}
 
-        {scanError && !result && (
+        {captureError && (
           <div role="alert" className="absolute bottom-24 left-4 right-4 rounded-xl border border-red-300/60 bg-red-950/90 p-3 text-center text-sm text-red-50 shadow-lg sm:left-1/2 sm:right-auto sm:w-[min(90%,520px)] sm:-translate-x-1/2">
-            {scanError}
-          </div>
-        )}
-
-        {result && (
-          <div className="absolute inset-x-3 bottom-3 max-h-[72%] overflow-y-auto rounded-2xl bg-white p-4 text-slate-900 shadow-2xl sm:left-1/2 sm:right-auto sm:w-[min(92%,620px)] sm:-translate-x-1/2">
-            <div className="flex gap-4">
-              {thumbnail && <img src={thumbnail} alt="Captured card" className="h-36 w-24 rounded-lg object-cover shadow" />}
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  {result.status === "added" ? <CheckCircle2 className="text-green-600" /> : <CameraIcon className="text-primary" />}
-                  <h2 className="font-bold">{result.status === "added" ? "Added to inventory" : result.status === "possible_duplicate" ? "Possible duplicate" : "Needs review"}</h2>
-                  {result.extraction && <Badge variant="outline">{Math.round(result.extraction.confidence * 100)}% confidence</Badge>}
-                </div>
-                {result.status === "possible_duplicate" && <p className="mt-2 text-sm text-amber-700">This identity already exists. Add it only if this is another physical copy.</p>}
-                {result.status === "needs_review" && <p className="mt-2 text-sm text-amber-700">Confidence is below 75%. Correct the guess before adding it.</p>}
-              </div>
-            </div>
-            {result.status !== "added" && (
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <Field label="Card name" value={corrections.card_name} onChange={(value) => setCorrections((old) => ({ ...old, card_name: value }))} />
-                <Field label="Set" value={corrections.set_name} onChange={(value) => setCorrections((old) => ({ ...old, set_name: value }))} />
-                <Field label="Card number" value={corrections.card_number} onChange={(value) => setCorrections((old) => ({ ...old, card_number: value }))} />
-                <Field label="Rarity" value={corrections.rarity} onChange={(value) => setCorrections((old) => ({ ...old, rarity: value }))} />
-              </div>
-            )}
-            {result.status === "added" && result.card?.id && (
-              <div className="mt-4 flex justify-end"><Button variant="outline" asChild><Link to={`/cards/${result.card.id}`}>View inventory card</Link></Button></div>
-            )}
-            {result.extraction && (
-              <p className="mt-3 text-xs text-slate-500">
-                Condition: {[result.extraction.condition_issues.whitening, result.extraction.condition_issues.scratches, result.extraction.condition_issues.centering_notes, result.extraction.condition_issues.other].filter(Boolean).join(" · ") || "No visible issue confidently identified"}
-              </p>
-            )}
-            {result.status !== "added" && (
-              <div className="mt-4 flex flex-wrap justify-end gap-2">
-                <Button variant="outline" onClick={() => void resolve("skip")} disabled={cameraState === "processing"}><SkipForward /> Skip</Button>
-                <Button onClick={() => void resolve("confirm", result.status === "possible_duplicate")} disabled={cameraState === "processing" || !corrections.card_name.trim() || !corrections.set_name.trim() || !corrections.card_number.trim()}>
-                  {cameraState === "processing" ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
-                  {result.status === "possible_duplicate" ? "Add another copy" : "Confirm & add"}
-                </Button>
-              </div>
-            )}
+            {captureError}
           </div>
         )}
       </div>
       <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
     </section>
   );
-}
-
-function Field({ label, value, onChange }: { label: string; value: string; onChange(value: string): void }) {
-  return <label className="text-xs font-medium text-slate-600">{label}<Input className="mt-1 text-sm" value={value} onChange={(event) => onChange(event.target.value)} /></label>;
 }

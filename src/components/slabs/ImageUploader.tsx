@@ -2,17 +2,9 @@ import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Upload, RefreshCw, X, ImageIcon, Loader2 } from "lucide-react";
-import { extensionFor } from "@/lib/slabs/format";
-import { normalizeImageFile } from "@/lib/slabs/image-normalize";
+import { createSlabImageState, releaseSlabImageState, type SlabImageState } from "@/lib/slabs/image-state";
 
-export interface SlabImageState {
-  /** Byte-for-byte user-selected file, retained for evidence storage. */
-  originalFile: File;
-  /** Browser-safe deterministic decode used for preview and analysis. */
-  file: File;
-  previewUrl: string;
-  ext: string;
-}
+export type { SlabImageState };
 
 interface ImageUploaderProps {
   label: string;
@@ -33,26 +25,21 @@ export function ImageUploader({ label, side, image, onChange }: ImageUploaderPro
     if (!file) return;
 
     setConverting(true);
-    const { file: normalized, error } = await normalizeImageFile(file);
+    const { image: next, error } = await createSlabImageState(file);
     setConverting(false);
 
-    if (error || !normalized) {
+    if (error || !next) {
       onChange(null);
       import("sonner").then(({ toast }) => toast.error(error ?? "Could not use this image."));
       return;
     }
 
-    if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
-    onChange({
-      originalFile: file,
-      file: normalized,
-      previewUrl: URL.createObjectURL(normalized),
-      ext: extensionFor(normalized.name, normalized.type),
-    });
+    releaseSlabImageState(image);
+    onChange(next);
   };
 
   const clear = () => {
-    if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+    releaseSlabImageState(image);
     onChange(null);
   };
 
