@@ -31,31 +31,72 @@
 alter table public.slabs
   add column if not exists owner_id uuid references auth.users(id) on delete restrict;
 
+-- The backfill owner is TARGETED EXPLICITLY, never inferred.
+--
+-- An earlier draft picked "the earliest admin by created_at". That is exactly
+-- the kind of implicit selector that drifts: grant a second admin, or reorder
+-- account creation, and a re-run silently assigns an entire inventory to the
+-- wrong person. Ownership of real inventory is not something a migration should
+-- guess at, so the intended account is named here and then VERIFIED.
+--
+-- Resolution order:
+--   1. app.slab_backfill_owner  — a UUID set for this session, if you want to
+--      override without editing this file:
+--        set local app.slab_backfill_owner = '00000000-…';
+--   2. Otherwise the account named below.
+--
+-- The resolved account must exist AND be an admin, or the migration ABORTS with
+-- the row count it refused to touch. It never falls back to a guess.
 do $$
 declare
-  v_admin uuid;
+  v_intended_email constant text := 'info@johnpricebookings.com';
+  v_override text;
+  v_owner uuid;
+  v_owner_email text;
+  v_is_admin boolean;
   v_orphans bigint;
 begin
   select count(*) into v_orphans from public.slabs where owner_id is null;
   if v_orphans = 0 then
-    return; -- fresh database, or already backfilled
+    return; -- fresh database (e.g. a preview branch), or already backfilled
   end if;
 
-  -- Earliest admin: app_metadata is the sole admin authority (see is_admin).
-  select u.id into v_admin
-    from auth.users u
-   where coalesce((u.raw_app_meta_data->>'graded_card_value_admin')::boolean, false)
-   order by u.created_at asc
-   limit 1;
+  v_override := nullif(current_setting('app.slab_backfill_owner', true), '');
 
-  if v_admin is null then
+  if v_override is not null then
+    select u.id, u.email into v_owner, v_owner_email
+      from auth.users u where u.id = v_override::uuid;
+    if v_owner is null then
+      raise exception
+        'CANNOT_BACKFILL_SLAB_OWNER: app.slab_backfill_owner = % matches no auth.users row. '
+        '% slab(s) were left untouched.', v_override, v_orphans;
+    end if;
+  else
+    select u.id, u.email into v_owner, v_owner_email
+      from auth.users u where lower(u.email) = lower(v_intended_email);
+    if v_owner is null then
+      raise exception
+        'CANNOT_BACKFILL_SLAB_OWNER: the intended owner % does not exist in auth.users. '
+        'Set app.slab_backfill_owner to the correct UUID, or fix the address in this migration. '
+        '% slab(s) were left untouched.', v_intended_email, v_orphans;
+    end if;
+  end if;
+
+  -- app_metadata is the sole admin authority (see public.is_admin). A non-admin
+  -- must never become the owner of the entire pre-existing inventory.
+  select coalesce((u.raw_app_meta_data->>'graded_card_value_admin')::boolean, false)
+    into v_is_admin
+    from auth.users u where u.id = v_owner;
+
+  if not v_is_admin then
     raise exception
-      'CANNOT_BACKFILL_SLAB_OWNER: % slab(s) exist but no admin user was found to own them. '
-      'Grant an admin (app_metadata.graded_card_value_admin = true) before running this migration.',
-      v_orphans;
+      'CANNOT_BACKFILL_SLAB_OWNER: the resolved owner % (%) is not an admin '
+      '(app_metadata.graded_card_value_admin is not true). % slab(s) were left untouched.',
+      v_owner_email, v_owner, v_orphans;
   end if;
 
-  update public.slabs set owner_id = v_admin where owner_id is null;
+  update public.slabs set owner_id = v_owner where owner_id is null;
+  raise notice 'Backfilled % slab(s) to owner % (%).', v_orphans, v_owner_email, v_owner;
 end $$;
 
 alter table public.slabs alter column owner_id set not null;
