@@ -229,6 +229,23 @@ export async function resolveSlabInventory(query: string): Promise<Slab[]> {
   return (data ?? []) as Slab[];
 }
 
+export interface ResolvedInventoryItem {
+  item_type: "slab" | "raw_card";
+  id: string;
+  inventory_code: string;
+  inventory_sequence: number;
+}
+
+/**
+ * Resolve a public inventory query across BOTH inventories: "S0001" → a slab,
+ * "R0001" → a raw card, a bare number → both. Ownership-scoped by the RPC.
+ */
+export async function resolveInventory(query: string): Promise<ResolvedInventoryItem[]> {
+  const { data, error } = await sb.rpc("resolve_inventory", { p_query: query });
+  if (error) throw error;
+  return (data ?? []) as ResolvedInventoryItem[];
+}
+
 export async function fetchSlabById(id: string): Promise<Slab | null> {
   const { data, error } = await sb.from("slabs").select("*").eq("id", id).maybeSingle();
   if (error) throw error;
