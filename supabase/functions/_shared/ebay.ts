@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.2";
 import { corsHeaders } from "./cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "./auth.ts";
+import { getEbayAppToken } from "./ebay-app-token.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -78,11 +79,10 @@ async function oauthToken(params: URLSearchParams): Promise<Record<string, unkno
   return await res.json();
 }
 
-async function appToken(): Promise<string> {
-  const data = await oauthToken(new URLSearchParams({ grant_type: "client_credentials", scope: "https://api.ebay.com/oauth/api_scope" }));
-  const token = data.access_token;
-  if (typeof token !== "string") throw new Error("eBay did not return an application token.");
-  return token;
+// Public Browse app token: reuse the shared client-credentials flow so there is
+// ONE application-token implementation across the eBay functions.
+function appToken(): Promise<string> {
+  return getEbayAppToken();
 }
 
 async function ebayFetch(path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {

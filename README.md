@@ -1,13 +1,16 @@
 # GradedCardValue.com
 
-Secure graded-card identification, verification, valuation, and inventory app. Sign in as an admin, then, one card
-at a time: upload a front photo (back is optional — some slabs carry every needed
-field on the front label alone) in any common image format (HEIC included,
-auto-converted), optionally **analyze** them with AI to
-propose an identity (which you confirm/edit), pull the **Current PriceCharting
-Guide Value** from a server-side function, record **sold comps**, approve a
-**Final Value**, assign a permanent inventory number, block grader-scoped
-duplicate certifications, save, and export to Excel. Built for ~1,000 slabs.
+Secure graded-card identification, verification, valuation, and inventory app.
+**Verified customers own their own inventory** (raw cards and graded slabs);
+**admins have global access**. Both work one card at a time through the universal
+**Scan Item** workflow: upload a front photo (back is optional — some slabs carry
+every needed field on the front label alone) in any common image format (HEIC
+included, auto-converted), optionally **analyze** it with AI to propose an
+identity (which you confirm/edit), pull the **Current PriceCharting Guide Value**
+from a server-side function, record **sold comps**, approve a **Final Value**,
+get a permanent public inventory number (`S0001+` for slabs, `R0001+` for raw
+cards), block grader-scoped duplicate certifications, save, and export to Excel.
+A read-only **Market Intelligence** panel adds owner-scoped market context.
 
 Standalone project: Vite + React + TS + Supabase + Vitest.
 
@@ -16,31 +19,34 @@ Standalone project: Vite + React + TS + Supabase + Vitest.
 ```
 src/
   auth/                AuthProvider (session + admin verification)
-  components/auth/     ProtectedAdminRoute guard
-  pages/Login.tsx      /login (public)
+  components/auth/     ProtectedUserLayout (verified customer) + ProtectedAdminLayout (admin) guards
+  pages/               /login, /signup, /forgot-password, /reset-password (public)
+  lib/identity/        Master Identity Engine (canonical card hash, specimen key, completeness)
+  lib/market/          Market engine: adapters, classifier, grade tiers, cache key, scoring
   lib/pricecharting/   Reusable PriceCharting API client (rate limit, retries, grade mapping)
   lib/slabs/           Slab domain: types, save flow, comps + valuation, data access, Excel, stats
-  server/pricecharting/handler.ts   Framework-agnostic edge handler (token stays server-side)
-  server/analyze-slab/handler.ts    Framework-agnostic image-analysis handler (key stays server-side)
-  components/slabs/    Image uploader, PriceCharting panel, analysis panel, comps section, admin actions
-  pages/slabs/         /dashboard, /slabs, /slabs/new, /slabs/:id (all admin-guarded)
-  components/cards/    Live getUserMedia scanner (in-memory JPEG capture; no camera-roll write)
-  pages/cards/         /scan-card live intake + duplicate/low-confidence review queue
-  test/                Vitest suites (378 tests: 367 passing, 11 env-gated live-integration skipped)
+  server/market-intelligence/engine.ts   Pure market orchestrator (bundled for the edge fn)
+  components/market/   Read-only Market Intelligence panel (sales / listings / tiers / provider status)
+  components/slabs/    Image uploader, PriceCharting panel, analysis panel, comps section
+  pages/slabs/         /slabs, /slabs/new, /slabs/:id — owner-scoped (customer or admin)
+  pages/cards/         /cards, /cards/:id — owner-scoped raw-card inventory
+  pages/               /scan-card universal intake; /dashboard is admin-only
+  test/                Vitest unit/component + src/test/integration (disposable-Supabase) suites
 supabase/
-  migrations/          20 migrations: admin, tables, storage, cert-normalization,
-                       constraints, rate-limits, archive, inventory-sequence,
-                       hard-delete guard, table grants, grade label, analyze
-                       quota, optional back image, PriceCharting tiers, CGC
-                       population, visual confirmation, audit-actor default,
-                       transactional confirmation RPC + CHECK constraints,
-                       confidence consolidation
-  functions/pricecharting-search/   Deno edge function (admin-only)
-  functions/analyze-slab/           Deno edge function (admin-only, AI image analysis)
-  functions/scan-card/              Deno edge function (admin-only scanner, Storage + OpenAI + inventory)
+  migrations/          Ordered migrations under supabase/migrations/ (admin, tables, storage,
+                       cert-normalization, constraints, inventory sequences, market/identity,
+                       eBay OAuth, transactional RPCs, …) — run in filename order
+  functions/           Deno edge functions. Market/valuation: market-intelligence (read-only,
+                       owner-scoped via caller JWT), pricecharting-search, pricecharting-marketplace,
+                       pricecharting-sync, analyze-slab, scan-card, marketplace-scheduler; the
+                       eBay surface: ebay-oauth-start/callback, ebay-account-sync, ebay-*-item,
+                       ebay-order-sync, ebay-fulfillment, ebay-finances-sync, ebay-reference-search,
+                       ebay-notification-handler. See functions/CI-COVERAGE.md for CI coverage.
   functions/_shared/*-bundle.js     Generated by the scripts/build-*-edge-bundle.mjs
 scripts/build-pricecharting-edge-bundle.mjs
+scripts/build-pricecharting-marketplace-edge-bundle.mjs
 scripts/build-analyze-slab-edge-bundle.mjs
+scripts/build-market-intelligence-edge-bundle.mjs
 ```
 
 ## Setup
@@ -48,9 +54,10 @@ scripts/build-analyze-slab-edge-bundle.mjs
 ```bash
 bun install --frozen-lockfile   # Bun is the only package manager (bun.lock); no npm/yarn
 cp .env.example .env.local      # fill VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
-bun run test                    # 378 tests (367 pass; 11 env-gated integration skipped)
+bun run test                    # Vitest unit/component suites
 bun run typecheck               # 0 errors
 bun run build                   # production build
+bun run benchmark:dry-run       # OCR benchmark harness (offline fixtures, no OpenAI call)
 ```
 
 To share a clean copy of the source (tracked files only — no `.git` history, no
@@ -64,17 +71,25 @@ scripts/clean-export.sh            # → graded-card-value-export.zip
 
 ```bash
 supabase link --project-ref YOUR_PROJECT_REF
-supabase db push                                     # applies all 20 migrations in order
+supabase db push                                     # applies every migration in filename order
 # bootstrap the first admin (see SLABVAULT.md), then:
 supabase secrets set PRICECHARTING_API_TOKEN="…"     # edge-function secret ONLY
 supabase secrets set OPENAI_API_KEY="…"              # edge-function secret ONLY (analyze-slab)
 supabase secrets set OPENAI_ANALYZE_MODEL="gpt-5.6-terra" # optional
 supabase secrets set OPENAI_SCAN_MODEL="gpt-5.6-terra"    # optional scanner override
+# eBay is OPTIONAL. Without EBAY_CLIENT_ID/EBAY_CLIENT_SECRET the market panel
+# reports eBay active listings as "not configured" (never fabricated data):
+supabase secrets set EBAY_CLIENT_ID="…" EBAY_CLIENT_SECRET="…"   # optional; enables public Browse
+# Rebuild any changed edge bundle before deploying (CI enforces freshness):
 node scripts/build-pricecharting-edge-bundle.mjs
+node scripts/build-market-intelligence-edge-bundle.mjs
 node scripts/build-analyze-slab-edge-bundle.mjs
+node scripts/build-pricecharting-marketplace-edge-bundle.mjs
+supabase functions deploy market-intelligence
 supabase functions deploy pricecharting-search
 supabase functions deploy analyze-slab
 supabase functions deploy scan-card
+# Every NEW edge function must be added to CI (deno check + functions/CI-COVERAGE.md).
 ```
 
 ## Guarantees
@@ -93,10 +108,23 @@ supabase functions deploy scan-card
   upload.
 - PriceCharting values are labeled "Current PriceCharting Guide Value" — never a
   sold comp / eBay / last-sold / historical price.
-- `PRICECHARTING_API_TOKEN`, `OPENAI_API_KEY`, and marketplace credentials live only in Edge Functions;
-  never in the client bundle, responses, logs, DB, or Excel.
-- Admin-only via a frontend route guard **plus** RLS + edge-function admin
-  checks + a private `slab-images` bucket.
+- **Market Intelligence is read-only and honest about its evidence.**
+  PriceCharting figures are aggregate grade-tier references and eBay active
+  listings are asking-price/supply context — neither enters the verified-sale
+  median, last-sold, or liquidity. Only verified completed sales drive sold
+  statistics. Unavailable data stays `null` (never `0`), and every provider
+  reports an explicit status (`success` / `no_results` / `not_configured` /
+  `unauthorized` / `rate_limited` / `provider_error` / `network_error`) so a
+  degraded provider is never rendered as "no market activity". Connected-seller
+  verified sales are reported as `not_configured` until that integration ships.
+- `PRICECHARTING_API_TOKEN`, `OPENAI_API_KEY`, and eBay/marketplace credentials live only in Edge Functions;
+  never in the client bundle, responses, logs, DB, or Excel. Provider error text
+  and request URLs are never echoed to the client.
+- **Ownership is enforced by RLS.** Verified customers see only their own raw
+  cards and slabs; admins have global access. Customer routes (`/scan-card`,
+  `/cards`, `/slabs`, `/slabs/new`, `/slabs/:id`) run under a verified-user
+  guard; `/dashboard` is admin-only. The `market-intelligence` edge function
+  reads the target row with the caller's JWT, so intelligence is owner-scoped.
 - `/scan-card` captures the aligned live video frame directly to an in-memory
   JPEG. It never launches the native camera app or saves to the device gallery.
   Raw evidence is stored in the private `card-scans` bucket; confidence below
@@ -106,7 +134,10 @@ See `SLABVAULT.md` for the full architecture, security model, and verification. 
 
 ## Auth
 
-A bundled `/login` screen signs admins in; `AuthProvider` verifies
-`is_admin(auth.uid())` and `ProtectedAdminRoute` gates `/dashboard`, `/slabs`,
-`/slabs/new`, `/slabs/:id`, and `/scan-card`. This frontend guard is defense in depth on top of
-the authoritative RLS + edge-function admin checks.
+Bundled `/login` and `/signup` screens handle verified customers and admins.
+`AuthProvider` establishes the session and resolves `is_admin(auth.uid())`.
+`ProtectedUserLayout` gates the owner-scoped routes (`/scan-card`, `/cards`,
+`/cards/:id`, `/slabs`, `/slabs/new`, `/slabs/:id`); `ProtectedAdminLayout` gates
+`/dashboard`. These frontend guards are defense in depth on top of the
+authoritative RLS policies and edge-function auth checks (owner-scoped for
+customer data, admin-only for the eBay/marketplace operations).

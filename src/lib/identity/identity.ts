@@ -151,11 +151,42 @@ function normCert(value: string): string {
  * raw copies of the same card are different physical items. Grade is NEVER part
  * of the key — it belongs to pricing tiers and specimen records.
  */
-export function specimenKey(identity: CardIdentity, inventoryCode?: string | null): string {
+export type SpecimenKeyResult =
+  | { status: "certified"; key: string }
+  | { status: "raw"; key: string }
+  | { status: "incomplete"; key: null; reason: string };
+
+/**
+ * Resolve the physical specimen key EXPLICITLY. A certified specimen keys by
+ * card hash + grader + normalized certification number; a raw specimen keys by
+ * card hash + inventory code. When BOTH discriminators are absent the result is
+ * `incomplete` with `key: null` — it must NEVER collapse to the bare card hash,
+ * because that would silently give two different physical specimens the same
+ * key. Callers decide how to handle the incomplete case.
+ */
+export function specimenKeyResult(identity: CardIdentity, inventoryCode?: string | null): SpecimenKeyResult {
   const cert = normCert(identity.certification_number);
-  if (cert) return `${identity.hash}:${normText(identity.grader)}:${cert}`;
+  if (cert) return { status: "certified", key: `${identity.hash}:${normText(identity.grader)}:${cert}` };
   const code = (inventoryCode ?? "").trim().toUpperCase();
-  return code ? `${identity.hash}:${code}` : identity.hash;
+  if (code) return { status: "raw", key: `${identity.hash}:${code}` };
+  return {
+    status: "incomplete",
+    key: null,
+    reason:
+      "A specimen key requires a certification number (certified) or an inventory code (raw); neither was provided, so the physical specimen is not uniquely identifiable.",
+  };
+}
+
+/**
+ * The physical specimen key as a string. THROWS when the specimen cannot be
+ * uniquely keyed (no certification number and no inventory code) rather than
+ * collapsing multiple specimens onto the shared card hash. Use
+ * {@link specimenKeyResult} to handle the incomplete case without throwing.
+ */
+export function specimenKey(identity: CardIdentity, inventoryCode?: string | null): string {
+  const result = specimenKeyResult(identity, inventoryCode);
+  if (result.status === "incomplete") throw new Error(`specimenKey: ${result.reason}`);
+  return result.key;
 }
 
 /** Build the full canonical identity object (including the hash). */

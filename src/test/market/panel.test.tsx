@@ -21,19 +21,34 @@ const data: MarketIntelligence = {
   lowest_active_cents: 99900,
   liquidity: 0.6, confidence: 0.5,
   provenance: [{ source: "ebay_sold", query: "Charizard PSA 10", retrieved_at: "2026-07-15T00:00:00Z", candidate_count: 3, exact_count: 1, url: null }],
+  sources: [
+    { source: "pricecharting", status: "success", query: "Charizard", retrieved_at: "2026-07-15T00:00:00Z", candidate_count: 2, exact_count: 2, retryable: false, message: "2 results from PriceCharting." },
+    { source: "ebay_active", status: "success", query: "Charizard PSA 10", retrieved_at: "2026-07-15T00:00:00Z", candidate_count: 1, exact_count: 1, retryable: false, message: "1 result from eBay active listings." },
+    { source: "ebay_sold", status: "not_configured", query: "Charizard PSA 10", retrieved_at: "2026-07-15T00:00:00Z", candidate_count: 0, exact_count: 0, retryable: false, message: "Connected-seller sales is not configured." },
+  ],
+  identity_completeness: { status: "complete", missing: [], notes: [] },
   generated_at: "2026-07-15T00:00:00Z",
 };
 
 afterEach(cleanup);
 
 describe("MarketIntelligencePanel", () => {
-  it("renders the five sections", () => {
+  it("renders the six sections including provider status", () => {
     render(<MarketIntelligencePanel data={data} isLoading={false} error={null} />);
     expect(screen.getByText(/Market Summary/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Verified Sales/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/Current Listings/i)).toBeInTheDocument();
     expect(screen.getByText(/PriceCharting Grade Tiers/i)).toBeInTheDocument();
+    expect(screen.getByText(/Provider Status/i)).toBeInTheDocument();
     expect(screen.getByText(/Sources/i)).toBeInTheDocument();
+  });
+
+  it("surfaces an unconfigured connected-seller source instead of hiding it", () => {
+    render(<MarketIntelligencePanel data={data} isLoading={false} error={null} />);
+    // The connected-seller row is present AND labeled Not configured — never a
+    // blank that reads like "zero sales".
+    expect(screen.getByText(/Connected seller sales/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Not configured/i).length).toBeGreaterThanOrEqual(1);
   });
 
   it("keeps asking prices out of sold evidence — the listing is labeled asking, not sold", () => {
