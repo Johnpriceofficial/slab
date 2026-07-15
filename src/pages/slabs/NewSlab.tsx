@@ -125,7 +125,13 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // rather than re-hydrating a stale photo.
   useEffect(() => {
     const captured = consumeCameraCapture();
-    if (captured) setFront(captured);
+    if (captured) {
+      setFront(captured.image);
+      // The universal scanner already analyzed this capture to classify it as a
+      // slab; reuse that result so the proposal panel appears without a second
+      // AI call. The operator still reviews and applies every field.
+      if (captured.analysis) setAnalysis(captured.analysis);
+    }
   }, []);
 
   const NUMERIC_VAL_FIELDS: ReadonlyArray<keyof typeof EMPTY_VALUATION> = ["final", "quick", "replacement", "guide"];

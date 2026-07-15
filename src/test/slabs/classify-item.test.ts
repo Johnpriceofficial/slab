@@ -47,4 +47,13 @@ describe("classifyScannedItem", () => {
     const c = classifyScannedItem(result({ grader: { value: null, confidence: 0, readable: false } }));
     expect(c.type).toBe("raw_card");
   });
+
+  it("is confident about a raw card only when the card itself was readable", () => {
+    const legible = classifyScannedItem(result({ card_name: { value: "Charizard", confidence: 0.95, readable: true } }));
+    const blank = classifyScannedItem(result({}));
+    expect(legible.type).toBe("raw_card");
+    expect(legible.confidence).toBeGreaterThan(0.75); // clear card, no label → confidently raw
+    expect(blank.type).toBe("raw_card");
+    expect(blank.confidence).toBeLessThan(0.75); // nothing readable → operator chooses
+  });
 });
