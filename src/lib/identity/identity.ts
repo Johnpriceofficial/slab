@@ -140,6 +140,24 @@ function priceChartingUrl(productId: string): string {
   return productId ? `https://www.pricecharting.com/offers?product=${encodeURIComponent(productId)}` : "";
 }
 
+function normCert(value: string): string {
+  return value.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+}
+
+/**
+ * The PHYSICAL specimen key — distinct from the card identity hash. A certified
+ * specimen is keyed by its card hash + grader + certification number; an
+ * uncertified (raw) copy is keyed by its card hash + inventory code, since two
+ * raw copies of the same card are different physical items. Grade is NEVER part
+ * of the key — it belongs to pricing tiers and specimen records.
+ */
+export function specimenKey(identity: CardIdentity, inventoryCode?: string | null): string {
+  const cert = normCert(identity.certification_number);
+  if (cert) return `${identity.hash}:${normText(identity.grader)}:${cert}`;
+  const code = (inventoryCode ?? "").trim().toUpperCase();
+  return code ? `${identity.hash}:${code}` : identity.hash;
+}
+
 /** Build the full canonical identity object (including the hash). */
 export async function buildIdentity(input: IdentityInput): Promise<CardIdentity> {
   const productId = text(input.pricecharting_product_id);
