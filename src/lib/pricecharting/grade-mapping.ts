@@ -15,7 +15,13 @@
  *   - bgs-10-price       -> BGS 10
  *   - condition-17-price -> CGC 10
  *   - condition-18-price -> SGC 10
- * Never substitute PSA 10 / CGC 10 / SGC 10 / BGS 10 for one another.
+ *   - condition-19-price -> CGC 10 Pristine   (distinct from ordinary CGC 10)
+ *   - condition-20-price -> BGS 10 Black Label (distinct from ordinary BGS 10)
+ *   - condition-21-price -> TAG 10
+ *   - condition-22-price -> ACE 10
+ * Never substitute PSA 10 / CGC 10 / SGC 10 / BGS 10 for one another, and never
+ * substitute an ordinary grade-10 value for its distinct top-designation tier
+ * (CGC 10 vs CGC 10 Pristine, BGS 10 vs BGS 10 Black Label).
  */
 
 import { convertPenniesToDollars, type Pennies } from "./money";
@@ -73,6 +79,12 @@ export function buildAvailableValues(product: Product, category: PriceCategory):
         bgs_10: dollars(px(product, "bgs-10-price")),
         cgc_10: dollars(px(product, "condition-17-price")),
         sgc_10: dollars(px(product, "condition-18-price")),
+        // Distinct top-designation tiers — their OWN fields, never the ordinary
+        // grade-10 value. Absent → null (dropped by callers), never substituted.
+        cgc_10_pristine: dollars(px(product, "condition-19-price")),
+        bgs_10_black_label: dollars(px(product, "condition-20-price")),
+        tag_10: dollars(px(product, "condition-21-price")),
+        ace_10: dollars(px(product, "condition-22-price")),
       };
     case "comic":
       return {
@@ -190,11 +202,31 @@ function pickComicField(grade: number): FieldPick {
 }
 
 /** Normalize a grade designation label to a canonical token. */
-export function normalizeDesignation(gradeLabel: string | null | undefined): "pristine" | "gem_mint" | "perfect" | null {
+export function normalizeDesignation(gradeLabel: string | null | undefined): "pristine" | "gem_mint" | "perfect" | "black_label" | null {
   const l = (gradeLabel ?? "").toLowerCase();
+  if (/black\s*label/.test(l)) return "black_label";
   if (l.includes("perfect")) return "perfect";
   if (l.includes("pristine")) return "pristine";
   if (l.includes("gem")) return "gem_mint";
+  return null;
+}
+
+/**
+ * The DISTINCT top-designation field for a (company, grade, designation), when
+ * PriceCharting exposes one. These are separate columns from the ordinary
+ * grade-10 field — CGC 10 Pristine (condition-19) is NOT CGC 10 (condition-17),
+ * and BGS 10 Black Label (condition-20) is NOT BGS 10 (bgs-10). Returns null when
+ * there is no distinct designation field (the caller then keeps the ordinary tier
+ * as a clearly-labeled COMPATIBLE value, never an exact one).
+ */
+function designationFieldFor(
+  company: GradingCompany | undefined,
+  grade: number,
+  designation: ReturnType<typeof normalizeDesignation>,
+): string | null {
+  if (!eq(grade, 10)) return null;
+  if (company === "CGC" && designation === "pristine") return "condition-19-price";
+  if (company === "BGS" && designation === "black_label") return "condition-20-price";
   return null;
 }
 
@@ -210,21 +242,30 @@ function fieldToCardTier(field: string | null): { key: string | null; label: str
     case "bgs-10-price": return { key: "bgs_10", label: "BGS 10" };
     case "condition-17-price": return { key: "cgc_10", label: "CGC 10" };
     case "condition-18-price": return { key: "sgc_10", label: "SGC 10" };
+    case "condition-19-price": return { key: "cgc_10_pristine", label: "CGC 10 Pristine" };
+    case "condition-20-price": return { key: "bgs_10_black_label", label: "BGS 10 Black Label" };
+    case "condition-21-price": return { key: "tag_10", label: "TAG 10" };
+    case "condition-22-price": return { key: "ace_10", label: "ACE 10" };
     default: return { key: null, label: null };
   }
 }
 
 /**
- * Does the returned tier genuinely represent the requested designation? The
- * PriceCharting API's grade-10 tiers carry NO sub-designation, so CGC 10
- * (condition-17-price) is treated as the ordinary/Gem-Mint tier: it is exact for
- * a plain or Gem-Mint request, but NOT for a Pristine or Perfect slab — those are
- * higher sub-grades the ordinary tier does not represent.
+ * Does the returned tier genuinely represent the requested designation?
+ *
+ * When PriceCharting exposes the DISTINCT designation column, that column IS the
+ * exact tier: condition-19-price is the exact CGC 10 Pristine tier, and
+ * condition-20-price is the exact BGS 10 Black Label tier. The ordinary grade-10
+ * columns carry no sub-designation, so condition-17-price (CGC 10) is exact for a
+ * plain or Gem-Mint request but only COMPATIBLE for a Pristine/Perfect slab — it
+ * is never promoted to the distinct designation tier.
  */
 function isDesignationExact(field: string | null, designation: ReturnType<typeof normalizeDesignation>): boolean {
   if (designation === null) return true; // no special designation requested
+  if (designation === "pristine" && field === "condition-19-price") return true; // exact CGC 10 Pristine
+  if (designation === "black_label" && field === "condition-20-price") return true; // exact BGS 10 Black Label
   if (designation === "gem_mint" && field === "condition-17-price") return true; // CGC 10 == Gem Mint 10
-  return false; // pristine / perfect never map to an ordinary API tier
+  return false; // an ordinary grade-10 column never represents a distinct designation
 }
 
 /**
@@ -248,6 +289,10 @@ export function getValueForRequestedGrade(
   const noTier = { selected_tier_key: null, selected_tier_label: null, designation_requested: designationLabel, designation_exact: false };
 
   // Ungraded request → loose-price (the base ungraded value) for card/comic/coin.
+  // NB: a null grade here is a REFERENCE lookup of the ungraded tier, not a
+  // judgement about a slab. The "a graded slab is never valued as raw" invariant
+  // lives in the valuation layer (deriveValuationProvenance), which knows it is
+  // pricing a specific graded specimen rather than answering a reference query.
   if (grade === null || grade === undefined) {
     const field = "loose-price";
     const pennies = px(product, field);
@@ -268,8 +313,19 @@ export function getValueForRequestedGrade(
   }
 
   let pick: FieldPick;
-  if (category === "card") pick = pickCardField(gradingCompany, grade);
-  else if (category === "comic") pick = pickComicField(grade);
+  if (category === "card") {
+    pick = pickCardField(gradingCompany, grade);
+    // Designation UPGRADE: when the product actually carries the DISTINCT
+    // top-designation column (CGC 10 Pristine = condition-19-price, BGS 10 Black
+    // Label = condition-20-price), select it as the EXACT tier instead of the
+    // ordinary grade-10 column. Absent → keep the ordinary column as a clearly
+    // labeled COMPATIBLE value; a designation value is never fabricated.
+    const desigField = designationFieldFor(gradingCompany, grade, designation);
+    if (desigField && px(product, desigField) !== null) {
+      const t = fieldToCardTier(desigField);
+      pick = { field: desigField, meaning: t.label, companySpecific: true, warnings: [] };
+    }
+  } else if (category === "comic") pick = pickComicField(grade);
   else {
     // Coin / generic: no documented grade→field mapping. Never guess.
     return {

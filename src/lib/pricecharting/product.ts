@@ -6,7 +6,16 @@
 import type { Pennies } from "./money";
 import type { Product, RawProduct } from "./types";
 
-/** All price-bearing fields we recognize (integer pennies). */
+/**
+ * All price-bearing fields we recognize (integer pennies).
+ *
+ * PriceCharting keeps adding graded "condition-NN" columns beyond what its docs
+ * list. Anything NOT in this allowlist is silently dropped by `normalizeProduct`,
+ * which is exactly why CGC 10 Pristine (condition-19-price) never reached the
+ * valuation before — the list stopped at condition-18. The documented+observed
+ * numbering is: 17 = CGC 10, 18 = SGC 10, 19 = CGC 10 Pristine, 20 = BGS 10 Black
+ * Label, 21 = TAG 10, 22 = ACE 10. See grade-mapping.ts for the field→tier map.
+ */
 export const KNOWN_PRICE_FIELDS = [
   "loose-price",
   "cib-price",
@@ -17,6 +26,10 @@ export const KNOWN_PRICE_FIELDS = [
   "bgs-10-price",
   "condition-17-price",
   "condition-18-price",
+  "condition-19-price",
+  "condition-20-price",
+  "condition-21-price",
+  "condition-22-price",
   "retail-loose-buy",
   "retail-loose-sell",
   "retail-cib-buy",

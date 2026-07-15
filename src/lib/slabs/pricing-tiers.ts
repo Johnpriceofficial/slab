@@ -93,16 +93,18 @@ export const CARD_TIER_META: ReadonlyArray<TierMeta> = [
 ];
 
 /**
- * Distinct top-designation tiers (e.g. "CGC 10 Pristine/Perfect"). These are modelled as
- * their OWN tiers, separate from the ordinary grade-10 tier. The connected
- * PriceCharting API has no field for them, so their value is null unless the
- * value map explicitly carries a distinct designation value — we never synthesize
- * one by copying the ordinary grade-10 value.
+ * Distinct top-designation tiers (e.g. "CGC 10 Pristine", "BGS 10 Black Label").
+ * These are modelled as their OWN tiers, separate from the ordinary grade-10
+ * tier. PriceCharting exposes a distinct column for some of them (CGC 10 Pristine
+ * = condition-19-price, BGS 10 Black Label = condition-20-price); for those the
+ * value map carries a real distinct value. For the rest the value stays null —
+ * we NEVER synthesize one by copying the ordinary grade-10 value.
  */
 export const DESIGNATION_TIER_META: ReadonlyArray<TierMeta> = [
   { key: "cgc_10_pristine", label: "CGC 10 Pristine", grader: "CGC", grade: "10", designation: "Pristine" },
   { key: "cgc_10_perfect", label: "CGC 10 Perfect", grader: "CGC", grade: "10", designation: "Perfect" },
   { key: "bgs_10_pristine", label: "BGS 10 Pristine", grader: "BGS", grade: "10", designation: "Pristine" },
+  { key: "bgs_10_black_label", label: "BGS 10 Black Label", grader: "BGS", grade: "10", designation: "Black Label" },
 ];
 
 /** "PRISTINE" → "Pristine"; leaves numbers/short codes intact. */
@@ -134,7 +136,7 @@ export function exactTierKey(id: TierIdentity): string | null {
   const base = graderTenKey(id.grader, id.grade);
   if (!base) return null;
   const desig = normalizeDesignation(id.grade_label);
-  if (desig === "pristine" || desig === "perfect") {
+  if (desig === "pristine" || desig === "perfect" || desig === "black_label") {
     const designationKey = `${base}_${desig}`;
     return DESIGNATION_TIER_META.some((m) => m.key === designationKey) ? designationKey : base;
   }
