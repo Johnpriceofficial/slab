@@ -52,11 +52,25 @@ function toStr(v: unknown): string | null {
   return s === "" ? null : s;
 }
 
+/** Matches any graded condition column, including future ones not yet mapped. */
+export const CONDITION_FIELD_RE = /^condition-\d+-price$/;
+
 /** Convert a raw API product into the normalized `Product`. */
 export function normalizeProduct(raw: RawProduct): Product {
   const raw_prices: Record<string, Pennies | null> = {};
   for (const field of KNOWN_PRICE_FIELDS) {
     if (field in raw) raw_prices[field] = toPennies(raw[field]);
+  }
+  // Preserve ANY graded condition-NN-price column, including future ones not yet
+  // in KNOWN_PRICE_FIELDS, so a newly-added tier is never silently dropped again
+  // (as condition-19 = CGC 10 Pristine once was). Unknown condition IDs are kept
+  // as raw values only — the authoritative grade map (grade-mapping.ts) maps just
+  // the known IDs (17–22) to tiers, so an unmapped condition field is preserved
+  // but NEVER treated as a known/exact tier.
+  for (const key of Object.keys(raw)) {
+    if (CONDITION_FIELD_RE.test(key) && !(key in raw_prices)) {
+      raw_prices[key] = toPennies(raw[key]);
+    }
   }
 
   const id = toStr(raw.id);

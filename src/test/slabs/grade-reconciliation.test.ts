@@ -32,9 +32,19 @@ describe("grade reconciliation — numeric + designation, not literal string", (
     expect(r.warning).toBeNull();
   });
 
-  it("also reconciles the reversed order and a 'Gem Mint 10' reading", () => {
-    expect(reconcileGradeReadings(field("Pristine 10"), field("10")).grade.value).toBe("10");
-    expect(reconcileGradeReadings(field("10"), field("Gem Mint 10")).grade_label_designation).toBe("GEM MINT");
+  it("(4) '10' + 'Gem Mint 10' reconciles to 10 + GEM MINT, no conflict", () => {
+    const r = reconcileGradeReadings(field("10"), field("Gem Mint 10"));
+    expect(r.grade.readable).toBe(true);
+    expect(r.grade.value).toBe("10");
+    expect(r.grade_label_designation).toBe("GEM MINT");
+    expect(r.warning).toBeNull();
+  });
+
+  it("also reconciles the reversed order ('Pristine 10' + '10')", () => {
+    const r = reconcileGradeReadings(field("Pristine 10"), field("10"));
+    expect(r.grade.value).toBe("10");
+    expect(r.grade_label_designation).toBe("PRISTINE");
+    expect(r.warning).toBeNull();
   });
 
   it("(4) '9.5' + 'Pristine 10' remains a REAL conflict (grade cleared)", () => {
