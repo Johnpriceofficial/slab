@@ -22,6 +22,8 @@ export interface ItemClassification {
 
 /** Grading-company fields that only appear on a graded slab's holder label. */
 const GRADED_SIGNAL_FIELDS = ["grader", "grade", "certification_number"] as const;
+/** Card-identity fields that read on ANY card, graded or raw. */
+const IDENTITY_FIELDS = ["card_name", "set", "card_number"] as const;
 
 export function classifyScannedItem(analysis: AnalyzeResult): ItemClassification {
   const signals: string[] = [];
@@ -34,20 +36,26 @@ export function classifyScannedItem(analysis: AnalyzeResult): ItemClassification
     }
   }
 
-  if (signals.length === 0) {
-    // No grading evidence at all — looks like a raw card. Confidence scales with
-    // how sure the model was that the fields it DID read are complete; absent a
-    // better signal, a moderate default.
-    return { type: "raw_card", confidence: 0.6, signals };
+  if (signals.length > 0) {
+    // Some grading evidence — a graded slab. Stronger with more signals present
+    // and higher per-field confidence.
+    const coverage = signals.length / GRADED_SIGNAL_FIELDS.length;
+    const avgConfidence = confidenceSum / signals.length;
+    return {
+      type: "graded_slab",
+      confidence: Math.min(1, 0.5 + 0.5 * coverage * avgConfidence + 0.15 * (signals.length - 1)),
+      signals,
+    };
   }
 
-  // Some grading evidence — a graded slab. Stronger with more signals present
-  // and higher per-field confidence.
-  const coverage = signals.length / GRADED_SIGNAL_FIELDS.length;
-  const avgConfidence = confidenceSum / signals.length;
-  return {
-    type: "graded_slab",
-    confidence: Math.min(1, 0.5 + 0.5 * coverage * avgConfidence + 0.15 * (signals.length - 1)),
-    signals,
-  };
+  // No grading evidence at all. Whether that's a CONFIDENT raw card or an
+  // uncertain read depends on whether the photo was otherwise legible: a clearly
+  // readable card with no grading label is strong evidence of a raw card; a
+  // photo where nothing read at all is genuinely undecidable → surfaced for the
+  // operator to choose (via the route threshold).
+  const identityReadable = IDENTITY_FIELDS.some((key) => {
+    const field = analysis.proposed[key];
+    return field?.readable && field.value;
+  });
+  return { type: "raw_card", confidence: identityReadable ? 0.85 : 0.4, signals };
 }
