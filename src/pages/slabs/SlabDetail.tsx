@@ -18,6 +18,7 @@ import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2, AlertT
 import { verifiedBlockers } from "@/lib/slabs/save-slab";
 import { useAuth } from "@/auth/AuthProvider";
 import { SlabCompsSection } from "@/components/slabs/SlabCompsSection";
+import { MarketIntelligenceSection } from "@/components/market/MarketIntelligenceSection";
 import { SlabAdminActions } from "@/components/slabs/SlabAdminActions";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
 import { PriceChartingMarketplacePanel } from "@/components/slabs/PriceChartingMarketplacePanel";
@@ -247,6 +248,8 @@ export default function SlabDetail() {
 
       {/* Comps — CRUD + stats + operator-approved Final Value */}
       <SlabCompsSection slab={slab} />
+
+      <MarketIntelligenceSection request={{ slab_id: slab.id }} />
 
       <SlabEvidencePanel slab={slab} />
 
