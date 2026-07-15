@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, FlipHorizontal2, Layers, Loader2, RotateCcw, ShieldAlert, Sparkles, SquareStack } from "lucide-react";
+import { Camera, FlipHorizontal2, Layers, Loader2, RotateCcw, ShieldAlert, Sparkles, SquareStack, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -7,21 +7,14 @@ import { computeSourceCrop, outputSize } from "@/lib/cards/scanner";
 import { createSlabImageState, releaseSlabImageState, type SlabImageState } from "@/lib/slabs/image-state";
 import { stageCameraCapture } from "@/lib/slabs/camera-capture";
 import { analyzeSlab } from "@/lib/slabs/data";
-import { scanCard } from "@/lib/cards/api";
-import { classifyScannedItem } from "@/lib/slabs/classify-item";
+import { stageRawCard, rawIdentityGaps } from "@/lib/cards/stage-raw";
+import { classifyScannedItem, type ItemType } from "@/lib/slabs/classify-item";
 import { decideIntakeRoute } from "@/lib/slabs/intake-route";
+import { slabBackRequirement, canSkipBack } from "@/lib/slabs/back-capture";
 import type { AnalyzeResult } from "@/server/analyze-slab/handler";
 
-type CameraState = "starting" | "ready" | "processing" | "error";
-
+type Phase = "starting" | "camera" | "busy" | "review" | "error";
 const SLAB_INTAKE_ROUTE = "/slabs/new";
-
-/** A capture awaiting a manual raw/slab decision (classification was uncertain). */
-interface PendingDecision {
-  image: SlabImageState;
-  analysis: AnalyzeResult | null;
-  reason: string;
-}
 
 function errorMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "SecurityError")) {
@@ -32,15 +25,16 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Universal "Scan Item" capture device.
+ * Universal "Scan Item" scanner with a front/back workflow.
  *
- * One capture, one analysis: the frame is normalized, sent to the server-side
- * analyzer, and CLASSIFIED as a graded slab or a raw card. A confident graded
- * slab is staged (image + analysis) and handed to /slabs/new — reusing the whole
- * Add-a-Slab pipeline with no second AI call. A confident raw card goes straight
- * into the raw inventory (R-code assigned server-side). When the model can't
- * decide — or analysis is unavailable — the operator picks: Raw Card / Slab /
- * Retake. This is the single permanent entry point for the whole system.
+ * Capture the front → analyze once → classify. A graded slab may require or
+ * recommend the back (unreadable cert, low confidence, or disagreeing reads); a
+ * raw card offers the back for condition/verification. The back can be captured,
+ * uploaded, or skipped (when permitted); adding or replacing it triggers ONE
+ * combined reanalysis, and unchanged images are never analyzed twice. A graded
+ * item stages both images + the analysis into /slabs/new (no repeat call); a raw
+ * item is created from the SAME extraction with no second model request.
+ * Captures survive analysis/quota failures and route changes.
  */
 export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => void }) {
   const navigate = useNavigate();
@@ -48,13 +42,21 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
   const frameRef = useRef<HTMLDivElement>(null);
   const guideRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const backInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // The (front,back) File pair the current analysis was computed from — so the
+  // same unchanged images are never analyzed twice.
+  const analyzedRef = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
+
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
-  const [cameraState, setCameraState] = useState<CameraState>("starting");
+  const [phase, setPhase] = useState<Phase>("starting");
   const [cameraError, setCameraError] = useState("");
-  const [captureError, setCaptureError] = useState("");
-  const [progress, setProgress] = useState("");
-  const [pending, setPending] = useState<PendingDecision | null>(null);
+  const [busyLabel, setBusyLabel] = useState("");
+  const [front, setFront] = useState<SlabImageState | null>(null);
+  const [back, setBack] = useState<SlabImageState | null>(null);
+  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const [override, setOverride] = useState<ItemType | null>(null);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -63,7 +65,7 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
 
   const startCamera = useCallback(async () => {
     stopCamera();
-    setCameraState("starting");
+    setPhase("starting");
     setCameraError("");
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("This browser does not support live camera scanning.");
@@ -76,10 +78,10 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-      setCameraState("ready");
+      setPhase("camera");
     } catch (error) {
       setCameraError(errorMessage(error));
-      setCameraState("error");
+      setPhase("error");
     }
   }, [facingMode, stopCamera]);
 
@@ -108,75 +110,142 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
     return blob;
   }, []);
 
-  // Graded slab: hand the image AND its analysis to /slabs/new (no re-analysis).
-  const routeToSlab = (image: SlabImageState, analysis: AnalyzeResult | null) => {
-    stageCameraCapture(image, analysis);
+  // Analyze the current pair, but only if it changed since the last run — the
+  // same unchanged images are never analyzed twice. A failure (e.g. quota) never
+  // discards the captured images.
+  const analyzePair = useCallback(async (nextFront: SlabImageState, nextBack: SlabImageState | null, force = false) => {
+    if (!force && analyzedRef.current.front === nextFront.file && analyzedRef.current.back === (nextBack?.file ?? null)) {
+      return;
+    }
+    setPhase("busy");
+    setBusyLabel(nextBack ? "Reconciling front and back…" : "Analyzing item…");
+    setAnalysisError("");
+    try {
+      const result = await analyzeSlab(
+        { blob: nextFront.file, mime: nextFront.file.type || "image/jpeg" },
+        nextBack ? { blob: nextBack.file, mime: nextBack.file.type || "image/jpeg" } : null,
+      );
+      if (result.status === "success") {
+        setAnalysis(result);
+        analyzedRef.current = { front: nextFront.file, back: nextBack?.file ?? null };
+      } else {
+        setAnalysis(null);
+        setAnalysisError(result.message);
+      }
+    } catch (error) {
+      setAnalysis(null);
+      setAnalysisError(errorMessage(error));
+    } finally {
+      setPhase("review");
+    }
+  }, []);
+
+  const captureFront = async () => {
+    if (phase !== "camera") return;
+    setPhase("busy");
+    setBusyLabel("Capturing…");
+    try {
+      const blob = await captureBlob();
+      const { image, error } = await createSlabImageState(blob, { fallbackName: "front.jpg" });
+      if (error || !image) throw new Error(error ?? "The captured photo could not be prepared.");
+      setFront(image);
+      setBack(null);
+      setOverride(null);
+      analyzedRef.current = { front: null, back: null };
+      await analyzePair(image, null);
+    } catch (error) {
+      toast.error(errorMessage(error));
+      setPhase("camera");
+    }
+  };
+
+  const addBack = async (image: SlabImageState) => {
+    releaseSlabImageState(back);
+    setBack(image);
+    await analyzePair(front!, image); // one combined reanalysis
+  };
+
+  const captureBack = async () => {
+    setPhase("busy");
+    setBusyLabel("Capturing back…");
+    try {
+      const blob = await captureBlob();
+      const { image, error } = await createSlabImageState(blob, { fallbackName: "back.jpg" });
+      if (error || !image) throw new Error(error ?? "The captured photo could not be prepared.");
+      await addBack(image);
+    } catch (error) {
+      toast.error(errorMessage(error));
+      setPhase("review");
+    }
+  };
+
+  const uploadBack = async (file: File) => {
+    setPhase("busy");
+    setBusyLabel("Preparing back…");
+    const { image, error } = await createSlabImageState(file, { fallbackName: "back.jpg" });
+    if (error || !image) {
+      toast.error(error ?? "Could not use that image.");
+      setPhase("review");
+      return;
+    }
+    await addBack(image);
+  };
+
+  const retakeFront = () => {
+    releaseSlabImageState(front);
+    releaseSlabImageState(back);
+    setFront(null);
+    setBack(null);
+    setAnalysis(null);
+    setAnalysisError("");
+    setOverride(null);
+    analyzedRef.current = { front: null, back: null };
+    setPhase("camera");
+  };
+
+  const retakeBack = async () => {
+    releaseSlabImageState(back);
+    setBack(null);
+    await analyzePair(front!, null); // back removed → reconcile front-only (one call)
+  };
+
+  // ── Routing ────────────────────────────────────────────────────────────────
+  const routeToSlab = () => {
+    stageCameraCapture(front!, back, analysis);
     stopCamera();
     toast.success("Graded slab — finish the details.");
     navigate(SLAB_INTAKE_ROUTE);
   };
 
-  // Raw card: create it through the proven raw pipeline (server assigns the
-  // R-code). Uncertain/duplicate results land in the review queue below.
-  const routeToRaw = async (image: SlabImageState) => {
-    setPending(null);
-    setCameraState("processing");
-    setProgress("Adding to raw inventory…");
+  const routeToRaw = async () => {
+    if (!analysis) {
+      toast.error("Couldn't read the card. Reanalyze, add the back, or file it as a slab.");
+      return;
+    }
+    const gaps = rawIdentityGaps(analysis);
+    if (gaps.length > 0) {
+      toast.error(`Still missing ${gaps.join(", ")} — capture the back or reanalyze.`);
+      return;
+    }
+    setPhase("busy");
+    setBusyLabel("Adding to raw inventory…");
     try {
-      const response = await scanCard(image.file);
-      releaseSlabImageState(image);
-      if (response.status === "added") toast.success(`${response.extraction?.card_name ?? "Raw card"} added to your inventory.`);
-      else if (response.status === "possible_duplicate") toast.warning("Possible duplicate — review it below.");
-      else if (response.status === "needs_review") toast.warning("Low confidence — review it below.");
-      else toast.info("Scan recorded.");
+      const card = await stageRawCard(analysis, { front: front!.file, back: back?.file ?? null });
+      toast.success(`${card.card_name} added as ${card.inventory_code}.`);
       onInventoryChange?.();
+      retakeFront(); // reset for the next scan; camera stays live
     } catch (error) {
       toast.error(errorMessage(error));
-    } finally {
-      setProgress("");
-      setCameraState("ready");
+      setPhase("review");
     }
   };
 
-  const handleCapture = async () => {
-    if (cameraState !== "ready") return;
-    setCameraState("processing");
-    setCaptureError("");
-    setProgress("Analyzing item…");
-    try {
-      const blob = await captureBlob();
-      const { image, error } = await createSlabImageState(blob, { fallbackName: "camera-capture.jpg" });
-      if (error || !image) throw new Error(error ?? "The captured photo could not be prepared.");
-
-      const analysis = await analyzeSlab({ blob: image.file, mime: image.file.type || "image/jpeg" }, null);
-      if (analysis.status !== "success") {
-        // Analysis unavailable (e.g. quota) — fall back to a manual choice.
-        setPending({ image, analysis: null, reason: analysis.message });
-        setCameraState("ready");
-        return;
-      }
-
-      const route = decideIntakeRoute(classifyScannedItem(analysis));
-      if (route === "slab") return routeToSlab(image, analysis);
-      if (route === "raw") return void routeToRaw(image);
-      setPending({ image, analysis, reason: "The item type wasn't clear from the photo." });
-      setCameraState("ready");
-    } catch (error) {
-      const message = errorMessage(error);
-      setCaptureError(message);
-      toast.error(message);
-      setCameraState("ready");
-    } finally {
-      setProgress("");
-    }
-  };
-
-  const retake = () => {
-    if (pending) releaseSlabImageState(pending.image);
-    setPending(null);
-  };
-
-  const busy = cameraState === "processing";
+  // ── Derived review state ────────────────────────────────────────────────────
+  const classification = analysis ? classifyScannedItem(analysis) : null;
+  const route = analysis ? decideIntakeRoute(classification!) : "choose";
+  const effectiveType: ItemType | null = override ?? (route === "slab" ? "graded_slab" : route === "raw" ? "raw_card" : null);
+  const backReq = analysis && effectiveType === "graded_slab" ? slabBackRequirement(analysis) : null;
+  const backBlocked = !!backReq && backReq.requirement === "required" && !back && !canSkipBack(backReq.requirement);
 
   return (
     <section className="relative overflow-hidden rounded-2xl bg-slate-950 text-white shadow-2xl sm:min-h-[680px]">
@@ -188,7 +257,7 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
           className="pointer-events-none absolute left-1/2 top-1/2 aspect-[5/7] h-[70%] max-h-[560px] -translate-x-1/2 -translate-y-1/2 rounded-[5%] border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.36)]"
         >
           <span className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/55 px-3 py-1 text-xs font-medium">
-            Align the card or slab inside the guide
+            {phase === "review" ? "Add the back, or file this item" : "Align the card or slab inside the guide"}
           </span>
           <i className="absolute -left-1 -top-1 h-10 w-10 rounded-tl-xl border-l-4 border-t-4 border-secondary" />
           <i className="absolute -right-1 -top-1 h-10 w-10 rounded-tr-xl border-r-4 border-t-4 border-secondary" />
@@ -200,57 +269,83 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
           <Button
             type="button" variant="outline" size="icon"
             className="border-white/40 bg-black/50 text-white hover:bg-black/70 hover:text-white"
-            onClick={() => setFacingMode((mode) => mode === "environment" ? "user" : "environment")}
-            disabled={busy}
+            onClick={() => setFacingMode((mode) => (mode === "environment" ? "user" : "environment"))}
+            disabled={phase === "busy"}
             aria-label="Flip camera"
           ><FlipHorizontal2 /></Button>
         </div>
 
-        {cameraState === "starting" && (
+        {phase === "starting" && (
           <div className="absolute inset-0 grid place-items-center bg-slate-950/80"><div className="text-center"><Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin" /><p>Starting camera…</p></div></div>
         )}
-        {cameraState === "error" && (
+        {phase === "error" && (
           <div className="absolute inset-0 grid place-items-center bg-slate-950 p-6 text-center">
             <div className="max-w-sm"><ShieldAlert className="mx-auto mb-3 h-10 w-10 text-amber-400" /><h2 className="text-xl font-bold">Camera unavailable</h2><p className="mt-2 text-sm text-white/70">{cameraError}</p><Button className="mt-5" onClick={() => void startCamera()}><RotateCcw /> Try again</Button></div>
           </div>
         )}
-
-        {busy && (
+        {phase === "busy" && (
           <div className="absolute inset-0 grid place-items-center bg-slate-950/70">
-            <div className="text-center"><Sparkles className="mx-auto mb-3 h-8 w-8 animate-pulse text-primary" /><p>{progress || "Working…"}</p></div>
+            <div className="text-center"><Sparkles className="mx-auto mb-3 h-8 w-8 animate-pulse text-primary" /><p>{busyLabel || "Working…"}</p></div>
           </div>
         )}
 
-        {/* Uncertain classification (or analysis unavailable): the operator decides. */}
-        {pending && !busy && (
-          <div className="absolute inset-x-3 bottom-3 rounded-2xl bg-white p-4 text-slate-900 shadow-2xl sm:left-1/2 sm:right-auto sm:w-[min(92%,560px)] sm:-translate-x-1/2">
-            <div className="flex items-start gap-3">
-              <img src={pending.image.previewUrl} alt="Captured item" className="h-28 w-20 rounded-lg object-cover shadow" />
-              <div className="min-w-0">
-                <h2 className="font-bold">Couldn't determine the item type</h2>
-                <p className="mt-1 text-sm text-slate-600">{pending.reason} Choose how to file it.</p>
-              </div>
-            </div>
-            <div className="mt-4 grid grid-cols-3 gap-2">
-              <Button variant="outline" onClick={() => void routeToRaw(pending.image)}><Layers className="mr-1 h-4 w-4" /> Raw Card</Button>
-              <Button onClick={() => routeToSlab(pending.image, pending.analysis)}><SquareStack className="mr-1 h-4 w-4" /> Slab</Button>
-              <Button variant="ghost" onClick={retake}><RotateCcw className="mr-1 h-4 w-4" /> Retake</Button>
-            </div>
-          </div>
-        )}
-
-        {cameraState !== "error" && !pending && !busy && (
+        {phase === "camera" && (
           <div className="absolute bottom-5 left-0 right-0 flex justify-center">
             <Button
               size="lg" className="h-16 rounded-full border-4 border-white bg-primary px-8 text-lg shadow-xl hover:bg-primary/90"
-              onClick={() => void handleCapture()} disabled={cameraState !== "ready"}
+              onClick={() => void captureFront()}
             ><Camera className="h-6 w-6" /> Scan item</Button>
           </div>
         )}
 
-        {captureError && !pending && (
-          <div role="alert" className="absolute bottom-24 left-4 right-4 rounded-xl border border-red-300/60 bg-red-950/90 p-3 text-center text-sm text-red-50 shadow-lg sm:left-1/2 sm:right-auto sm:w-[min(90%,520px)] sm:-translate-x-1/2">
-            {captureError}
+        {phase === "review" && front && (
+          <div className="absolute inset-x-3 bottom-3 max-h-[80%] overflow-y-auto rounded-2xl bg-white p-4 text-slate-900 shadow-2xl sm:left-1/2 sm:right-auto sm:w-[min(94%,600px)] sm:-translate-x-1/2">
+            <div className="flex items-start gap-3">
+              <div className="flex gap-1">
+                <img src={front.previewUrl} alt="Captured front" className="h-28 w-20 rounded-lg object-cover shadow" />
+                {back && <img src={back.previewUrl} alt="Captured back" className="h-28 w-20 rounded-lg object-cover shadow" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="font-bold">
+                  {effectiveType === "graded_slab" ? "Graded slab" : effectiveType === "raw_card" ? "Raw card" : "Couldn't determine the item type"}
+                </h2>
+                {analysisError ? (
+                  <p className="mt-1 text-sm text-amber-700">Couldn't analyze ({analysisError}) — your capture is kept. Choose the type, reanalyze, or add the back.</p>
+                ) : backReq && backReq.requirement !== "optional" ? (
+                  <p className={`mt-1 text-sm ${backReq.requirement === "required" ? "text-red-700" : "text-amber-700"}`}>{backReq.reason}</p>
+                ) : effectiveType === "raw_card" ? (
+                  <p className="mt-1 text-sm text-slate-600">Add the back to record condition (whitening, edges, surface) — optional.</p>
+                ) : (
+                  <p className="mt-1 text-sm text-slate-600">The front is enough. The back is optional.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Back controls */}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => void captureBack()}><Camera className="mr-1 h-4 w-4" /> {back ? "Recapture back" : "Capture back"}</Button>
+              <Button variant="outline" size="sm" onClick={() => backInputRef.current?.click()}><Upload className="mr-1 h-4 w-4" /> Upload back</Button>
+              {back && <Button variant="ghost" size="sm" onClick={() => void retakeBack()}>Remove back</Button>}
+              <Button variant="ghost" size="sm" onClick={() => void analyzePair(front, back, true)}><Sparkles className="mr-1 h-4 w-4" /> Reanalyze</Button>
+              <Button variant="ghost" size="sm" onClick={retakeFront}><RotateCcw className="mr-1 h-4 w-4" /> Retake front</Button>
+            </div>
+
+            {/* Type + route. Manual override is always available. */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+              <div className="flex gap-2">
+                <Button variant={effectiveType === "raw_card" ? "default" : "outline"} size="sm" onClick={() => setOverride("raw_card")}><Layers className="mr-1 h-4 w-4" /> Raw</Button>
+                <Button variant={effectiveType === "graded_slab" ? "default" : "outline"} size="sm" onClick={() => setOverride("graded_slab")}><SquareStack className="mr-1 h-4 w-4" /> Slab</Button>
+              </div>
+              {effectiveType === "graded_slab" ? (
+                <Button onClick={routeToSlab} disabled={backBlocked} title={backBlocked ? "Capture the back first" : undefined}>Continue to slab details</Button>
+              ) : effectiveType === "raw_card" ? (
+                <Button onClick={() => void routeToRaw()}>Add to raw inventory</Button>
+              ) : (
+                <span className="text-sm text-slate-500">Choose Raw or Slab to continue.</span>
+              )}
+            </div>
+            <input ref={backInputRef} type="file" accept="image/*" className="hidden" aria-label="Upload back image"
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadBack(f); }} />
           </div>
         )}
       </div>

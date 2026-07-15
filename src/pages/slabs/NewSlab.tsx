@@ -127,9 +127,11 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     const captured = consumeCameraCapture();
     if (captured) {
       setFront(captured.image);
-      // The universal scanner already analyzed this capture to classify it as a
-      // slab; reuse that result so the proposal panel appears without a second
-      // AI call. The operator still reviews and applies every field.
+      if (captured.back) setBack(captured.back);
+      // The universal scanner already analyzed this capture (front, and back when
+      // present) to classify it as a slab; reuse that combined result so the
+      // proposal panel appears without a second AI call. The operator still
+      // reviews and applies every field.
       if (captured.analysis) setAnalysis(captured.analysis);
     }
   }, []);

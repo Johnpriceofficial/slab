@@ -21,16 +21,25 @@ import type { AnalyzeResult } from "@/server/analyze-slab/handler";
 
 export interface StagedCapture {
   image: SlabImageState;
+  /** Optional back image captured during front/back intake. */
+  back: SlabImageState | null;
   /** The analysis computed at capture time, so the intake screen needn't re-run it. */
   analysis: AnalyzeResult | null;
 }
 
 let staged: StagedCapture | null = null;
 
-/** Stage a capture (and optionally its analysis) for the next intake mount. */
-export function stageCameraCapture(image: SlabImageState, analysis: AnalyzeResult | null = null): void {
-  if (staged && staged.image !== image) releaseSlabImageState(staged.image);
-  staged = { image, analysis };
+/** Stage a capture (front, optional back, optional analysis) for the next mount. */
+export function stageCameraCapture(
+  image: SlabImageState,
+  back: SlabImageState | null = null,
+  analysis: AnalyzeResult | null = null,
+): void {
+  if (staged) {
+    if (staged.image !== image) releaseSlabImageState(staged.image);
+    if (staged.back && staged.back !== back) releaseSlabImageState(staged.back);
+  }
+  staged = { image, back, analysis };
 }
 
 /**
@@ -48,8 +57,11 @@ export function peekCameraCapture(): StagedCapture | null {
   return staged;
 }
 
-/** Discard a staged capture that will never be consumed, releasing its URL. */
+/** Discard a staged capture that will never be consumed, releasing its URLs. */
 export function clearCameraCapture(): void {
-  if (staged) releaseSlabImageState(staged.image);
+  if (staged) {
+    releaseSlabImageState(staged.image);
+    releaseSlabImageState(staged.back);
+  }
   staged = null;
 }
