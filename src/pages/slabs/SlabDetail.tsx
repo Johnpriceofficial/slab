@@ -119,7 +119,8 @@ export default function SlabDetail() {
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">Inventory #{slab.inventory_number}</h1>
+            <h1 className="text-2xl font-bold">{slab.inventory_code ?? `#${slab.inventory_number}`}</h1>
+            <Badge variant="outline" title="Internal inventory number">#{slab.inventory_number}</Badge>
             {slab.verification_status && <Badge variant="outline">{slab.verification_status}</Badge>}
             {slab.archived_at && <Badge variant="outline" className="border-amber-500 text-amber-600">Archived</Badge>}
           </div>

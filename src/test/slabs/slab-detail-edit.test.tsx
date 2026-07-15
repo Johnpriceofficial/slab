@@ -38,6 +38,9 @@ vi.mock("@/components/ui/select", async () => {
 const draft: Slab = {
   id: "draft-1",
   inventory_number: 41,
+  inventory_prefix: "S",
+  inventory_sequence: 41,
+  inventory_code: "S0041",
   card_name: null,
   final_value_cents: null,
   quick_sale_value_cents: null,
