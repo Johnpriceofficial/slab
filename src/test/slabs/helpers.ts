@@ -35,6 +35,9 @@ function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: stri
   return {
     id: `slab-${num}`,
     inventory_number: num,
+    inventory_prefix: "S",
+    inventory_sequence: num,
+    inventory_code: `S${String(num).padStart(4, "0")}`,
     card_name: input.card_name,
     final_value_cents: input.final_value_cents,
     quick_sale_value_cents: input.quick_sale_value_cents,

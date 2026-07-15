@@ -113,6 +113,7 @@ export interface ColumnDef {
  * Final Value (index 2) must remain immediately after Card Name (index 1).
  */
 export const INVENTORY_TABLE_COLUMNS: ColumnDef[] = [
+  { key: "inventory_code", label: "ID", type: "text" },
   { key: "inventory_number", label: "Inventory #", type: "number" },
   { key: "card_name", label: "Card Name", type: "text" },
   { key: "final_value_cents", label: "Final Value", type: "currency" },
@@ -139,6 +140,7 @@ export const INVENTORY_TABLE_COLUMNS: ColumnDef[] = [
  * confidence so a value can be audited without inferring its source.
  */
 export const EXCEL_MASTER_COLUMNS: ColumnDef[] = [
+  { key: "inventory_code", label: "ID", type: "text" },
   { key: "inventory_number", label: "Inventory #", type: "number" },
   { key: "card_name", label: "Card Name", type: "text" },
   { key: "final_value_cents", label: "Final Value", type: "currency" },

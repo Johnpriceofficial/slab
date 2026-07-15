@@ -10,6 +10,7 @@ import type { MarketplaceInput, MarketplaceHandlerBody, MarketplaceSnapshot } fr
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import { buildPricingPersist } from "./pricing-tiers";
 import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
+import { parseInventoryQuery } from "./inventory-code";
 import { buildConfirmationPatch, confirmationEventType, isRetryableConfirmationError } from "./confirmation-patch";
 import type {
   SearchResponse,
@@ -175,9 +176,17 @@ export async function fetchSlabs(query: SlabQuery = {}): Promise<{ rows: Slab[];
 
   if (query.search && query.search.trim()) {
     const s = query.search.trim().replace(/[%,]/g, "");
-    q = q.or(
-      `card_name.ilike.%${s}%,certification_number.ilike.%${s}%,set_name.ilike.%${s}%,card_number.ilike.%${s}%`,
-    );
+    const filters = [
+      `card_name.ilike.%${s}%`,
+      `certification_number.ilike.%${s}%`,
+      `set_name.ilike.%${s}%`,
+      `card_number.ilike.%${s}%`,
+      // Public identifier: match the full code ("S0001") or its numeric portion.
+      `inventory_code.ilike.%${s.toUpperCase()}%`,
+    ];
+    const parsed = parseInventoryQuery(s);
+    if (parsed) filters.push(`inventory_sequence.eq.${parsed.sequence}`);
+    q = q.or(filters.join(","));
   }
   if (query.grader) q = q.eq("grader", query.grader);
   if (query.grade) q = q.eq("grade", query.grade);
@@ -205,6 +214,17 @@ export async function fetchAllSlabs(): Promise<Slab[]> {
     .select("*")
     .order("inventory_number", { ascending: true })
     .range(0, 9999);
+  if (error) throw error;
+  return (data ?? []) as Slab[];
+}
+
+/**
+ * Resolve a public inventory query ("S0001", "0001", "1") to the accessible
+ * slab(s) via the ownership-scoped RPC. Used for QR codes, deep links, exports,
+ * and Copilot lookups. Returns [] for free text or a non-slab prefix.
+ */
+export async function resolveSlabInventory(query: string): Promise<Slab[]> {
+  const { data, error } = await sb.rpc("resolve_slab_inventory", { p_query: query });
   if (error) throw error;
   return (data ?? []) as Slab[];
 }

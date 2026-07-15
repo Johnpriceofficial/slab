@@ -34,6 +34,9 @@ function slab(over: Partial<Slab>): Slab {
   return {
     id: "x",
     inventory_number: 1,
+    inventory_prefix: "S",
+    inventory_sequence: 1,
+    inventory_code: "S0001",
     card_name: "C",
     final_value_cents: null,
     quick_sale_value_cents: null,

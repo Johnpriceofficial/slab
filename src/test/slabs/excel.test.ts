@@ -7,6 +7,9 @@ function slab(n: number, over: Partial<Slab> = {}): Slab {
   return {
     id: `s${n}`,
     inventory_number: n,
+    inventory_prefix: "S",
+    inventory_sequence: n,
+    inventory_code: `S${String(n).padStart(4, "0")}`,
     card_name: `Card ${n}`,
     final_value_cents: 12500,
     quick_sale_value_cents: 10000,
@@ -71,8 +74,10 @@ describe("excel — structure & column order", () => {
     const ws = wb.getWorksheet("Master Inventory")!;
     const header = (ws.getRow(1).values as unknown[]).slice(1);
     expect(header).toEqual(EXCEL_MASTER_COLUMNS.map((c) => c.label));
-    expect(header[1]).toBe("Card Name");
-    expect(header[2]).toBe("Final Value");
+    // Final Value stays immediately after Card Name, regardless of the leading ID.
+    const cardIdx = header.indexOf("Card Name");
+    expect(header[cardIdx + 1]).toBe("Final Value");
+    expect(header[0]).toBe("ID");
     expect(header).toContain("Valuation Provenance");
   });
 
@@ -108,9 +113,10 @@ describe("excel — currency & sorting", () => {
   it("sorts inventory numerically ascending", () => {
     const wb = buildInventoryWorkbook([slab(3), slab(1), slab(2)], []);
     const ws = wb.getWorksheet("Master Inventory")!;
-    expect(ws.getRow(2).getCell(1).value).toBe(1);
-    expect(ws.getRow(3).getCell(1).value).toBe(2);
-    expect(ws.getRow(4).getCell(1).value).toBe(3);
+    const invCol = EXCEL_MASTER_COLUMNS.findIndex((c) => c.key === "inventory_number") + 1;
+    expect(ws.getRow(2).getCell(invCol).value).toBe(1);
+    expect(ws.getRow(3).getCell(invCol).value).toBe(2);
+    expect(ws.getRow(4).getCell(invCol).value).toBe(3);
   });
 });
 
@@ -147,8 +153,9 @@ describe("excel — edge cases", () => {
     const wb = buildInventoryWorkbook(shuffled, []);
     const ws = wb.getWorksheet("Master Inventory")!;
     expect(ws.rowCount).toBe(1001); // header + 1000
-    expect(ws.getRow(2).getCell(1).value).toBe(1);
-    expect(ws.getRow(1001).getCell(1).value).toBe(1000);
+    const invCol = EXCEL_MASTER_COLUMNS.findIndex((c) => c.key === "inventory_number") + 1;
+    expect(ws.getRow(2).getCell(invCol).value).toBe(1);
+    expect(ws.getRow(1001).getCell(invCol).value).toBe(1000);
   });
 });
 
