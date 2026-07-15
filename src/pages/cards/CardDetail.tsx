@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Archive, ArrowLeft, Check, Loader2, RotateCcw, Save } from "lucide-react";
 import { toast } from "sonner";
 import { PageHead } from "@/components/seo/PageHead";
+import { MarketIntelligenceSection } from "@/components/market/MarketIntelligenceSection";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,8 @@ export default function CardDetail() {
           <Card><CardHeader><CardTitle className="text-base">Evidence Status</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><p className="flex items-center gap-2"><Check className="text-green-600" /> Original capture preserved</p><p className="flex items-center gap-2"><Check className="text-green-600" /> Strict structured identification stored</p><p className="text-xs text-muted-foreground">Condition observations are visual estimates, not professional grading.</p></CardContent></Card>
         </div>
       </div>
+
+      <MarketIntelligenceSection request={{ card_id: card.id }} />
     </main>
   );
 }

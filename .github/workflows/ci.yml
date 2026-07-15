@@ -43,11 +43,13 @@ jobs:
           deno check --no-config --node-modules-dir=manual --no-remote
           supabase/functions/analyze-slab/index.ts
           supabase/functions/pricecharting-search/index.ts
+          supabase/functions/market-intelligence/index.ts
 
       - name: Rebuild edge bundles (must match committed output)
         run: |
           node scripts/build-pricecharting-edge-bundle.mjs
           node scripts/build-analyze-slab-edge-bundle.mjs
+          node scripts/build-market-intelligence-edge-bundle.mjs
           if ! git diff --quiet -- supabase/functions/_shared/*-bundle.js; then
             echo "::error::Edge bundle is stale — run the build:*-bundle scripts and commit the output."
             git --no-pager diff --stat -- supabase/functions/_shared/*-bundle.js
