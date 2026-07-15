@@ -231,7 +231,7 @@ function designationFieldFor(
 }
 
 /** Map a raw PriceCharting price field to a normalized card tier key. */
-function fieldToCardTier(field: string | null): { key: string | null; label: string | null } {
+export function fieldToCardTier(field: string | null): { key: string | null; label: string | null } {
   switch (field) {
     case "loose-price": return { key: "ungraded", label: "Ungraded" };
     case "cib-price": return { key: "grade_7_to_7_5", label: "Grade 7–7.5" };
@@ -459,4 +459,60 @@ function interpolateGrade(
   const ratio = (grade - lower.grade) / (upper.grade - lower.grade);
   const pennies = Math.round(lower.pennies + ratio * (upper.pennies - lower.pennies));
   return { pennies, lowerLabel: lower.label, upperLabel: upper.label };
+}
+
+/**
+ * The ONE authoritative card price-field → (grader, grade) list, used by the
+ * market-intelligence flow to expose EVERY supported PriceCharting card tier
+ * (not the 3 the old edge function hardcoded). Field order matches
+ * `buildAvailableValues`'s card branch; the display label comes from
+ * `fieldToCardTier` so the two maps can never drift.
+ *
+ * `grade` here is the numeric tier the field represents (a string, since the
+ * downstream `mapGradeToTier` takes strings). `grader` is set ONLY where the
+ * PriceCharting field is genuinely company-specific (the four grade-10 fields);
+ * the general tiers carry `grader: null` and must NEVER be relabeled as a
+ * grader-specific value. A general Grade 9 is not a PSA/CGC/BGS/SGC 9.
+ */
+const CARD_TIER_FIELD_SPECS: ReadonlyArray<{ field: string; grader: string | null; grade: string | null }> = [
+  { field: "loose-price", grader: null, grade: null }, // Ungraded
+  { field: "cib-price", grader: null, grade: "7" }, // Grade 7–7.5
+  { field: "new-price", grader: null, grade: "8" }, // Grade 8–8.5
+  { field: "graded-price", grader: null, grade: "9" }, // GENERAL Grade 9
+  { field: "box-only-price", grader: null, grade: "9.5" }, // Grade 9.5 (general)
+  { field: "manual-only-price", grader: "PSA", grade: "10" }, // PSA 10
+  { field: "bgs-10-price", grader: "BGS", grade: "10" }, // BGS 10
+  { field: "condition-17-price", grader: "CGC", grade: "10" }, // CGC 10
+  { field: "condition-18-price", grader: "SGC", grade: "10" }, // SGC 10
+];
+
+/** A single generic PriceCharting card tier for the market grade-tier table. */
+export interface PriceChartingCardTier {
+  grader: string | null;
+  grade: string | null;
+  /** The canonical human label (e.g. "PSA 10", "Grade 9 (general)"). */
+  grade_label: string;
+  /** Realized-value aggregate in CENTS, or null when the source omits the field. */
+  price_cents: number | null;
+}
+
+/**
+ * Build the full set of supported card grade tiers from a PriceCharting API
+ * product's raw price fields (values are integer CENTS as PriceCharting returns
+ * them). Absent/invalid fields yield `price_cents: null` — never 0, never a
+ * substituted value. This is the market-intelligence equivalent of
+ * `buildAvailableValues`, but keyed for grade-tier bucketing rather than the
+ * valuation display flow, and returns every one of the nine card fields.
+ */
+export function priceChartingCardTiers(
+  rawPrices: Record<string, number | null | undefined> | null | undefined,
+): PriceChartingCardTier[] {
+  const prices = rawPrices ?? {};
+  return CARD_TIER_FIELD_SPECS.map((spec) => {
+    const raw = prices[spec.field];
+    const price_cents = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    // Label comes from the shared field→tier map so it never diverges.
+    const label = fieldToCardTier(spec.field).label;
+    return { grader: spec.grader, grade: spec.grade, grade_label: label ?? spec.field, price_cents };
+  });
 }

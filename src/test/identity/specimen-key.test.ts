@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildIdentity, specimenKey } from "@/lib/identity/identity";
+import { buildIdentity, specimenKey, specimenKeyResult } from "@/lib/identity/identity";
 
 const CARD = { card_name: "Charizard", set: "Base Set", card_number: "4/102", language: "English", year: "1999" };
 
@@ -26,5 +26,15 @@ describe("specimenKey", () => {
     const cgc = await buildIdentity({ ...CARD, grader: "CGC", grade: "10", grade_label: "Pristine", certification_number: "222" });
     expect(psa.hash).toBe(cgc.hash); // same card
     expect(specimenKey(psa)).not.toBe(specimenKey(cgc)); // different physical specimens
+  });
+
+  it("NEVER collapses to the bare card hash when neither cert nor inventory code is present", async () => {
+    const id = await buildIdentity(CARD); // no cert, and we pass no inventory code
+    const result = specimenKeyResult(id);
+    expect(result.status).toBe("incomplete");
+    expect(result.key).toBeNull();
+    // The string form throws rather than silently returning the shared card hash,
+    // which would give two different physical specimens the same key.
+    expect(() => specimenKey(id)).toThrow(/certification number|inventory code/i);
   });
 });

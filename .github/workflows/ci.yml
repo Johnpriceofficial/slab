@@ -38,16 +38,26 @@ jobs:
       - name: Production build
         run: bun run build
 
+      # Every production Edge Function is either deno-checked here or listed as a
+      # justified exclusion in supabase/functions/CI-COVERAGE.md. The eBay and
+      # scan-card functions are excluded ONLY because they have pre-existing type
+      # errors under these strict flags (Deno WebCrypto Buffer typings and the
+      # `.schema("private")` client overload) that require a Deno-aware config to
+      # resolve; that cleanup is tracked separately and is out of scope here.
       - name: Deno-check edge functions
         run: >-
           deno check --no-config --node-modules-dir=manual --no-remote
           supabase/functions/analyze-slab/index.ts
-          supabase/functions/pricecharting-search/index.ts
           supabase/functions/market-intelligence/index.ts
+          supabase/functions/marketplace-scheduler/index.ts
+          supabase/functions/pricecharting-marketplace/index.ts
+          supabase/functions/pricecharting-search/index.ts
+          supabase/functions/pricecharting-sync/index.ts
 
       - name: Rebuild edge bundles (must match committed output)
         run: |
           node scripts/build-pricecharting-edge-bundle.mjs
+          node scripts/build-pricecharting-marketplace-edge-bundle.mjs
           node scripts/build-analyze-slab-edge-bundle.mjs
           node scripts/build-market-intelligence-edge-bundle.mjs
           if ! git diff --quiet -- supabase/functions/_shared/*-bundle.js; then
