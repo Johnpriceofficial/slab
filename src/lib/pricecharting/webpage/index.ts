@@ -11,6 +11,7 @@ import { parseProductPage } from "./parse";
 import { verifyPageIdentity, type ExpectedIdentity } from "./verify";
 import { normalizeTiers } from "./normalize";
 import { extractArtwork } from "./image";
+import { resolveTierSource, type TierSourceResolution } from "./merge";
 import {
   PARSER_VERSION,
   SOURCE_VERSION,
@@ -115,6 +116,53 @@ export async function getProductPageSnapshot(input: SnapshotInput, deps: Snapsho
 export function pageTierCents(snapshot: ProductPageSnapshot, tier: string): number | null {
   const found = snapshot.tiers.find((t) => t.tier === tier);
   return found ? found.value_cents : null;
+}
+
+/**
+ * The COMPLETE normalized snapshot as a tier→cents map, so the UI can populate
+ * Compare-Other-Grades, Market Intelligence, upgrade/downgrade, insurance values,
+ * and future price history from ONE fetch — never re-fetching per tier.
+ */
+export function snapshotTierMap(snapshot: ProductPageSnapshot): Record<string, number | null> {
+  const map: Record<string, number | null> = {};
+  for (const t of snapshot.tiers) map[t.tier] = t.value_cents;
+  return map;
+}
+
+/**
+ * API-FIRST valuation for one graded tier. The public page is a FALLBACK: it is
+ * consulted (and only then fetched) when — and only when — the official API
+ * cannot supply the exact tier. This minimizes requests and keeps us on the
+ * official API whenever it has the value.
+ *
+ *   API has exact tier  → use API, page is NEVER fetched.
+ *   API missing tier    → fetch the page, use its VERIFIED exact tier.
+ */
+export async function valueGradedTierApiFirst(args: {
+  tier: string;
+  /** The exact API tier value already looked up, or null when the API lacks it. */
+  api_cents: number | null;
+  /** Deferred page fetch — only awaited on an API gap. */
+  fetchPage: () => Promise<ProductPageSnapshot>;
+}): Promise<{ resolution: TierSourceResolution; page_snapshot: ProductPageSnapshot | null }> {
+  if (typeof args.api_cents === "number") {
+    // Official API already has it — do NOT scrape.
+    return {
+      resolution: resolveTierSource({ api_cents: args.api_cents, page_cents: null, page_identity_verified: false }),
+      page_snapshot: null,
+    };
+  }
+  // API gap → NOW consult the public page.
+  const snapshot = await args.fetchPage();
+  const page_cents = pageTierCents(snapshot, args.tier);
+  return {
+    resolution: resolveTierSource({
+      api_cents: null,
+      page_cents,
+      page_identity_verified: snapshot.identity_status === "VERIFIED",
+    }),
+    page_snapshot: snapshot,
+  };
 }
 
 export * from "./types";

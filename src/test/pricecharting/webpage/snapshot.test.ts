@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getProductPageSnapshot, type SnapshotInput } from "@/lib/pricecharting/webpage";
+import { getProductPageSnapshot, valueGradedTierApiFirst, snapshotTierMap, type SnapshotInput, type ProductPageSnapshot } from "@/lib/pricecharting/webpage";
 import { resetPageBreaker, type PageFetch } from "@/lib/pricecharting/webpage/fetch";
 
 const fixture = (name: string) => readFileSync(join(process.cwd(), "src/test/fixtures/pricecharting", name), "utf8");
@@ -86,5 +86,42 @@ describe("getProductPageSnapshot — orchestration", () => {
     const snap = await getProductPageSnapshot(INPUT, { fetch: fn, now: NOW, getEnv: () => "true" });
     expect(snap.state).toBe("success");
     expect(calls.length).toBe(2);
+  });
+
+  it("captures the COMPLETE grade set in one snapshot (no per-tier re-fetch)", async () => {
+    const { fn } = fakeFetch({ status: 200, body: RAYQUAZA_HTML });
+    const snap = await getProductPageSnapshot(INPUT, { fetch: fn, now: NOW, getEnv: () => "true" });
+    const map = snapshotTierMap(snap);
+    expect(map).toMatchObject({
+      raw: 500, grade_9_general: 3908, grade_9_5_general: 4300,
+      psa_10: 10463, cgc_10: 2100, cgc_10_pristine: 4539,
+      bgs_10: 19678, bgs_10_black_label: 98400, sgc_10: 827, tag_10: 4125, ace_10: 6006,
+    });
+  });
+});
+
+describe("API-first orchestration — the page is fetched ONLY on an API gap", () => {
+  it("uses the API value and NEVER fetches the page when the API has the exact tier", async () => {
+    let pageFetched = false;
+    const fetchPage = async (): Promise<ProductPageSnapshot> => { pageFetched = true; throw new Error("should not be called"); };
+    const { resolution, page_snapshot } = await valueGradedTierApiFirst({ tier: "cgc_10_pristine", api_cents: 4539, fetchPage });
+    expect(pageFetched).toBe(false); // page adapter never ran
+    expect(page_snapshot).toBeNull();
+    expect(resolution.source).toBe("PRICECHARTING_API");
+    expect(resolution.value_cents).toBe(4539);
+  });
+
+  it("falls back to the verified public-page tier ONLY when the API lacks it", async () => {
+    let pageFetched = false;
+    const { fn } = fakeFetch({ status: 200, body: RAYQUAZA_HTML });
+    const fetchPage = async (): Promise<ProductPageSnapshot> => {
+      pageFetched = true;
+      return getProductPageSnapshot(INPUT, { fetch: fn, now: NOW, getEnv: () => "true" });
+    };
+    const { resolution, page_snapshot } = await valueGradedTierApiFirst({ tier: "cgc_10_pristine", api_cents: null, fetchPage });
+    expect(pageFetched).toBe(true); // only now did it consult the page
+    expect(resolution.source).toBe("PRICECHARTING_PUBLIC_PAGE");
+    expect(resolution.value_cents).toBe(4539);
+    expect(page_snapshot?.identity_status).toBe("VERIFIED");
   });
 });

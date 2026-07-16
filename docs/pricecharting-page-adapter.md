@@ -44,10 +44,21 @@ is completed and signed off by an operator.
   `Retry-After` respected, ≤1 req/s reservation, in-memory circuit breaker. No
   headless browser, no page-JS execution, no proxy/UA rotation, no anti-bot
   evasion. A block ⇒ `provider_blocked`.
-- **Parse (pure, fixture-tested):** `#full-prices` table → `<label, price>` rows;
-  identity anchors from `h1#product_name[title=<id>]`, `data-product-id`, and the
-  canonical link. Non-product pages (search/error/challenge/login) are detected
-  and rejected.
+- **Parse (pure, fixture-tested):** a real HTML parser (**linkedom**, works in
+  Node + Deno) selects the `#full-prices` table and its rows/cells STRUCTURALLY
+  by DOM (the price cell is chosen by `td.price`, not column position), so minor
+  whitespace/formatting changes don't break extraction. Identity anchors come
+  from `h1#product_name[title=<id>]`, `data-product-id`, and the canonical link.
+  Non-product pages (search/error/challenge/login) are detected and rejected.
+- **API-FIRST, page-on-gap:** the page is a FALLBACK. `valueGradedTierApiFirst`
+  uses the official API value when it has the exact tier and **never fetches the
+  page**; it consults (and only then fetches) the public page ONLY when the API
+  lacks the tier. This minimizes requests and stays on the official API whenever
+  possible.
+- **Complete snapshot:** one fetch captures EVERY grade shown (Ungraded → ACE 10),
+  stored as the normalized snapshot (`snapshotTierMap` → `{tier: cents}`), so the
+  UI can populate Compare-Other-Grades, Market Intelligence, upgrade/downgrade,
+  and insurance values without re-fetching.
 - **Verify:** product id is the primary key; card number + language + canonical
   URL corroborate. A conflict ⇒ `REJECTED`. Never accepted on title alone.
 - **Normalize:** page labels → the app's canonical tiers, every grade-10 variant
@@ -75,3 +86,19 @@ This PR delivers the complete, tested adapter library (flag off). Wiring it into
 an edge-function orchestration action and the linked-product UI panel is the
 enablement step, to be done together with flipping the flag on **after** the
 review above — so the deployed functions are unchanged while the flag is off.
+
+## Roadmap: one provider in a broader market engine
+
+The public-page adapter is deliberately shaped as ONE provider behind the
+Identity Engine, not a PriceCharting-specific hack. The long-term valuation
+pipeline is:
+
+```
+Identity Engine → PriceCharting API → PriceCharting Public Page → eBay Sold →
+Card Ladder → Alt → Goldin → PWCC → Historical Internal Sales → Population Reports
+→ Valuation Engine
+```
+
+Each source is verified against the canonical card identity (never the cert),
+attaches its own provenance, and is combined by the same priority/corroboration/
+conflict rules used here. That multi-provider engine is future work, not this PR.
