@@ -768,18 +768,34 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   );
 }
 
-function EbayReferenceImages({ candidate, identity }: { candidate: CandidateResult; identity: PriceChartingSearchArgs }) {
+function EbayReferenceImages({
+  candidate,
+  identity,
+  hasPriceChartingImage,
+}: {
+  candidate: CandidateResult;
+  identity: PriceChartingSearchArgs;
+  /** When a PriceCharting product/page image already exists, eBay is NOT queried. */
+  hasPriceChartingImage?: boolean;
+}) {
   const query = [candidate.product_name, identity.set, identity.language].filter(Boolean).join(" ");
+  // eBay ISOLATION: only fall back to eBay reference images when NO PriceCharting
+  // image exists. When PriceCharting artwork is present we never call eBay at all,
+  // so eBay outages / 409s can never storm the panel or affect valuation/artwork.
+  const skipEbay = hasPriceChartingImage ?? !!candidate.candidate_image_url;
   const [data, setData] = useState<Awaited<ReturnType<typeof ebayReferenceSearch>> | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!skipEbay);
   useEffect(() => {
+    if (skipEbay) return; // PriceCharting artwork present → no eBay request
     let active = true;
     setIsLoading(true);
     ebayReferenceSearch({ query, card_name: identity.card_name, card_number: identity.card_number })
       .then((result) => { if (active) setData(result); })
       .finally(() => { if (active) setIsLoading(false); });
     return () => { active = false; };
-  }, [query, identity.card_name, identity.card_number]);
+  }, [skipEbay, query, identity.card_name, identity.card_number]);
+  // PriceCharting artwork already covers this candidate — render nothing for eBay.
+  if (skipEbay) return null;
   if (isLoading) return <div className="sm:col-span-2 text-xs text-muted-foreground">Checking eligible eBay reference listings…</div>;
   if (!data || data.status !== "success" || data.items.length === 0) {
     return <div className="sm:col-span-2 rounded border p-2 text-xs italic text-muted-foreground">No independent reference artwork is available. Verify using the uploaded card image and product metadata.</div>;
