@@ -1,35 +1,32 @@
--- Confirmed-product evidence persistence + valuation-status integrity.
+-- Confirmed-product evidence persistence + valuation-status INTEGRITY.
 --
--- Three concerns, all additive/non-destructive:
---   1. Persist the confirmed product's reference artwork, normalized tier
---      snapshot, and evidence timestamps on public.pricecharting_products, so the
---      canonical catalog row carries the page evidence (not just the raw blob).
---   2. GUARD valuation_status: a slab may be 'exact_api_tier' ONLY when the exact
---      tier actually resolved to a value. 'pricecharting_exact_tier' provenance
---      with a NULL value is NOT exact — it becomes 'needs_review'.
---   3. RECONCILE existing rows: demote any slab currently marked 'exact_api_tier'
---      whose value is null OR whose latest snapshot is not EXACT (a stale scalar
---      superseded by a later "tier unavailable" evidence read) to 'needs_review'.
---      No scalar is deleted — the value is preserved for audit, just no longer
---      trusted as an exact API tier.
+-- pricecharting_raw is the full value response, so it carries the CURRENT
+-- evidence: tier_availability, designation_exact, guide_value_cents, and
+-- public_page.identity_status. Every integrity decision below is made from that
+-- evidence, never from the valuation_provenance STRING alone.
+--
+--   1. Persist reference artwork + normalized tier snapshot + evidence timestamps
+--      on public.pricecharting_products. last_verified_at updates ONLY when the
+--      page identity actually VERIFIED; provider_evidence_at is the (always-known)
+--      retrieval time.
+--   2. exact_api_tier / snapshot EXACT require the exact tier to be present in the
+--      CURRENT evidence (available + designation_exact + a non-null guide value).
+--      Exact provenance without that evidence is 'needs_review', never exact.
+--   3. When the current evidence does NOT support a trusted provider value
+--      (needs_review / unavailable), the stale provider scalars are CLEARED so no
+--      stale value can display as a current guide. Prior values remain in
+--      valuation_snapshots for audit.
+--   4. Reconcile existing rows the same way (clears the displayed stale value).
 
 -- ── 1. Evidence columns on the catalog table ───────────────────────────────
 alter table public.pricecharting_products
   add column if not exists reference_image_url    text,
   add column if not exists reference_image_source text,
-  -- The complete normalized tier→cents map for this product (from the confirmed
-  -- API + page evidence), so the full grade table survives without a re-fetch.
   add column if not exists tier_snapshot          jsonb,
-  -- When the product IDENTITY was last verified (API/page identity agreed).
-  add column if not exists last_verified_at       timestamptz,
-  -- When the underlying provider evidence (prices/artwork) was retrieved.
-  add column if not exists provider_evidence_at   timestamptz;
+  add column if not exists last_verified_at       timestamptz,  -- identity actually verified
+  add column if not exists provider_evidence_at   timestamptz;  -- evidence retrieved
 
--- ── 2. + best-effort persistence: re-create the capture trigger with the guard
--- and evidence population. Body is IDENTICAL to the prior version except: the
--- product upsert also persists artwork/tier-snapshot/timestamps (defensively read
--- from the raw response — NULL when absent), and the final status assignment gates
--- 'exact_api_tier' on a non-null value.
+-- ── 2/3. Capture trigger: evidence-based EXACT + stale-value clearing ───────
 create or replace function public.capture_slab_valuation_snapshot()
 returns trigger
 language plpgsql
@@ -37,12 +34,28 @@ security invoker
 set search_path = public
 as $$
 declare
-  v_relation text;
+  v_relation text;        -- snapshot tier_relationship (EXACT/COMPATIBLE/MANUAL/UNAVAILABLE)
+  v_status text;          -- slabs.valuation_status
   v_confidence text;
+  v_exact boolean;        -- the CURRENT evidence proves the exact tier
+  v_page_verified boolean;
+  v_clear boolean;        -- the provider scalars are untrustworthy → clear them
 begin
   if new.pricecharting_priced_at is null or new.pricecharting_priced_at is not distinct from old.pricecharting_priced_at then
     return new;
   end if;
+
+  -- EXACT is proven ONLY by the current evidence, not the provenance string.
+  v_exact := (
+    new.valuation_provenance = 'pricecharting_exact_tier'
+    and new.pricecharting_value_cents is not null
+    and new.pricecharting_raw->>'tier_availability' = 'available'
+    and coalesce((new.pricecharting_raw->>'designation_exact')::boolean, false) = true
+    and nullif(new.pricecharting_raw->>'guide_value_cents', '') is not null
+  );
+  -- Identity is "verified" only when the confirmed page identity VERIFIED.
+  v_page_verified := coalesce(new.pricecharting_raw->'public_page'->>'identity_status', '') = 'VERIFIED';
+
   if new.pricecharting_product_id is not null then
     insert into public.pricecharting_products (
       product_id, product_name, console_name, raw_response, last_refreshed_at,
@@ -55,26 +68,30 @@ begin
       new.pricecharting_raw->'reference_artwork'->>'image_url',
       new.pricecharting_raw->'reference_artwork'->>'image_source',
       new.pricecharting_raw->'available_values_cents',
-      new.pricecharting_priced_at,
+      case when v_page_verified then new.pricecharting_priced_at else null end,
       new.pricecharting_priced_at
     ) on conflict (product_id) do update set
       product_name = excluded.product_name, console_name = excluded.console_name,
       raw_response = excluded.raw_response, last_refreshed_at = excluded.last_refreshed_at,
-      -- Only overwrite artwork/tier evidence when the new read actually carries it
-      -- (never blank out good evidence with a null from a lighter read).
+      -- Never blank out good evidence with a null from a lighter read.
       reference_image_url    = coalesce(excluded.reference_image_url, pricecharting_products.reference_image_url),
       reference_image_source = coalesce(excluded.reference_image_source, pricecharting_products.reference_image_source),
       tier_snapshot          = coalesce(excluded.tier_snapshot, pricecharting_products.tier_snapshot),
-      last_verified_at       = excluded.last_verified_at,
+      -- last_verified_at advances ONLY on an actually-verified read; else keep prior.
+      last_verified_at       = coalesce(excluded.last_verified_at, pricecharting_products.last_verified_at),
       provider_evidence_at   = excluded.provider_evidence_at;
   end if;
-  v_relation := case new.valuation_provenance
-    when 'pricecharting_exact_tier' then 'EXACT'
-    when 'pricecharting_compatible_tier' then 'COMPATIBLE'
-    when 'manual_guide' then 'MANUAL'
-    when 'manual_value' then 'MANUAL'
+
+  -- Snapshot relationship: EXACT only when the evidence proves it. Exact
+  -- provenance whose evidence fails is recorded as UNAVAILABLE (the exact tier was
+  -- not actually available) — never a false EXACT snapshot.
+  v_relation := case
+    when v_exact then 'EXACT'
+    when new.valuation_provenance = 'pricecharting_compatible_tier' then 'COMPATIBLE'
+    when new.valuation_provenance in ('manual_guide', 'manual_value') then 'MANUAL'
     else 'UNAVAILABLE' end;
   v_confidence := case v_relation when 'EXACT' then 'HIGH' when 'COMPATIBLE' then 'MEDIUM' when 'MANUAL' then 'MANUAL' else 'UNAVAILABLE' end;
+
   insert into public.valuation_snapshots (
     slab_id, pricecharting_product_id, source_field, tier_relationship,
     guide_value_cents, quick_sale_value_cents, replacement_value_cents,
@@ -86,14 +103,25 @@ begin
     case when new.pricecharting_value_cents is null then null else round(new.pricecharting_value_cents * 1.10)::bigint end,
     'USD', v_confidence, new.pricecharting_raw, new.pricecharting_priced_at
   );
-  update public.slabs set valuation_status = case
-    -- EXACT counts as exact_api_tier ONLY when a real value resolved. Exact
-    -- provenance with no value is not exact — flag it for review, never claim exact.
-    when v_relation = 'EXACT' and new.pricecharting_value_cents is not null then 'exact_api_tier'
-    when v_relation = 'EXACT' then 'needs_review'
-    when v_relation = 'COMPATIBLE' then 'compatible_api_tier'
-    when v_relation = 'MANUAL' then 'manual'
-    else 'unavailable' end
+
+  -- valuation_status from the same evidence. Exact provenance whose evidence fails
+  -- → needs_review (never exact_api_tier).
+  v_status := case
+    when v_exact then 'exact_api_tier'
+    when new.valuation_provenance = 'pricecharting_exact_tier' then 'needs_review'
+    when new.valuation_provenance = 'pricecharting_compatible_tier' then 'compatible_api_tier'
+    when new.valuation_provenance in ('manual_guide', 'manual_value') then 'manual'
+    else 'unavailable' end;
+
+  -- When there is no trusted provider value, CLEAR the provider scalars so nothing
+  -- stale can display as the current guide. (Manual + compatible + exact keep theirs.)
+  v_clear := v_status in ('needs_review', 'unavailable');
+  update public.slabs set
+    valuation_status        = v_status,
+    pricecharting_value_cents = case when v_clear then null else pricecharting_value_cents end,
+    final_value_cents         = case when v_clear then null else final_value_cents end,
+    quick_sale_value_cents    = case when v_clear then null else quick_sale_value_cents end,
+    replacement_value_cents   = case when v_clear then null else replacement_value_cents end
   where id = new.id;
   return new;
 end;
@@ -104,13 +132,17 @@ create trigger slabs_capture_valuation_snapshot
   after update of pricecharting_priced_at on public.slabs
   for each row execute function public.capture_slab_valuation_snapshot();
 
--- ── 3. Reconcile existing rows ─────────────────────────────────────────────
--- Demote any slab still marked exact_api_tier that is NOT actually backed by an
--- exact tier value: either it has no value, or its LATEST valuation snapshot is
--- not EXACT (a later read found the tier unavailable and the scalar went stale).
--- Non-destructive: the scalar value is retained; only the trust status changes.
+-- ── 4. Reconcile existing rows ─────────────────────────────────────────────
+-- Any slab still marked exact_api_tier that is NOT backed by an exact tier value
+-- (null value, or a latest snapshot that is not EXACT) is demoted to needs_review
+-- AND its stale provider scalars are cleared so the UI cannot show a stale current
+-- value. Prior values remain in valuation_snapshots for audit.
 update public.slabs s
-set valuation_status = 'needs_review'
+set valuation_status        = 'needs_review',
+    pricecharting_value_cents = null,
+    final_value_cents         = null,
+    quick_sale_value_cents    = null,
+    replacement_value_cents   = null
 where s.valuation_status = 'exact_api_tier'
   and (
     s.pricecharting_value_cents is null

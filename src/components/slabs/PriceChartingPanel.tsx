@@ -503,7 +503,10 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                     )}
                     <p className="text-[10px] text-muted-foreground">PriceCharting seller-listing photo, not official artwork and not a sold price. It never overrides an identity conflict.</p>
                   </div>
-                  <EbayReferenceImages candidate={c} identity={identity} />
+                  {/* eBay isolation: NO eBay reference search for UNSELECTED search
+                      candidates. eBay is a fallback for a single CONFIRMED product
+                      only (and only when it has no PriceCharting artwork), so a
+                      candidate list never storms eBay with per-candidate requests. */}
                 </div>}
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
@@ -768,7 +771,7 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   );
 }
 
-function EbayReferenceImages({
+export function EbayReferenceImages({
   candidate,
   identity,
   hasPriceChartingImage,
