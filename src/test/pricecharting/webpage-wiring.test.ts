@@ -90,6 +90,26 @@ describe("public-page wiring into pricecharting-search value action", () => {
     expect(calledWith!.expected).toEqual({ card_number: "047/067", language: "Japanese" });
   });
 
+  it("returns a derived canonical_url when none is stored", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/product?", { json: LOOSE_ONLY });
+    const res = await handlePriceChartingRequest(PRISTINE_INPUT, base(mock));
+    const body = res.body as unknown as Record<string, unknown>;
+    expect(body.canonical_url).toBe("https://www.pricecharting.com/game/pokemon-japanese-blue-sky-stream/rayquaza-vmax-47");
+  });
+
+  it("PREFERS a stored canonical_url over deriving from the product name", async () => {
+    const mock = createMockFetch();
+    mock.enqueue("/api/product?", { json: LOOSE_ONLY });
+    const stored = "https://www.pricecharting.com/game/pokemon-japanese-blue-sky-stream/rayquaza-vmax-047-stored";
+    let calledUrl: string | null = null;
+    const fetchPageSnapshot = async (i: { canonical_url: string }) => { calledUrl = i.canonical_url; return pageSnapshot(); };
+    const res = await handlePriceChartingRequest({ ...PRISTINE_INPUT, canonical_url: stored }, { ...base(mock), fetchPageSnapshot });
+    const body = res.body as unknown as Record<string, unknown>;
+    expect(body.canonical_url).toBe(stored); // returned as-is, not re-derived
+    expect(calledUrl).toBe(stored); // the page fetch used the STORED url
+  });
+
   it("a RAW card never triggers a page fetch and still uses loose-price", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/product?", { json: LOOSE_ONLY });

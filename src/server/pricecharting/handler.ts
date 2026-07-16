@@ -55,6 +55,12 @@ export interface SlabSearchInput {
   product_id?: string;
   /** For action "lookup": a full PriceCharting product URL (id extracted if present). */
   product_url?: string;
+  /**
+   * The STORED canonical /game/ URL for the confirmed product (from
+   * pricecharting_products.canonical_url). When present the page adapter uses it
+   * directly instead of deriving a slug from the product name.
+   */
+  canonical_url?: string;
 }
 
 /**
@@ -228,6 +234,8 @@ export interface ValueResponse {
   tier_availability: "available" | "tier_unavailable";
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
+  /** The canonical /game/ URL used (stored value if supplied, else derived). */
+  canonical_url: string | null;
   /**
    * Which source supplied the guide value. "PRICECHARTING_API" by default;
    * "PRICECHARTING_PUBLIC_PAGE" ONLY when the API lacked the exact tier and the
@@ -653,6 +661,10 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
     availableCents[k] = v === null ? null : Math.round(v * 100);
   }
 
+  // Prefer the STORED canonical URL for this product over deriving a slug from
+  // the product name; fall back to derivation only when none was persisted.
+  const canonicalUrl = input.canonical_url?.trim() || buildGameUrl(product.console_or_category ?? "", product.name);
+
   const body: ValueResponse = {
     status: "success",
     action: "value",
@@ -671,6 +683,7 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
     tier_availability: lookup.value_pennies !== null ? "available" : "tier_unavailable",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
+    canonical_url: canonicalUrl,
     valuation_source: "PRICECHARTING_API",
     public_page: null,
     reference_artwork: null,
@@ -687,7 +700,6 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
   // is byte-identical to before.
   const tierKey = slabTierKey(input.grader, input.grade, input.grade_label);
   if (fetchPageSnapshot && grader && tierKey && tierKey !== "raw" && lookup.value_pennies === null) {
-    const canonicalUrl = buildGameUrl(product.console_or_category ?? "", product.name);
     if (canonicalUrl) {
       const { resolution, page_snapshot } = await valueGradedTierApiFirst({
         tier: tierKey,
