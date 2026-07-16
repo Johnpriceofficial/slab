@@ -52,19 +52,45 @@ export function isAllowedRedirectTarget(location: string, base: string): boolean
   return safePriceChartingGameUrl(resolved) !== null;
 }
 
+/** Fold every apostrophe variant to a single straight apostrophe. */
+function normalizeApostrophes(s: string): string {
+  return (s ?? "")
+    .replace(/%27/gi, "'") // percent-encoded apostrophe
+    .replace(/[‘’ʼʹ′´`]/g, "'"); // curly / modifier / prime / acute / backtick
+}
+
 /**
- * Build a canonical product-page URL from a validated console slug + product slug.
- * Slugs are lowercased and stripped to a safe `[a-z0-9-]` charset so no
- * attacker-controlled path/host/query can be injected. Returns null if either
- * slug is empty after sanitization.
+ * Build a canonical product-page URL from a console slug + product slug.
+ *
+ * PriceCharting KEEPS apostrophes in its slugs — "N's Zoroark ex #112" is served
+ * at `/game/.../n's-zoroark-ex-112` (rendered `n%27s-...`), NOT `n-s-...`. So the
+ * apostrophe must be preserved: every apostrophe variant (curly, modifier,
+ * percent-encoded) is normalized to a straight apostrophe and KEPT; every other
+ * non-alphanumeric run collapses to a single dash; edge dashes are trimmed. This
+ * still strips any path/host/query injection (only [a-z0-9'-] survive). Returns
+ * null if either slug is empty after sanitization.
  */
 export function buildGameUrl(consoleSlug: string, productSlug: string): string | null {
-  // Slugify: lowercase, drop '#', collapse any non-alphanumeric run to a single
-  // dash, trim edge dashes. Works for a raw name ("Rayquaza VMAX #47" ->
-  // "rayquaza-vmax-47") and a pre-slugged value alike; strips path/host injection.
-  const clean = (s: string) => (s ?? "").toLowerCase().replace(/#/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const clean = (s: string) =>
+    normalizeApostrophes((s ?? "").toLowerCase())
+      .replace(/#/g, "")
+      .replace(/[^a-z0-9']+/g, "-") // keep apostrophes; collapse everything else to a dash
+      .replace(/^-+|-+$/g, "");
   const c = clean(consoleSlug);
   const p = clean(productSlug);
   if (!c || !p) return null;
   return `https://www.pricecharting.com/game/${c}/${p}`;
+}
+
+/**
+ * Reduce a slug or full URL to a comparison KEY that is invariant across the ways
+ * the same product can be written: straight/curly/modifier/percent-encoded
+ * apostrophes, hyphen-vs-apostrophe, and the exact separator run all collapse
+ * away. `n's-zoroark-ex-112`, `n-s-zoroark-ex-112`, `n%27s-zoroark-ex-112`, and
+ * `ns-zoroark-ex-112` all map to the same key, while a different product does not.
+ * Used to compare a derived canonical URL against the page's own canonical URL
+ * (and the redirect-final URL) without spurious mismatches.
+ */
+export function canonicalSlugKey(value: string): string {
+  return normalizeApostrophes((value ?? "").toLowerCase()).replace(/[^a-z0-9]+/g, "");
 }
