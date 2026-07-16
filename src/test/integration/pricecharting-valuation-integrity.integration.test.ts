@@ -117,4 +117,46 @@ suite("valuation-status integrity (evidence-based exact_api_tier)", () => {
     expect(prod.last_verified_at).not.toBeNull(); // page identity VERIFIED
     expect(prod.provider_evidence_at).not.toBeNull();
   });
+
+  it("reconciles the PRODUCTION-shaped stale row (EXACT snapshot but current evidence unavailable)", async () => {
+    const id = await makeSlab(`VI${stamp}E`);
+    // Reproduce the exact production inconsistency WITHOUT firing the trigger (no
+    // pricecharting_priced_at change): status exact_api_tier + a live $42.50 scalar,
+    // but current raw evidence says the tier is unavailable.
+    const { error: upErr } = await admin.from("slabs").update({
+      valuation_status: "exact_api_tier",
+      valuation_provenance: "pricecharting_exact_tier",
+      pricecharting_product_id: "5327894",
+      pricecharting_value_cents: 4250,
+      final_value_cents: 4250,
+      quick_sale_value_cents: 3400,
+      replacement_value_cents: 4675,
+      pricecharting_raw: { tier_availability: "tier_unavailable", designation_exact: false, guide_value_cents: null },
+    }).eq("id", id);
+    expect(upErr).toBeNull();
+    // A stale EXACT snapshot written by the OLD provenance-based trigger — it must
+    // NOT be the reconciliation authority, and must survive for audit.
+    const { error: snapErr } = await admin.from("valuation_snapshots").insert({
+      slab_id: id, pricecharting_product_id: "5327894", source_field: "condition-19-price",
+      tier_relationship: "EXACT", guide_value_cents: 4250, currency: "USD", confidence: "HIGH",
+      raw_response: {}, valued_at: new Date(t - 3_600_000).toISOString(),
+    });
+    expect(snapErr).toBeNull();
+
+    // Run the same reconciliation the migration runs.
+    const { error: rErr } = await admin.rpc("reconcile_stale_exact_api_tier");
+    expect(rErr).toBeNull();
+
+    const s = await statusOf(id);
+    expect(s.valuation_status).toBe("needs_review");
+    expect(s.pricecharting_value_cents).toBeNull();
+    expect(s.final_value_cents).toBeNull();
+    expect(s.quick_sale_value_cents).toBeNull();
+    expect(s.replacement_value_cents).toBeNull();
+    // The historical EXACT snapshot is preserved untouched.
+    const { count } = await admin.from("valuation_snapshots")
+      .select("*", { count: "exact", head: true })
+      .eq("slab_id", id).eq("tier_relationship", "EXACT");
+    expect(count).toBeGreaterThanOrEqual(1);
+  });
 });

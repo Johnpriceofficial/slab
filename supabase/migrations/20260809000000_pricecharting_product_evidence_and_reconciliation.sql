@@ -133,24 +133,45 @@ create trigger slabs_capture_valuation_snapshot
   for each row execute function public.capture_slab_valuation_snapshot();
 
 -- ── 4. Reconcile existing rows ─────────────────────────────────────────────
--- Any slab still marked exact_api_tier that is NOT backed by an exact tier value
--- (null value, or a latest snapshot that is not EXACT) is demoted to needs_review
--- AND its stale provider scalars are cleared so the UI cannot show a stale current
--- value. Prior values remain in valuation_snapshots for audit.
-update public.slabs s
-set valuation_status        = 'needs_review',
-    pricecharting_value_cents = null,
-    final_value_cents         = null,
-    quick_sale_value_cents    = null,
-    replacement_value_cents   = null
-where s.valuation_status = 'exact_api_tier'
-  and (
-    s.pricecharting_value_cents is null
-    or coalesce((
-      select vs.tier_relationship
-      from public.valuation_snapshots vs
-      where vs.slab_id = s.id
-      order by vs.valued_at desc
-      limit 1
-    ), 'UNAVAILABLE') <> 'EXACT'
-  );
+-- Demote any slab still marked exact_api_tier that the CURRENT raw evidence does
+-- NOT support, and clear its stale provider scalars so the UI cannot show a stale
+-- value. The authority is slabs.pricecharting_raw — the SAME evidence the new
+-- trigger uses — NEVER the historical snapshot's tier_relationship (which was
+-- written by the old provenance-based trigger and can read EXACT even when the
+-- current evidence says the tier is unavailable). Historical snapshots are left
+-- untouched for audit. Exposed as an idempotent function so it is independently
+-- testable and re-runnable.
+create or replace function public.reconcile_stale_exact_api_tier()
+returns integer
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+declare
+  v_count integer;
+begin
+  update public.slabs s
+  set valuation_status        = 'needs_review',
+      pricecharting_value_cents = null,
+      final_value_cents         = null,
+      quick_sale_value_cents    = null,
+      replacement_value_cents   = null
+  where s.valuation_status = 'exact_api_tier'
+    and not (
+      s.valuation_provenance = 'pricecharting_exact_tier'
+      and s.pricecharting_value_cents is not null
+      and s.pricecharting_raw->>'tier_availability' = 'available'
+      and coalesce((s.pricecharting_raw->>'designation_exact')::boolean, false) = true
+      and nullif(s.pricecharting_raw->>'guide_value_cents', '') is not null
+    );
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+-- service_role only (an operator/maintenance action); never anon/authenticated.
+revoke all on function public.reconcile_stale_exact_api_tier() from public;
+grant execute on function public.reconcile_stale_exact_api_tier() to service_role;
+
+-- Run the reconciliation now, as part of the migration.
+select public.reconcile_stale_exact_api_tier();
