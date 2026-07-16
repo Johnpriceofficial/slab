@@ -81,19 +81,15 @@ describe("public-page cache key — certification-free, specimen-shared", () => 
 });
 
 describe("feature flag", () => {
-  it("(24) is ON by default; only an explicit kill switch turns it OFF", () => {
-    // Default ON — unset / empty / "true" all leave the adapter enabled.
-    expect(pageAdapterEnabled(() => undefined)).toBe(true);
-    expect(pageAdapterEnabled(() => "")).toBe(true);
-    expect(pageAdapterEnabled(() => "true")).toBe(true);
-    expect(pageAdapterEnabled(() => "TRUE")).toBe(true);
-    expect(pageAdapterEnabled(() => "1")).toBe(true);
-    // Kill switch values turn it OFF (case-insensitive).
+  it("(24) is OFF unless explicitly enabled with 'true' (operator-controlled)", () => {
+    // Default OFF — the adapter never turns on silently. ToS-gated opt-in only.
+    expect(pageAdapterEnabled(() => undefined)).toBe(false);
+    expect(pageAdapterEnabled(() => "")).toBe(false);
     expect(pageAdapterEnabled(() => "false")).toBe(false);
-    expect(pageAdapterEnabled(() => "FALSE")).toBe(false);
-    expect(pageAdapterEnabled(() => "0")).toBe(false);
+    expect(pageAdapterEnabled(() => "1")).toBe(false);
     expect(pageAdapterEnabled(() => "off")).toBe(false);
-    expect(pageAdapterEnabled(() => "no")).toBe(false);
-    expect(pageAdapterEnabled(() => "disabled")).toBe(false);
+    // Only an explicit "true" (case-insensitive) enables it.
+    expect(pageAdapterEnabled(() => "TRUE")).toBe(true);
+    expect(pageAdapterEnabled(() => "true")).toBe(true);
   });
 });
