@@ -8,6 +8,7 @@
 
 import type { PageIdentityStatus } from "./types";
 import type { RawPageExtract } from "./parse";
+import { canonicalSlugKey } from "./url";
 
 export interface ExpectedIdentity {
   /** The confirmed PriceCharting product id. Required. */
@@ -24,7 +25,6 @@ export interface IdentityVerdict {
 }
 
 const digitsOnly = (s: string | null | undefined): string => (s ?? "").replace(/[^0-9]/g, "");
-const norm = (s: string | null | undefined): string => (s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 /** A page's card number "047/067" or "47" agrees with an expected "047/067". */
 function cardNumbersAgree(pageNum: string | null, expected: string | null | undefined): boolean | null {
@@ -64,7 +64,10 @@ export function verifyPageIdentity(extract: RawPageExtract, expected: ExpectedId
   }
 
   // Canonical URL: if present and it identifies a different product, reject.
-  if (expected.canonical_url && extract.canonical_url && norm(extract.canonical_url) !== norm(expected.canonical_url)) {
+  // Compare by canonical-slug KEY so apostrophe/hyphen/encoding variants of the
+  // SAME product (n's / n-s / n%27s) never read as a mismatch, while a genuinely
+  // different product still does.
+  if (expected.canonical_url && extract.canonical_url && canonicalSlugKey(extract.canonical_url) !== canonicalSlugKey(expected.canonical_url)) {
     reasons.push("Canonical URL differs from the linked product's canonical URL.");
   }
 
