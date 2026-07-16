@@ -43,6 +43,12 @@ export interface SelectedPriceCharting {
   available_values_cents: Record<string, number | null>;
   /** The raw token-free value response, kept for audit persistence. */
   value_response: unknown;
+  /** The canonical PriceCharting product-page URL used for this valuation. */
+  canonical_url?: string | null;
+  /** Whether the exact requested tier resolved to a usable value. */
+  tier_availability?: "available" | "tier_unavailable";
+  /** The canonical tier key the value came from, e.g. "cgc_10_pristine". */
+  selected_tier_key?: string | null;
   /** True only when the returned tier exactly represents the slab's grade+designation. */
   designation_exact: boolean;
   /** The actual tier label the value came from, e.g. "CGC 10" (never a fake "CGC 10 Pristine"). */
@@ -279,7 +285,22 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   const confirmCandidate = async (c: CandidateResult) => {
     setConfirmingId(c.product_id);
     try {
-      const res = await priceChartingValue(c.product_id, identity.grader, identity.grade, identity.grade_label);
+      // Send the FULL confirmed identity so the server can fetch + VERIFY the exact
+      // product page (card_number + language guard the page identity) and persist
+      // canonical URL / tiers / artwork. Empty fields are dropped server-side.
+      const res = await priceChartingValue({
+        product_id: c.product_id,
+        canonical_url: c.canonical_url ?? undefined,
+        card_name: identity.card_name,
+        set: identity.set,
+        card_number: identity.card_number,
+        year: identity.year,
+        language: identity.language,
+        variation: identity.variation,
+        grader: identity.grader,
+        grade: identity.grade,
+        grade_label: identity.grade_label,
+      });
       if (res.status === "error") {
         toast.error(res.message);
         return;
@@ -295,10 +316,13 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
         is_estimate: res.is_estimate,
         available_values_cents: res.available_values_cents ?? {},
         value_response: res,
+        canonical_url: res.canonical_url,
+        tier_availability: res.tier_availability,
         valuation_source: res.valuation_source,
         public_page: res.public_page,
         reference_artwork: res.reference_artwork,
         designation_exact: res.designation_exact,
+        selected_tier_key: res.selected_tier_key,
         selected_tier_label: res.selected_tier_label,
       });
       toast.success(`Linked to ${res.product_name}`);

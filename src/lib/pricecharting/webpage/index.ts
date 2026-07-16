@@ -169,6 +169,42 @@ export async function valueGradedTierApiFirst(args: {
   };
 }
 
+/**
+ * CANONICAL valuation for one graded tier. Unlike {@link valueGradedTierApiFirst}
+ * (a gap-only fallback), this fetches the confirmed product's public page for
+ * EVERY confirmed graded product so the caller always has the full grade table,
+ * the reference artwork, and page corroboration — the page is part of the
+ * canonical confirmed-product workflow, not an emergency fallback.
+ *
+ * The API value STILL wins: {@link resolveTierSource} never lets a page value
+ * overwrite a valid exact API value; the page only fills a missing tier (and only
+ * when the page identity VERIFIED). A page fetch failure degrades to API-only
+ * (never throws), so an unreachable page never blocks a valid API valuation.
+ */
+export async function valueGradedTierCanonical(args: {
+  tier: string;
+  /** The exact API tier value already looked up, or null when the API lacks it. */
+  api_cents: number | null;
+  /** The confirmed product's page fetch (always attempted here). */
+  fetchPage: () => Promise<ProductPageSnapshot>;
+}): Promise<{ resolution: TierSourceResolution; page_snapshot: ProductPageSnapshot | null }> {
+  let snapshot: ProductPageSnapshot | null = null;
+  try {
+    snapshot = await args.fetchPage();
+  } catch {
+    snapshot = null; // page unreachable → API-only; never block a valid API value
+  }
+  const page_cents = snapshot ? pageTierCents(snapshot, args.tier) : null;
+  return {
+    resolution: resolveTierSource({
+      api_cents: args.api_cents,
+      page_cents,
+      page_identity_verified: snapshot?.identity_status === "VERIFIED",
+    }),
+    page_snapshot: snapshot,
+  };
+}
+
 export * from "./types";
 export * from "./url";
 export * from "./parse";

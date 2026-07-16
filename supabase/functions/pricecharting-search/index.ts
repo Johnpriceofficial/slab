@@ -48,11 +48,14 @@ Deno.serve(async (req) => {
     // Durable, DB-backed 1 req/sec reservation across all isolates + retries.
     const reserve = makePriceChartingReserver();
 
-    // Public-page fallback is injected ONLY when the feature flag is on, so with
-    // the flag off the handler behaves byte-identically (the API is the only
-    // source). The page is consulted server-side, API-first, on a tier gap; it
-    // reuses the same ≤1 req/s reserver and never returns raw HTML.
-    const pageEnabled = (Deno.env.get("PRICECHARTING_PAGE_ADAPTER_ENABLED") ?? "").trim().toLowerCase() === "true";
+    // The public-page adapter is part of the CANONICAL confirmed-product workflow
+    // and is ENABLED BY DEFAULT. Only an explicit emergency kill switch disables it
+    // (no code deploy needed): PRICECHARTING_PAGE_ADAPTER_ENABLED=false (also 0 /
+    // off / no / disabled). When on, the page is fetched server-side for every
+    // confirmed graded product to supply the full grade table + reference artwork,
+    // reusing the same ≤1 req/s reserver; it never returns raw HTML.
+    const killValues = new Set(["false", "0", "off", "no", "disabled"]);
+    const pageEnabled = !killValues.has((Deno.env.get("PRICECHARTING_PAGE_ADAPTER_ENABLED") ?? "").trim().toLowerCase());
     // deno-lint-ignore no-explicit-any
     const fetchPageSnapshot = pageEnabled
       ? (pageInput: any) =>

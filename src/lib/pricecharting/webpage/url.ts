@@ -34,6 +34,7 @@ export function safePriceChartingGameUrl(raw: string): URL | null {
   }
   if (u.protocol !== "https:") return null; // HTTPS only — no http:, file:, data:, etc.
   if (u.username || u.password) return null; // no embedded credentials
+  if (u.port && u.port !== "443") return null; // no custom port — standard HTTPS only
   if (!PAGE_HOST_ALLOWLIST.has(u.hostname.toLowerCase())) return null;
   if (isPrivateHost(u.hostname)) return null;
   if (!u.pathname.startsWith("/game/")) return null; // product pages only, never search/offers/error
