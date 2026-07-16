@@ -26,6 +26,14 @@ import { searchProducts, getProductById } from "../../lib/pricecharting/api";
 import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber, type ScoreBreakdown } from "../../lib/pricecharting/matching";
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
+import {
+  getProductPageSnapshot,
+  valueGradedTierApiFirst,
+  buildGameUrl,
+  slabTierKey,
+  snapshotTierMap,
+  type ProductPageSnapshot,
+} from "../../lib/pricecharting/webpage";
 import { getBestOfferImageForProduct } from "../../lib/pricecharting/marketplace";
 import { PriceChartingError, isPriceChartingError } from "../../lib/pricecharting/errors";
 import type { CardItemInput, GradingCompany, Product, RawProduct } from "../../lib/pricecharting/types";
@@ -145,6 +153,17 @@ export interface HandlerDeps {
    * omitted in tests.
    */
   beforeRequest?: (endpoint: string) => Promise<void>;
+  /**
+   * Public-page fallback fetch, INJECTED by the Edge Function ONLY when the
+   * feature flag is on. When omitted (flag off, or in tests), the handler behaves
+   * exactly as before — the API is the only source. It is consulted solely on an
+   * API tier gap (API-first), never when the API already has the exact tier.
+   */
+  fetchPageSnapshot?: (input: {
+    product_id: string;
+    canonical_url: string;
+    expected: { card_number?: string | null; language?: string | null };
+  }) => Promise<ProductPageSnapshot>;
 }
 
 export type MatchStatus = "exact" | "likely" | "unverified" | "no_match";
@@ -209,6 +228,23 @@ export interface ValueResponse {
   tier_availability: "available" | "tier_unavailable";
   sales_volume: number | null;
   available_values_cents: Record<string, number | null>;
+  /**
+   * Which source supplied the guide value. "PRICECHARTING_API" by default;
+   * "PRICECHARTING_PUBLIC_PAGE" ONLY when the API lacked the exact tier and the
+   * (flag-gated) public-page adapter filled it. Never conflated with the API.
+   */
+  valuation_source: "PRICECHARTING_API" | "PRICECHARTING_PUBLIC_PAGE";
+  /** Provenance when the value came from the public page; null otherwise. */
+  public_page: {
+    provider_id: string;
+    canonical_url: string | null;
+    retrieved_at: string;
+    identity_status: string | null;
+    displayed_label: string;
+    displayed_price_text: string;
+  } | null;
+  /** PriceCharting reference artwork from the public page (never the slab photo). */
+  reference_artwork: { image_url: string; image_source: string; is_reference_artwork: true } | null;
   warnings: string[];
 }
 
@@ -400,7 +436,7 @@ export async function handlePriceChartingRequest(
   try {
     const client = makeClient(deps);
     if (action === "value") {
-      return await handleValue(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
+      return await handleValue(client, input, deps.fetch ?? (globalThis.fetch as FetchLike), deps.fetchPageSnapshot);
     }
     if (action === "offer_image") {
       return await handleOfferImage(client, input, deps.fetch ?? (globalThis.fetch as FetchLike));
@@ -590,7 +626,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput,
   return { statusCode: 200, body };
 }
 
-async function handleValue(client: PriceChartingClient, input: SlabSearchInput, _fetchImpl: FetchLike): Promise<HandlerResult> {
+async function handleValue(client: PriceChartingClient, input: SlabSearchInput, _fetchImpl: FetchLike, fetchPageSnapshot?: HandlerDeps["fetchPageSnapshot"]): Promise<HandlerResult> {
   const productId = input.product_id?.trim();
   if (!productId) {
     throw new PriceChartingError("MISSING_PARAMETER", "product_id is required to retrieve a verified value.");
@@ -635,11 +671,64 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
     tier_availability: lookup.value_pennies !== null ? "available" : "tier_unavailable",
     sales_volume: salesVolume,
     available_values_cents: availableCents,
+    valuation_source: "PRICECHARTING_API",
+    public_page: null,
+    reference_artwork: null,
     warnings: [
       "Current PriceCharting Guide Value — not a last-sold, eBay-sold, or confirmed historical sale.",
       ...lookup.warnings,
     ],
   };
+
+  // API-FIRST public-page fallback. Consulted ONLY when: the flag is on (the Edge
+  // injects fetchPageSnapshot), the slab is GRADED, and the official API lacks the
+  // exact tier. If the API already has the value this block never runs, so the
+  // page is never fetched. Flag off ⇒ fetchPageSnapshot is undefined ⇒ behavior
+  // is byte-identical to before.
+  const tierKey = slabTierKey(input.grader, input.grade, input.grade_label);
+  if (fetchPageSnapshot && grader && tierKey && tierKey !== "raw" && lookup.value_pennies === null) {
+    const canonicalUrl = buildGameUrl(product.console_or_category ?? "", product.name);
+    if (canonicalUrl) {
+      const { resolution, page_snapshot } = await valueGradedTierApiFirst({
+        tier: tierKey,
+        api_cents: null, // this branch only runs on an API gap
+        fetchPage: () =>
+          fetchPageSnapshot({
+            product_id: product.pricecharting_id,
+            canonical_url: canonicalUrl,
+            expected: { card_number: input.card_number, language: input.language },
+          }),
+      });
+      if (resolution.source === "PRICECHARTING_PUBLIC_PAGE" && resolution.value_cents !== null && page_snapshot) {
+        const pageTier = page_snapshot.tiers.find((t) => t.tier === tierKey);
+        body.guide_value_cents = resolution.value_cents;
+        body.price_source = "unavailable"; // the API had none; keep API price_source honest
+        body.valuation_source = "PRICECHARTING_PUBLIC_PAGE";
+        body.tier_availability = "available";
+        body.selected_tier_key = tierKey;
+        body.selected_tier_label = pageTier?.displayed_label ?? tierKey;
+        body.designation_exact = true; // the page carries the exact designation tier
+        body.reference_artwork = page_snapshot.artwork;
+        body.public_page = {
+          provider_id: page_snapshot.provider_id,
+          canonical_url: page_snapshot.canonical_url,
+          retrieved_at: page_snapshot.retrieved_at,
+          identity_status: page_snapshot.identity_status,
+          displayed_label: pageTier?.displayed_label ?? tierKey,
+          displayed_price_text: pageTier?.displayed_price_text ?? "",
+        };
+        // Merge the complete page tier map so the UI can show every grade without
+        // a re-fetch. Page values only fill gaps; never overwrite an API value.
+        for (const [k, v] of Object.entries(snapshotTierMap(page_snapshot))) {
+          if (availableCents[k] === null || availableCents[k] === undefined) availableCents[k] = v;
+        }
+        body.warnings.push(
+          "CGC/BGS premium tier value read from the confirmed PriceCharting public product page (guide/reference value, not a completed sale) because the official API omitted this tier.",
+        );
+      }
+    }
+  }
+
   return { statusCode: 200, body };
 }
 
@@ -810,3 +899,8 @@ async function handleLookup(client: PriceChartingClient, input: SlabSearchInput,
   };
   return { statusCode: 200, body };
 }
+
+// Re-exported for the Edge Function to construct the flag-gated page-snapshot
+// dependency (the adapter is bundled here; the edge injects fetch/clock/env).
+export { getProductPageSnapshot } from "../../lib/pricecharting/webpage";
+export type { SnapshotDeps, SnapshotInput, PageFetch, ProductPageSnapshot } from "../../lib/pricecharting/webpage";

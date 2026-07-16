@@ -44,7 +44,7 @@ is completed and signed off by an operator.
   `Retry-After` respected, ≤1 req/s reservation, in-memory circuit breaker. No
   headless browser, no page-JS execution, no proxy/UA rotation, no anti-bot
   evasion. A block ⇒ `provider_blocked`.
-- **Parse (pure, fixture-tested):** a real HTML parser (**linkedom**, works in
+- **Parse (pure, fixture-tested):** a real HTML parser (**node-html-parser** — pure JS, bundles cleanly for Deno; works in
   Node + Deno) selects the `#full-prices` table and its rows/cells STRUCTURALLY
   by DOM (the price cell is chosen by `td.price`, not column position), so minor
   whitespace/formatting changes don't break extraction. Identity anchors come
@@ -94,12 +94,29 @@ is completed and signed off by an operator.
 - **Security:** SSRF-guarded URL construction; no cookies/session/PII stored; no
   raw HTML, headers, tokens, or stack traces returned to the client.
 
-## Not yet wired (the "enable" step)
+## Wiring status
 
-This PR delivers the complete, tested adapter library (flag off). Wiring it into
-an edge-function orchestration action and the linked-product UI panel is the
-enablement step, to be done together with flipping the flag on **after** the
-review above — so the deployed functions are unchanged while the flag is off.
+The adapter is now **wired into `pricecharting-search`** (the `value` action) and
+the intake UI, **behind the same flag**:
+
+- **Handler** (`src/server/pricecharting/handler.ts`): on the `value` action, when
+  the slab is graded and the official API lacks the exact tier, and only when the
+  Edge Function injected `fetchPageSnapshot` (flag on), it calls the adapter
+  API-first (`valueGradedTierApiFirst`) using the canonical `/game/...` URL built
+  from the confirmed product's console+name (never the cert). A verified page tier
+  fills the gap with distinct `valuation_source: "PRICECHARTING_PUBLIC_PAGE"`
+  provenance + reference artwork, and the complete tier map is merged for the UI.
+- **Edge** (`supabase/functions/pricecharting-search/index.ts`): injects
+  `fetchPageSnapshot` **only when `PRICECHARTING_PAGE_ADAPTER_ENABLED === "true"`**,
+  reusing the existing ≤1 req/s reserver. Flag off ⇒ dependency not injected ⇒
+  behavior is byte-identical to before.
+- **UI** (`NewSlab`): shows a "PriceCharting public page" badge, the exact tier +
+  price, "PriceCharting reference artwork", and the retrieval date — only when a
+  public-page value was used.
+
+The adapter is bundled into `pricecharting-bundle.js` via node-html-parser (no
+`npm:` runtime import, so `deno check` stays clean). Nothing fetches a page until
+an operator completes the review above and sets the flag `true`.
 
 ## Roadmap: one provider in a broader market engine
 

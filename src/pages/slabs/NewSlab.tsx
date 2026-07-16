@@ -844,6 +844,27 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
               }}
               onReject={rejectPc}
             />
+
+            {/* Public-page provenance — shown only when the official API lacked
+                the exact tier and the (flag-gated) public-page adapter filled it.
+                Distinct source; a guide/reference value, never a completed sale. */}
+            {pc?.valuation_source === "PRICECHARTING_PUBLIC_PAGE" && pc.public_page && (
+              <div className="mt-3 rounded-md border border-blue-400/40 bg-blue-50 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded border border-blue-500/50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">PriceCharting public page</span>
+                  <span className="font-medium text-blue-900">{pc.public_page.displayed_label} {pc.public_page.displayed_price_text} — exact reference value</span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The official PriceCharting API omitted this tier; the value was read from the confirmed public product page (current guide/reference value, not a completed sale). Retrieved {pc.public_page.retrieved_at.slice(0, 10)}.
+                </p>
+                {pc.reference_artwork && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <img src={pc.reference_artwork.image_url} alt="PriceCharting reference artwork" className="h-16 w-auto rounded border bg-background" />
+                    <span className="text-xs text-muted-foreground">PriceCharting reference artwork</span>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 
