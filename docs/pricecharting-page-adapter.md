@@ -67,10 +67,24 @@ is completed and signed off by an operator.
 - **Artwork:** only the product image on `storage.googleapis.com/
   images.pricecharting.com/…`; grader/set logos, ads, and seller images rejected.
   Labeled "PriceCharting reference artwork" — never the user's slab photo.
-- **Cache:** keyed by product id + canonical URL + parser version + source
-  version. **Never** the certification number, so equivalent specimens share one
-  snapshot. 24h success TTL; short negative TTL for blocked/rate-limited/parse
-  failures.
+- **Identity-driven, never specimen-driven:** search, page URL, cache, valuation,
+  scraping, and artwork are driven ONLY by the canonical card identity (name, set,
+  number, language, variant) and the catalog product it resolves to. The
+  certification number, grader, submission id, owner, and inventory record never
+  influence any of these — cert exists only for verification + inventory.
+- **Cache:** two equivalent keys, both cert/grader/owner-free, so every specimen
+  of a card shares one snapshot: `pageCacheKey` (product id + canonical URL +
+  parser/source version) and `identityCacheKey` (a canonical-identity slug like
+  `pokemon|japanese|blue-sky-stream|047-067|rayquaza-vmax`, usable before a
+  product id resolves). 24h success TTL; short negative TTL for blocked/rate-
+  limited/parse failures.
+- **Generic provider interface:** the snapshot carries a `provider_id` and the
+  code defines a `MarketPageProvider` contract (id, host allowlist, safeProductUrl,
+  parse, verify) so PriceCharting is the FIRST of several providers (Card Ladder,
+  Alt, Goldin, PWCC) behind one shape — each identity-verified with its own
+  provenance. The snapshot also captures product title, canonical URL, market
+  artwork, `last_updated_text` (null when absent), and every visible tier
+  (unavailable = null) so future UI needs no re-scrape.
 - **Valuation priority:** exact API tier → exact verified public-page tier →
   verified completed sales → compatible → unavailable. Agreement corroborates
   (not double-counted); a material conflict is surfaced and lowers confidence —

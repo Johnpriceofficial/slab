@@ -77,6 +77,12 @@ describe("PriceCharting public page — parse + normalize", () => {
     expect(parsePriceToCents("$99999999.00")).toBeNull(); // implausible
   });
 
+  it("captures last-updated text when the provider shows one, else null", () => {
+    expect(parseProductPage(RAYQUAZA).last_updated_text).toBeNull(); // PriceCharting shows none
+    const withTime = RAYQUAZA.replace("<div id=\"full-prices\">", "<time datetime=\"2026-07-16\">Updated Jul 16</time><div id=\"full-prices\">");
+    expect(parseProductPage(withTime).last_updated_text).toBe("2026-07-16");
+  });
+
   it("maps labels to the canonical tier vocabulary and ignores unknown labels", () => {
     expect(pageLabelToTier("CGC 10 Pristine")).toBe("cgc_10_pristine");
     expect(pageLabelToTier("BGS 10 Black")).toBe("bgs_10_black_label");

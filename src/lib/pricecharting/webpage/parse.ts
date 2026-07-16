@@ -29,6 +29,8 @@ export interface RawPageExtract {
   canonical_url: string | null;
   rows: RawPageRow[];
   image_url: string | null;
+  /** Provider "last updated / as of" text when present, else null. */
+  last_updated_text: string | null;
   /** False for search/error/challenge/login pages (no product identity + table). */
   looksLikeProductPage: boolean;
 }
@@ -113,6 +115,12 @@ export function parseProductPage(html: string): RawPageExtract {
     if (PRODUCT_IMAGE_RE.test(src)) { image_url = src; break; }
   }
 
+  // "Last updated / as of" text, when the provider shows one. A <time> element or
+  // a labelled element is preferred; null when absent (PriceCharting shows none).
+  let last_updated_text: string | null = null;
+  const timeEl = document.querySelector("time[datetime], [class*='last-update'], [id*='last-update'], [class*='updated-at']");
+  if (timeEl) last_updated_text = timeEl.getAttribute("datetime") ?? clean(timeEl.textContent) ?? null;
+
   const looksLikeProductPage = !!product_id && rows.length > 0;
 
   return {
@@ -123,6 +131,7 @@ export function parseProductPage(html: string): RawPageExtract {
     canonical_url,
     rows,
     image_url,
+    last_updated_text: last_updated_text || null,
     looksLikeProductPage,
   };
 }

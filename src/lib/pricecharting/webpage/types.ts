@@ -65,13 +65,21 @@ export interface PageIdentity {
   canonical_url: string | null;
 }
 
-/** The full normalized snapshot returned to callers. Contains NO raw HTML. */
+/**
+ * The full normalized snapshot returned to callers — the CANONICAL market
+ * reference for a card, shared by every specimen of that card regardless of
+ * certification number. Contains NO raw HTML.
+ */
 export interface ProductPageSnapshot {
   source: typeof PUBLIC_PAGE_SOURCE;
+  /** The market-page provider this snapshot came from (generic across providers). */
+  provider_id: "pricecharting";
   state: PageAdapterState;
   product_id: string | null;
   canonical_url: string | null;
   retrieved_at: string;
+  /** Provider-shown "last updated" text, when present (null for PriceCharting). */
+  last_updated_text: string | null;
   parser_version: number;
   source_version: string;
   identity_status: PageIdentityStatus | null;

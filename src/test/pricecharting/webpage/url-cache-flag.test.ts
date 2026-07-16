@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { safePriceChartingGameUrl, isAllowedRedirectTarget, buildGameUrl } from "@/lib/pricecharting/webpage/url";
-import { pageCacheKey, isCacheFresh, CACHE_TTL_SUCCESS_MS } from "@/lib/pricecharting/webpage/cache";
+import { pageCacheKey, identityCacheKey, isCacheFresh, CACHE_TTL_SUCCESS_MS } from "@/lib/pricecharting/webpage/cache";
 import { pageAdapterEnabled } from "@/lib/pricecharting/webpage/flag";
 
 const GAME = "https://www.pricecharting.com/game/pokemon-japanese-blue-sky-stream/rayquaza-vmax-47";
@@ -51,6 +51,22 @@ describe("public-page cache key — certification-free, specimen-shared", () => 
     const a = pageCacheKey(D);
     const b = pageCacheKey(D);
     expect(a).toBe(b);
+  });
+
+  it("keys by CANONICAL IDENTITY (cert/grader/owner-free), shared by every specimen", () => {
+    const identity = { category_or_manufacturer: "Pokemon", language: "Japanese", set: "Blue Sky Stream", card_number: "047/067", card_name: "Rayquaza VMAX" };
+    const key = identityCacheKey(identity);
+    expect(key).toContain("pokemon");
+    expect(key).toContain("japanese");
+    expect(key).toContain("blue-sky-stream");
+    expect(key).toContain("rayquaza-vmax");
+    // Certification number / grader are not inputs and can never appear.
+    expect(key).not.toMatch(/6165347099|cgc|psa|cert|owner|grader/i);
+    // Two specimens of the same card (different certs) resolve to the SAME key.
+    expect(identityCacheKey(identity)).toBe(key);
+    // A different card → a different key; card number is material.
+    expect(identityCacheKey({ ...identity, card_number: "001/067" })).not.toBe(key);
+    expect(key).toContain("v="); // parser/source version included
   });
 
   it("(20) the parser/source version is in the key, and freshness gates repeat fetches", () => {

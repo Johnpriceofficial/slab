@@ -55,6 +55,13 @@ describe("getProductPageSnapshot — orchestration", () => {
     expect(serialized).toContain("$45.39"); // displayed text is fine; raw markup is not
   });
 
+  it("carries a generic provider id (one provider among a future many)", async () => {
+    const { fn } = fakeFetch({ status: 200, body: RAYQUAZA_HTML });
+    const snap = await getProductPageSnapshot(INPUT, { fetch: fn, now: NOW, getEnv: () => "true" });
+    expect(snap.provider_id).toBe("pricecharting");
+    expect(snap).toHaveProperty("last_updated_text");
+  });
+
   it("rejects a page whose identity does not match the linked product", async () => {
     const { fn } = fakeFetch({ status: 200, body: WRONG_HTML }); // product 6910
     const snap = await getProductPageSnapshot(INPUT, { fetch: fn, now: NOW, getEnv: () => "true" });

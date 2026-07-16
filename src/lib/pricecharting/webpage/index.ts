@@ -52,10 +52,12 @@ function messageFor(state: PageAdapterState): string {
 function emptySnapshot(state: PageAdapterState, retrievedAt: string, product_id: string, canonical_url: string): ProductPageSnapshot {
   return {
     source: PUBLIC_PAGE_SOURCE,
+    provider_id: "pricecharting",
     state,
     product_id,
     canonical_url,
     retrieved_at: retrievedAt,
+    last_updated_text: null,
     parser_version: PARSER_VERSION,
     source_version: SOURCE_VERSION,
     identity_status: null,
@@ -91,10 +93,12 @@ export async function getProductPageSnapshot(input: SnapshotInput, deps: Snapsho
 
   return {
     source: PUBLIC_PAGE_SOURCE,
+    provider_id: "pricecharting",
     state,
     product_id: input.product_id,
     canonical_url: input.canonical_url,
     retrieved_at: retrievedAt,
+    last_updated_text: extract.last_updated_text,
     parser_version: PARSER_VERSION,
     source_version: SOURCE_VERSION,
     identity_status: verdict.status,
@@ -174,5 +178,6 @@ export * from "./image";
 export * from "./cache";
 export * from "./flag";
 export * from "./merge";
+export * from "./provider";
 export { fetchProductPage, resetPageBreaker } from "./fetch";
 export type { PageFetch, PageFetchDeps, PageFetchOptions, PageFetchResult } from "./fetch";
