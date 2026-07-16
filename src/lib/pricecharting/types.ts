@@ -57,8 +57,12 @@ export interface RawProduct {
   "box-only-price"?: number;
   "manual-only-price"?: number;
   "bgs-10-price"?: number;
-  "condition-17-price"?: number;
-  "condition-18-price"?: number;
+  "condition-17-price"?: number; // CGC 10
+  "condition-18-price"?: number; // SGC 10
+  "condition-19-price"?: number; // CGC 10 Pristine
+  "condition-20-price"?: number; // BGS 10 Black Label
+  "condition-21-price"?: number; // TAG 10
+  "condition-22-price"?: number; // ACE 10
 
   // Retailer buy/sell guidance (video games).
   "retail-loose-buy"?: number;

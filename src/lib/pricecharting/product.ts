@@ -6,7 +6,16 @@
 import type { Pennies } from "./money";
 import type { Product, RawProduct } from "./types";
 
-/** All price-bearing fields we recognize (integer pennies). */
+/**
+ * All price-bearing fields we recognize (integer pennies).
+ *
+ * PriceCharting keeps adding graded "condition-NN" columns beyond what its docs
+ * list. Anything NOT in this allowlist is silently dropped by `normalizeProduct`,
+ * which is exactly why CGC 10 Pristine (condition-19-price) never reached the
+ * valuation before — the list stopped at condition-18. The documented+observed
+ * numbering is: 17 = CGC 10, 18 = SGC 10, 19 = CGC 10 Pristine, 20 = BGS 10 Black
+ * Label, 21 = TAG 10, 22 = ACE 10. See grade-mapping.ts for the field→tier map.
+ */
 export const KNOWN_PRICE_FIELDS = [
   "loose-price",
   "cib-price",
@@ -17,6 +26,10 @@ export const KNOWN_PRICE_FIELDS = [
   "bgs-10-price",
   "condition-17-price",
   "condition-18-price",
+  "condition-19-price",
+  "condition-20-price",
+  "condition-21-price",
+  "condition-22-price",
   "retail-loose-buy",
   "retail-loose-sell",
   "retail-cib-buy",
@@ -39,11 +52,25 @@ function toStr(v: unknown): string | null {
   return s === "" ? null : s;
 }
 
+/** Matches any graded condition column, including future ones not yet mapped. */
+export const CONDITION_FIELD_RE = /^condition-\d+-price$/;
+
 /** Convert a raw API product into the normalized `Product`. */
 export function normalizeProduct(raw: RawProduct): Product {
   const raw_prices: Record<string, Pennies | null> = {};
   for (const field of KNOWN_PRICE_FIELDS) {
     if (field in raw) raw_prices[field] = toPennies(raw[field]);
+  }
+  // Preserve ANY graded condition-NN-price column, including future ones not yet
+  // in KNOWN_PRICE_FIELDS, so a newly-added tier is never silently dropped again
+  // (as condition-19 = CGC 10 Pristine once was). Unknown condition IDs are kept
+  // as raw values only — the authoritative grade map (grade-mapping.ts) maps just
+  // the known IDs (17–22) to tiers, so an unmapped condition field is preserved
+  // but NEVER treated as a known/exact tier.
+  for (const key of Object.keys(raw)) {
+    if (CONDITION_FIELD_RE.test(key) && !(key in raw_prices)) {
+      raw_prices[key] = toPennies(raw[key]);
+    }
   }
 
   const id = toStr(raw.id);

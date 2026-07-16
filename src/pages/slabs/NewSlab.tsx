@@ -30,6 +30,7 @@ import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import {
+  deriveValuationProvenance,
   identityChangeAction,
   isAutoDerived,
   isManualProvenance,
@@ -329,17 +330,18 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     // value using the documented ratios — never leave confidence on "Manual" when
     // the numbers actually came from PriceCharting. A guide value returned at the
     // slab's own grade is the exact tier; Verified still requires visual confirmation.
-    // §4/§5: only treat this as the EXACT designation tier when the server
-    // confirmed the returned tier represents the slab's grade+designation. A
-    // Pristine slab valued from the ordinary CGC 10 tier is a COMPATIBLE tier,
-    // never a "Verified exact Pristine".
-    const sourceProvenance: ValuationProvenance = sel.value_cents === null
-      ? "tier_unavailable"
-      : sel.is_estimate
-        ? "pricecharting_estimate"
-        : sel.designation_exact
-          ? "pricecharting_exact_tier"
-          : "pricecharting_compatible_tier";
+    // §4/§5: the EXACT-vs-COMPATIBLE-vs-unavailable decision is shared pure logic
+    // (deriveValuationProvenance), never re-implemented here. It also enforces the
+    // hard invariant that a GRADED slab is never valued from the ungraded/loose
+    // tier — a Pristine slab valued from the ordinary CGC 10 tier is COMPATIBLE,
+    // and one that fell through to loose-price is `tier_unavailable`, never raw.
+    const sourceProvenance: ValuationProvenance = deriveValuationProvenance({
+      value_cents: sel.value_cents,
+      is_estimate: sel.is_estimate,
+      designation_exact: sel.designation_exact,
+      grader_present: !!id.grader.trim(),
+      field_used: sel.grade_field,
+    });
     const derived = deriveValuation({
       guide_cents: sel.value_cents,
       confidence_score: sel.confidence_score,

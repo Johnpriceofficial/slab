@@ -14,6 +14,37 @@ export const VALUATION_PROVENANCE = [
 
 export type ValuationProvenance = (typeof VALUATION_PROVENANCE)[number];
 
+/**
+ * Resolve the valuation provenance from a PriceCharting lookup result — the ONE
+ * shared decision, so the intake page and any server path classify identically
+ * (never a parallel copy inside a React component).
+ *
+ * Hard invariants:
+ *  1. A GRADED specimen (a grader is present) is NEVER valued from the ungraded
+ *     loose-price tier — that resolves to `tier_unavailable`, not a silent raw price.
+ *  2. Consequently an ungraded source tier can never be labeled a grader-COMPATIBLE
+ *     value: the graded+ungraded combination is `tier_unavailable`, full stop.
+ *  3. `designation_exact` (e.g. a real CGC 10 Pristine tier) → exact; a real but
+ *     non-exact graded tier → compatible; an interpolation → estimate.
+ */
+export function deriveValuationProvenance(input: {
+  value_cents: number | null;
+  is_estimate?: boolean;
+  designation_exact?: boolean;
+  /** Whether the specimen being valued is graded (a grading company is present). */
+  grader_present: boolean;
+  /** The tier key the value came from, e.g. "ungraded", "cgc_10", "cgc_10_pristine". */
+  selected_tier_key?: string | null;
+  /** The raw PriceCharting field the value came from, e.g. "loose-price". */
+  field_used?: string | null;
+}): ValuationProvenance {
+  const ungradedTier = input.selected_tier_key === "ungraded" || input.field_used === "loose-price";
+  if (input.value_cents === null || (input.grader_present && ungradedTier)) return "tier_unavailable";
+  if (input.is_estimate) return "pricecharting_estimate";
+  if (input.designation_exact) return "pricecharting_exact_tier";
+  return "pricecharting_compatible_tier";
+}
+
 /** True when the current figures are AUTO-derived (source or formula), not manual. */
 export function isAutoDerived(provenance: ValuationProvenance): boolean {
   return provenance.startsWith("pricecharting_");
