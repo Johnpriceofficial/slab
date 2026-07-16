@@ -85,6 +85,22 @@ export function promoSuffix(fullNormalized: string | null): string | null {
   return /[a-z]/i.test(suf) ? suf : null;
 }
 
+/**
+ * Canonical language of a text blob, by the roots PriceCharting actually uses in
+ * its catalog/console names. Returns null when NO language is recognizable, so
+ * callers can distinguish "unrecognized requested language" (do not judge) from
+ * "recognized as English". Asian catalogs are marked ("Pokemon Japanese ...");
+ * English is unmarked, so an unmarked candidate is resolved to English by the
+ * caller (`languageRoot(hay) ?? "english"`), never left unknown.
+ */
+export function languageRoot(text: string): "japanese" | "korean" | "chinese" | "english" | null {
+  if (/japan/.test(text)) return "japanese";
+  if (/korea/.test(text)) return "korean";
+  if (/chin/.test(text)) return "chinese"; // chinese / china
+  if (/english/.test(text)) return "english";
+  return null;
+}
+
 /** Does `needle` (a card/issue number like "4" or "17a") appear as a token? */
 function numberTokenPresent(haystack: string, needle: string): boolean {
   const n = needle.toLowerCase().replace(/[^0-9a-z]/g, "");
@@ -421,13 +437,35 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
     let charHard = false;
     let languageHard = false;
     if (id.key === "language") {
-      const known = ["japanese", "korean", "english", "chinese"];
-      const wantedLanguage = known.find((l) => normalizeText(id.value).includes(l));
-      const candidateLanguage = known.find((l) => hay.includes(l));
-      if (wantedLanguage && candidateLanguage && wantedLanguage !== candidateLanguage) {
-        hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateLanguage}`);
+      // PriceCharting marks ASIAN-language catalogs explicitly ("Pokemon Japanese
+      // ...", "... Korean ...", "... Chinese ...") and leaves ENGLISH as the
+      // UNMARKED default. Treating an unmarked candidate as "unknown" (the old
+      // behavior) is exactly what let a Japanese slab link to the ENGLISH product:
+      // both carry the same character and the same 151/165 number, and the English
+      // page has no "japanese" token, so no conflict was ever raised. An unmarked
+      // candidate is therefore ENGLISH, not unknown. A RECOGNIZED requested
+      // language that disagrees with the candidate's (marked, or defaulted-English)
+      // language is a HARD conflict — language materially changes the card and its
+      // price. An UNRECOGNIZED requested language (null) never disqualifies.
+      const wantedLanguage = languageRoot(normalizeText(id.value));
+      const candidateMarked = languageRoot(hay); // positive marker, or null when unmarked
+      if (wantedLanguage && candidateMarked && wantedLanguage !== candidateMarked) {
+        // Two DIFFERENT positively-identified languages — unambiguously the wrong
+        // card (e.g. an English slab against a "... Japanese ..." catalog). Hard reject.
+        hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateMarked}`);
         disqualified = true;
         languageHard = true;
+      } else if (wantedLanguage && wantedLanguage !== "english" && !candidateMarked) {
+        // Wanted an ASIAN language but the candidate carries NO language marker.
+        // Because English is unmarked, this is AMBIGUOUS — most likely the English
+        // product, but possibly an unmarked Asian catalog. Do NOT hard-reject (that
+        // could drop the correct product), but raise a conflict so it can NEVER be
+        // auto-confirmed: the exact language/catalog must be proven (public page or
+        // visual) before this reaches confirmed status. This is the guard that stops
+        // a Japanese slab from silently linking to the English "151" product.
+        softConflicts.push(
+          `language unverified: requested ${wantedLanguage}, but the candidate carries no language marker (English is unmarked on PriceCharting) — confirm the exact catalog before accepting`,
+        );
       }
     }
     if (id.key === "card_name") {

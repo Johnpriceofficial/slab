@@ -454,10 +454,33 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // §3 Save-action gating. A DRAFT needs only a front image (and no duplicate
   // cert); a VERIFIED record needs the full identity plus all blockers resolved.
   const verifiedMissing = verifiedBlockers(buildInput("verified"), !!front);
+  const graded = !!id.grader.trim();
+  // A verified record must carry a RESOLVED valuation — a value the operator can
+  // stand behind — never a blank. When the exact tier is unavailable, the mandatory
+  // manual-valuation path (enter a guide/final, or completed-sale evidence) must be
+  // used before this can be saved as a verified record. This is what stops a 99%
+  // scan from producing a "verified" record with an empty valuation.
+  const valuationResolved =
+    dollarsToCents(val.final) !== null || dollarsToCents(val.guide) !== null;
+  // A GRADED slab linked to a PriceCharting product must have that identity
+  // AFFIRMATIVELY confirmed — either the value came from the slab's exact
+  // designation tier (API/public-page verified), or the operator visually confirmed
+  // the artwork. A language/tier-ambiguous link (e.g. a Japanese slab matched to the
+  // English product) must never reach a verified record on price alone.
+  const linkIdentityConfirmed =
+    !!pc &&
+    (pc.designation_exact ||
+      (visual?.product_id === pc.product_id && visual.status === "user_confirmed"));
   const verifyBlockers = [
     ...(verifiedMissing.length ? [`missing ${verifiedMissing.join(", ").toLowerCase()}`] : []),
     ...(dup ? [`a duplicate certification (Inventory #${dup.inventory_number})`] : []),
     ...(pc && pcStale ? ["an unresolved (stale) PriceCharting link — re-check it"] : []),
+    ...(!valuationResolved
+      ? ["an unresolved valuation — enter an exact tier, completed-sale evidence, or a manual guide/final value"]
+      : []),
+    ...(graded && pc && !linkIdentityConfirmed
+      ? ["an unconfirmed product identity — confirm the exact card (language / artwork / tier) or reject the link"]
+      : []),
   ];
   const canVerify = verifyBlockers.length === 0 && !saving && !saveRecovery;
   const draftBlockers = [
@@ -874,6 +897,21 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Valuation</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* Mandatory manual-valuation workflow — the exact graded tier was not
+                resolved from any source, so the operator MUST value by hand rather
+                than be left with a dead blank. This is the actionable resolution
+                path a 99% scan drops into when no exact tier/evidence exists. */}
+            {graded && !valuationResolved && (
+              <div className="col-span-2 flex items-start gap-2 rounded-md border border-amber-500/50 bg-amber-50 p-3 text-sm text-amber-900 sm:col-span-4">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">Manual valuation required — no exact tier value was resolved.</p>
+                  <p className="mt-0.5 text-amber-800">
+                    No exact {id.grade_label ? `${id.grade_label} ` : ""}{id.grader || "graded"} tier value came back from PriceCharting (official API or public page){pc ? "" : ", and no product is linked yet"}. Enter a Guide Value below (which fills Final / Quick-Sale / Replacement), or type a Final value from verified completed-sale evidence. This slab cannot be saved as a verified record while the valuation is blank.
+                  </p>
+                </div>
+              </div>
+            )}
             {valStale && isManualProvenance(valProvenance) && hasManualFigures() && (
               <div className="col-span-2 flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800 sm:col-span-4">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
