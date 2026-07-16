@@ -7,11 +7,32 @@
 --      column exists), so lookups don't seq-scan as data grows.
 -- Nothing here weakens RLS or ownership. No function logic changes.
 
+-- Per-function EXECUTE-grant audit (no grant changes here — grants are already
+-- explicitly classified in earlier migrations and verified correct):
+--   Customer RPCs (authenticated):  create_slab, stage_raw_card, apply_slab_pricing,
+--     archive_slab, unarchive_slab, check_slab_certification,
+--     record_pricecharting_confirmation, resolve_inventory, resolve_slab_inventory,
+--     link_ai_analysis_run — each proves auth.uid()/ownership or admin INSIDE the body.
+--   Admin-only (authenticated + internal is_admin gate): hard_delete_slab and admin
+--     maintenance RPCs — the body returns NOT_AUTHORIZED for non-admins.
+--   RLS helpers (MUST keep authenticated[,anon] EXECUTE — is_admin is referenced by
+--     40 RLS policies): is_admin, can_access_slab, normalize_cert, normalize_grader.
+--   Trigger functions (fire via triggers, no client EXECUTE needed): assign_raw_card_
+--     inventory, enforce_inventory_id_immutable, next_slab_inventory_number,
+--     set_child_owner_from_slab, set_derivative_owner_from_image, capture_*, etc.
+-- This migration deliberately does NOT rewrite those grants: a blind revoke would
+-- break the 40 is_admin RLS policies. Grant changes, if the Supabase Advisor flags
+-- specific PUBLIC grants, must be added per-function after reviewing that finding.
+
 -- ── 1. Fixed search_path on all SECURITY DEFINER functions ──────────────────
 -- A SECURITY DEFINER function with a mutable search_path is a privilege-
 -- escalation risk (a caller could shadow an unqualified object). We pin it to
--- the function's own schema chain. Bodies are unchanged; ALTER FUNCTION only
--- sets the config. Functions that already fix search_path are skipped.
+-- the function's own schema chain. This changes ONLY the search_path config —
+-- never the body, signature, or EXECUTE grants. Introspection is used so exact
+-- overloaded signatures are always correct. Functions that already fix
+-- search_path are skipped (idempotent). This fixes the Advisor
+-- `function_search_path_mutable` warnings for enforce_inventory_id_immutable,
+-- parse_inventory_code, assign_raw_card_inventory, and every other definer fn.
 DO $$
 DECLARE r record;
 BEGIN
@@ -39,7 +60,11 @@ END $$;
 -- are RLS-enabled with NO policies (which already denies all client access);
 -- here we ALSO revoke every table privilege from anon/authenticated so the
 -- deny-all is explicit and belt-and-suspenders, and document the intent.
--- Access is service_role only (Edge Functions with the service key).
+-- Access is service_role only (Edge Functions with the service key), which
+-- BYPASSES RLS — so we do NOT FORCE RLS (that only affects the table owner and
+-- could interfere with owner-run maintenance; the revoke + no-policy already
+-- denies every client). Service-role workflows are proven still-working by the
+-- integration suite.
 DO $$
 DECLARE t text;
 BEGIN
@@ -51,11 +76,10 @@ BEGIN
   LOOP
     IF to_regclass(t) IS NOT NULL THEN
       EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', t);
-      EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', t);
       EXECUTE format('REVOKE ALL ON %s FROM anon, authenticated', t);
       EXECUTE format(
         'COMMENT ON TABLE %s IS %L', t,
-        'Service-only. RLS enabled + forced with NO client policies = deny-all for anon/authenticated by design; write/read via service_role only.'
+        'Service-only. RLS enabled with NO client policies = deny-all for anon/authenticated by design; access via service_role only.'
       );
     END IF;
   END LOOP;

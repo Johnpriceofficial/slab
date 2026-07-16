@@ -63,4 +63,25 @@ suite("security hardening — service-only tables deny all client access", () =>
     const { error } = await userClient.from("api_user_daily_usage").update({ count: 0 } as never).eq("user_id", createdUserIds[0] ?? "x");
     expect(error).not.toBeNull();
   });
+
+  // Prove the hardening did NOT break the existing grant model.
+  it("a customer is DENIED an admin-only RPC (hard_delete_slab)", async () => {
+    const { error } = await userClient.rpc("hard_delete_slab", { p_id: "00000000-0000-0000-0000-000000000000" });
+    // Either an authorization error from the body's is_admin gate, or a not-found —
+    // never a successful delete for a non-admin.
+    expect(error).not.toBeNull();
+    expect(String(error?.message)).toMatch(/authoriz|admin|permission|not found|denied/i);
+  });
+
+  it("a customer RPC still WORKS after hardening (check_slab_certification is callable)", async () => {
+    // A customer-executable definer RPC must still be invokable (search_path pin
+    // must not have revoked EXECUTE). A fresh cert simply returns no duplicate.
+    const { error } = await userClient.rpc("check_slab_certification", { p_grader: "CGC", p_cert: `SEC${stamp}` });
+    expect(error).toBeNull();
+  });
+
+  it("service-role workflows still function on a service-only table after the revoke", async () => {
+    const { error } = await admin.from("api_rate_limits").select("*").limit(1);
+    expect(error).toBeNull(); // service_role bypasses RLS and retains privileges
+  });
 });
