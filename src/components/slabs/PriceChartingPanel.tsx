@@ -47,6 +47,12 @@ export interface SelectedPriceCharting {
   designation_exact: boolean;
   /** The actual tier label the value came from, e.g. "CGC 10" (never a fake "CGC 10 Pristine"). */
   selected_tier_label: string | null;
+  /** Which source supplied the guide value — API by default, or the public page. */
+  valuation_source?: "PRICECHARTING_API" | "PRICECHARTING_PUBLIC_PAGE";
+  /** Public-page provenance when the value came from the page; null/absent otherwise. */
+  public_page?: { provider_id: string; canonical_url: string | null; retrieved_at: string; identity_status: string | null; displayed_label: string; displayed_price_text: string } | null;
+  /** PriceCharting reference artwork from the public page (never the slab photo). */
+  reference_artwork?: { image_url: string; image_source: string; is_reference_artwork: true } | null;
 }
 
 interface PriceChartingPanelProps {
@@ -289,6 +295,9 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
         is_estimate: res.is_estimate,
         available_values_cents: res.available_values_cents ?? {},
         value_response: res,
+        valuation_source: res.valuation_source,
+        public_page: res.public_page,
+        reference_artwork: res.reference_artwork,
         designation_exact: res.designation_exact,
         selected_tier_label: res.selected_tier_label,
       });

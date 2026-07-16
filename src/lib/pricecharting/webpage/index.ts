@@ -179,5 +179,6 @@ export * from "./cache";
 export * from "./flag";
 export * from "./merge";
 export * from "./provider";
+export * from "./tier";
 export { fetchProductPage, resetPageBreaker } from "./fetch";
 export type { PageFetch, PageFetchDeps, PageFetchOptions, PageFetchResult } from "./fetch";

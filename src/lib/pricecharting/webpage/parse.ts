@@ -1,8 +1,8 @@
 /**
- * PriceCharting product-page parser. Uses a real HTML parser (linkedom — works
- * in both Node and Deno) and selects the identity anchors and `#full-prices`
- * table STRUCTURALLY by DOM, not by regex, so minor whitespace/formatting
- * changes on the page don't break extraction.
+ * PriceCharting product-page parser. Uses a real HTML parser (node-html-parser —
+ * pure JS, works in Node AND bundles cleanly for the Deno Edge Function) and
+ * selects the identity anchors and `#full-prices` table STRUCTURALLY by DOM, not
+ * by regex, so minor whitespace/formatting changes don't break extraction.
  *
  *   <h1 id="product_name" title="<product-id>"> <card name> #<number> <a>console</a> </h1>
  *   <a ... data-product-id="<product-id>">
@@ -14,7 +14,7 @@
  * (no product identity + no price table) so verification can reject them.
  */
 
-import { parseHTML } from "linkedom";
+import { parse } from "node-html-parser";
 
 export interface RawPageRow {
   label: string;
@@ -47,9 +47,8 @@ function cardNumberFrom(title: string | null): string | null {
   return m ? m[1] : null;
 }
 
-// deno-lint-ignore no-explicit-any
 export function parseProductPage(html: string): RawPageExtract {
-  const { document } = parseHTML(html);
+  const document = parse(html, { comment: false });
 
   const h1 = document.querySelector("h1#product_name");
 

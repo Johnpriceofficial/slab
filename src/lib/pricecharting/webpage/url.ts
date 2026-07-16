@@ -58,7 +58,10 @@ export function isAllowedRedirectTarget(location: string, base: string): boolean
  * slug is empty after sanitization.
  */
 export function buildGameUrl(consoleSlug: string, productSlug: string): string | null {
-  const clean = (s: string) => (s ?? "").toLowerCase().trim().replace(/[^a-z0-9-]/g, "");
+  // Slugify: lowercase, drop '#', collapse any non-alphanumeric run to a single
+  // dash, trim edge dashes. Works for a raw name ("Rayquaza VMAX #47" ->
+  // "rayquaza-vmax-47") and a pre-slugged value alike; strips path/host injection.
+  const clean = (s: string) => (s ?? "").toLowerCase().replace(/#/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const c = clean(consoleSlug);
   const p = clean(productSlug);
   if (!c || !p) return null;
