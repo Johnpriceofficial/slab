@@ -16,6 +16,7 @@ describe("public-page URL safety (SSRF)", () => {
     expect(safePriceChartingGameUrl("https://evil.com/game/x/y")).toBeNull();
     expect(safePriceChartingGameUrl("https://evil-pricecharting.com/game/x/y")).toBeNull(); // suffix trick
     expect(safePriceChartingGameUrl("https://user:pass@www.pricecharting.com/game/x/y")).toBeNull();
+    expect(safePriceChartingGameUrl("https://www.pricecharting.com:8443/game/x/y")).toBeNull(); // custom port
     expect(safePriceChartingGameUrl("https://www.pricecharting.com/offers?product=3472875")).toBeNull(); // not /game/
     expect(safePriceChartingGameUrl("https://127.0.0.1/game/x/y")).toBeNull();
     expect(safePriceChartingGameUrl("file:///etc/passwd")).toBeNull();
@@ -80,11 +81,14 @@ describe("public-page cache key — certification-free, specimen-shared", () => 
 });
 
 describe("feature flag", () => {
-  it("(24) is OFF unless the env var is exactly 'true'", () => {
+  it("(24) is OFF unless explicitly enabled with 'true' (operator-controlled)", () => {
+    // Default OFF — the adapter never turns on silently. ToS-gated opt-in only.
     expect(pageAdapterEnabled(() => undefined)).toBe(false);
     expect(pageAdapterEnabled(() => "")).toBe(false);
     expect(pageAdapterEnabled(() => "false")).toBe(false);
     expect(pageAdapterEnabled(() => "1")).toBe(false);
+    expect(pageAdapterEnabled(() => "off")).toBe(false);
+    // Only an explicit "true" (case-insensitive) enables it.
     expect(pageAdapterEnabled(() => "TRUE")).toBe(true);
     expect(pageAdapterEnabled(() => "true")).toBe(true);
   });

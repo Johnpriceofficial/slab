@@ -548,15 +548,28 @@ export async function ebaySellerOperation(
   return (data ?? { status: "error", message: "eBay returned no response." }) as Record<string, any>;
 }
 
+/**
+ * Full identity sent with a value request. The confirmed product page is part of
+ * the canonical workflow, so the server needs the whole identity — the canonical
+ * URL (to fetch the exact page), and card_number + language (to VERIFY the page is
+ * the same card before any tier/artwork is trusted), plus set/name/year/variation
+ * for persistence and audit. Every field is optional except product_id; empty
+ * values are dropped so the server derives what it can.
+ */
+export interface PriceChartingValueArgs extends PriceChartingSearchArgs {
+  product_id: string;
+  canonical_url?: string | null;
+}
+
 export async function priceChartingValue(
-  productId: string,
-  grader?: string,
-  grade?: string | number,
-  grade_label?: string,
+  args: PriceChartingValueArgs,
 ): Promise<ValueResponse | HandlerErrorBody> {
-  const { data, error } = await sb.functions.invoke("pricecharting-search", {
-    body: { action: "value", product_id: productId, grader, grade, grade_label },
-  });
+  const { product_id, ...identity } = args;
+  const body: Record<string, unknown> = { action: "value", product_id };
+  for (const [k, v] of Object.entries(identity)) {
+    if (v !== undefined && v !== null && v !== "") body[k] = v;
+  }
+  const { data, error } = await sb.functions.invoke("pricecharting-search", { body });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as ValueResponse | HandlerErrorBody;
 }
@@ -700,7 +713,18 @@ export async function refreshSlabPricing(slab: Slab): Promise<RefreshPricingResu
       return { status: "no_product", message: "No PriceCharting product is linked and none could be matched automatically." };
     }
 
-    const value = await priceChartingValue(resolution.product_id, slab.grader ?? undefined, slab.grade ?? undefined, slab.grade_label ?? undefined);
+    const value = await priceChartingValue({
+      product_id: resolution.product_id,
+      card_name: slab.card_name ?? undefined,
+      set: slab.set_name ?? undefined,
+      card_number: slab.card_number ?? undefined,
+      year: slab.year ?? undefined,
+      language: slab.language ?? undefined,
+      variation: slab.variation ?? undefined,
+      grader: slab.grader ?? undefined,
+      grade: slab.grade ?? undefined,
+      grade_label: slab.grade_label ?? undefined,
+    });
     if (value.status === "error") return { status: "error", message: value.message };
 
     // ONE atomic, stale-guarded write: tiers + raw + the scalar mirror fields all

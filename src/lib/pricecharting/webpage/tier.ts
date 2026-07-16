@@ -18,7 +18,10 @@ export function slabTierKey(
   const label = (gradeLabel ?? "").toLowerCase();
   const pristine = /pristine/.test(label);
   const perfect = /perfect/.test(label);
-  const blackLabel = /black\s*label/.test(label);
+  // BGS's top designation shows on PriceCharting as "BGS 10 Black"; a scan may read
+  // "Black", "Black Label", or "BL" — any "black" token in a BGS grade-10 context is
+  // the Black Label tier (never the ordinary BGS 10).
+  const blackLabel = /black/.test(label) || /(^|\s)bl(\s|$)/.test(label);
 
   if (n === 10) {
     switch (gr) {

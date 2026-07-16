@@ -48,10 +48,13 @@ Deno.serve(async (req) => {
     // Durable, DB-backed 1 req/sec reservation across all isolates + retries.
     const reserve = makePriceChartingReserver();
 
-    // Public-page fallback is injected ONLY when the feature flag is on, so with
-    // the flag off the handler behaves byte-identically (the API is the only
-    // source). The page is consulted server-side, API-first, on a tier gap; it
-    // reuses the same ≤1 req/s reserver and never returns raw HTML.
+    // The public-page adapter is DISABLED BY DEFAULT and explicitly operator-
+    // controlled: it is injected ONLY when PRICECHARTING_PAGE_ADAPTER_ENABLED is
+    // exactly "true". Enabling it in production is gated behind the PriceCharting
+    // Terms / production-request-policy review — it never defaults on. When on, the
+    // page is fetched server-side for every confirmed graded product to supply the
+    // full grade table + reference artwork, reusing the same ≤1 req/s reserver; it
+    // never returns raw HTML. Anything other than "true" ⇒ API-only.
     const pageEnabled = (Deno.env.get("PRICECHARTING_PAGE_ADAPTER_ENABLED") ?? "").trim().toLowerCase() === "true";
     // deno-lint-ignore no-explicit-any
     const fetchPageSnapshot = pageEnabled

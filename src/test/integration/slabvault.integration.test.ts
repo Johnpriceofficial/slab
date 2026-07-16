@@ -308,8 +308,11 @@ suite("GradedCardValue.com live integration", () => {
 
     // 1. Happy path (proves the old `boolean > integer` bug is gone): applied=true,
     //    columns written atomically.
+    // p_raw mirrors a real value response: the evidence-based capture trigger keeps
+    // an exact value only when the raw carries available tier + exact designation +
+    // a non-null guide value (a bare { ok: true } stub is treated as unverified).
     const applied1 = await adminClient.rpc("apply_slab_pricing", {
-      p_slab_id: id, p_tiers: tiers(t1), p_raw: { ok: true }, p_priced_at: t1,
+      p_slab_id: id, p_tiers: tiers(t1), p_raw: { tier_availability: "available", designation_exact: true, guide_value_cents: 5000 }, p_priced_at: t1,
       p_scalars: { product_id: "5427932", product_name: "Charmander #289/S-P", grade_field: "condition-17-price", sales_volume: 3, match_status: "exact", apply_value: true, value_cents: 5000, variance: -15, apply_provenance: true, valuation_provenance: "pricecharting_exact_tier", valuation_confidence: "high" },
     });
     expect(applied1.error).toBeNull();

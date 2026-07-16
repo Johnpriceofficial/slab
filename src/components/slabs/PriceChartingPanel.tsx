@@ -43,6 +43,12 @@ export interface SelectedPriceCharting {
   available_values_cents: Record<string, number | null>;
   /** The raw token-free value response, kept for audit persistence. */
   value_response: unknown;
+  /** The canonical PriceCharting product-page URL used for this valuation. */
+  canonical_url?: string | null;
+  /** Whether the exact requested tier resolved to a usable value. */
+  tier_availability?: "available" | "tier_unavailable";
+  /** The canonical tier key the value came from, e.g. "cgc_10_pristine". */
+  selected_tier_key?: string | null;
   /** True only when the returned tier exactly represents the slab's grade+designation. */
   designation_exact: boolean;
   /** The actual tier label the value came from, e.g. "CGC 10" (never a fake "CGC 10 Pristine"). */
@@ -279,7 +285,22 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   const confirmCandidate = async (c: CandidateResult) => {
     setConfirmingId(c.product_id);
     try {
-      const res = await priceChartingValue(c.product_id, identity.grader, identity.grade, identity.grade_label);
+      // Send the FULL confirmed identity so the server can fetch + VERIFY the exact
+      // product page (card_number + language guard the page identity) and persist
+      // canonical URL / tiers / artwork. Empty fields are dropped server-side.
+      const res = await priceChartingValue({
+        product_id: c.product_id,
+        canonical_url: c.canonical_url ?? undefined,
+        card_name: identity.card_name,
+        set: identity.set,
+        card_number: identity.card_number,
+        year: identity.year,
+        language: identity.language,
+        variation: identity.variation,
+        grader: identity.grader,
+        grade: identity.grade,
+        grade_label: identity.grade_label,
+      });
       if (res.status === "error") {
         toast.error(res.message);
         return;
@@ -295,10 +316,13 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
         is_estimate: res.is_estimate,
         available_values_cents: res.available_values_cents ?? {},
         value_response: res,
+        canonical_url: res.canonical_url,
+        tier_availability: res.tier_availability,
         valuation_source: res.valuation_source,
         public_page: res.public_page,
         reference_artwork: res.reference_artwork,
         designation_exact: res.designation_exact,
+        selected_tier_key: res.selected_tier_key,
         selected_tier_label: res.selected_tier_label,
       });
       toast.success(`Linked to ${res.product_name}`);
@@ -479,7 +503,10 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
                     )}
                     <p className="text-[10px] text-muted-foreground">PriceCharting seller-listing photo, not official artwork and not a sold price. It never overrides an identity conflict.</p>
                   </div>
-                  <EbayReferenceImages candidate={c} identity={identity} />
+                  {/* eBay isolation: NO eBay reference search for UNSELECTED search
+                      candidates. eBay is a fallback for a single CONFIRMED product
+                      only (and only when it has no PriceCharting artwork), so a
+                      candidate list never storms eBay with per-candidate requests. */}
                 </div>}
 
                 {/* §3 Side-by-side visual confirmation. RIGHT is a MARKETPLACE
@@ -744,18 +771,34 @@ export function PriceChartingPanel({ identity, selectedProductId, onSelect, fron
   );
 }
 
-function EbayReferenceImages({ candidate, identity }: { candidate: CandidateResult; identity: PriceChartingSearchArgs }) {
+export function EbayReferenceImages({
+  candidate,
+  identity,
+  hasPriceChartingImage,
+}: {
+  candidate: CandidateResult;
+  identity: PriceChartingSearchArgs;
+  /** When a PriceCharting product/page image already exists, eBay is NOT queried. */
+  hasPriceChartingImage?: boolean;
+}) {
   const query = [candidate.product_name, identity.set, identity.language].filter(Boolean).join(" ");
+  // eBay ISOLATION: only fall back to eBay reference images when NO PriceCharting
+  // image exists. When PriceCharting artwork is present we never call eBay at all,
+  // so eBay outages / 409s can never storm the panel or affect valuation/artwork.
+  const skipEbay = hasPriceChartingImage ?? !!candidate.candidate_image_url;
   const [data, setData] = useState<Awaited<ReturnType<typeof ebayReferenceSearch>> | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!skipEbay);
   useEffect(() => {
+    if (skipEbay) return; // PriceCharting artwork present → no eBay request
     let active = true;
     setIsLoading(true);
     ebayReferenceSearch({ query, card_name: identity.card_name, card_number: identity.card_number })
       .then((result) => { if (active) setData(result); })
       .finally(() => { if (active) setIsLoading(false); });
     return () => { active = false; };
-  }, [query, identity.card_name, identity.card_number]);
+  }, [skipEbay, query, identity.card_name, identity.card_number]);
+  // PriceCharting artwork already covers this candidate — render nothing for eBay.
+  if (skipEbay) return null;
   if (isLoading) return <div className="sm:col-span-2 text-xs text-muted-foreground">Checking eligible eBay reference listings…</div>;
   if (!data || data.status !== "success" || data.items.length === 0) {
     return <div className="sm:col-span-2 rounded border p-2 text-xs italic text-muted-foreground">No independent reference artwork is available. Verify using the uploaded card image and product metadata.</div>;

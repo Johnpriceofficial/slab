@@ -28,7 +28,7 @@ import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import {
   getProductPageSnapshot,
-  valueGradedTierApiFirst,
+  valueGradedTierCanonical,
   buildGameUrl,
   slabTierKey,
   snapshotTierMap,
@@ -183,6 +183,9 @@ export interface CandidateResult {
   grade_field: string | null;
   guide_value_cents: number | null;
   company_specific: boolean;
+  /** The canonical PriceCharting product-page URL, so a value/confirm request can
+   *  reuse it verbatim rather than re-deriving a slug. Derived when absent. */
+  canonical_url?: string | null;
   /** Catalog artwork fetched before selection so the operator can compare candidates. */
   candidate_image_url?: string | null;
   candidate_image_source?: ImageSource;
@@ -693,51 +696,73 @@ async function handleValue(client: PriceChartingClient, input: SlabSearchInput, 
     ],
   };
 
-  // API-FIRST public-page fallback. Consulted ONLY when: the flag is on (the Edge
-  // injects fetchPageSnapshot), the slab is GRADED, and the official API lacks the
-  // exact tier. If the API already has the value this block never runs, so the
-  // page is never fetched. Flag off ⇒ fetchPageSnapshot is undefined ⇒ behavior
-  // is byte-identical to before.
+  // CANONICAL public-page step. The confirmed product's public page is part of the
+  // canonical workflow — NOT a gap-only fallback. When the flag is on (the Edge
+  // injects fetchPageSnapshot), the slab is GRADED, and we have a canonical URL, the
+  // page is fetched for EVERY confirmed graded product to supply the full grade
+  // table, the reference artwork, and tier corroboration. The API value still WINS
+  // when present (resolveTierSource never overwrites a valid exact API value); the
+  // page only fills a missing tier, and only when its identity VERIFIED. A page
+  // fetch failure degrades to API-only and never blocks a valid API valuation.
+  // Flag off ⇒ fetchPageSnapshot is undefined ⇒ API-only, byte-identical to before.
   const tierKey = slabTierKey(input.grader, input.grade, input.grade_label);
-  if (fetchPageSnapshot && grader && tierKey && tierKey !== "raw" && lookup.value_pennies === null) {
-    if (canonicalUrl) {
-      const { resolution, page_snapshot } = await valueGradedTierApiFirst({
-        tier: tierKey,
-        api_cents: null, // this branch only runs on an API gap
-        fetchPage: () =>
-          fetchPageSnapshot({
-            product_id: product.pricecharting_id,
-            canonical_url: canonicalUrl,
-            expected: { card_number: input.card_number, language: input.language },
-          }),
-      });
-      if (resolution.source === "PRICECHARTING_PUBLIC_PAGE" && resolution.value_cents !== null && page_snapshot) {
-        const pageTier = page_snapshot.tiers.find((t) => t.tier === tierKey);
-        body.guide_value_cents = resolution.value_cents;
-        body.price_source = "unavailable"; // the API had none; keep API price_source honest
-        body.valuation_source = "PRICECHARTING_PUBLIC_PAGE";
-        body.tier_availability = "available";
-        body.selected_tier_key = tierKey;
+  if (fetchPageSnapshot && grader && tierKey && tierKey !== "raw" && canonicalUrl) {
+    const { resolution, page_snapshot } = await valueGradedTierCanonical({
+      tier: tierKey,
+      api_cents: lookup.value_pennies, // API value wins when present; page fills a gap
+      fetchPage: () =>
+        fetchPageSnapshot({
+          product_id: product.pricecharting_id,
+          canonical_url: canonicalUrl,
+          expected: { card_number: input.card_number, language: input.language },
+        }),
+    });
+
+    // Use page data (artwork + full tier table) ONLY when the page identity did not
+    // conflict. A REJECTED identity means the page is a different card — ignore it.
+    const pageUsable = !!page_snapshot && page_snapshot.identity_status !== "REJECTED";
+    if (pageUsable && page_snapshot) {
+      // Reference artwork = the confirmed PriceCharting product-page image, set
+      // INDEPENDENTLY of which source supplied the value (item 5).
+      if (page_snapshot.artwork) body.reference_artwork = page_snapshot.artwork;
+      // Merge the complete page tier map so the UI shows every grade from one fetch.
+      // Page values only fill gaps; they never overwrite an API value.
+      for (const [k, v] of Object.entries(snapshotTierMap(page_snapshot))) {
+        if (availableCents[k] === null || availableCents[k] === undefined) availableCents[k] = v;
+      }
+      const pageTier = page_snapshot.tiers.find((t) => t.tier === tierKey);
+      body.public_page = {
+        provider_id: page_snapshot.provider_id,
+        canonical_url: page_snapshot.canonical_url,
+        retrieved_at: page_snapshot.retrieved_at,
+        identity_status: page_snapshot.identity_status,
+        displayed_label: pageTier?.displayed_label ?? tierKey,
+        displayed_price_text: pageTier?.displayed_price_text ?? "",
+      };
+    }
+
+    // Value resolution: API wins; the VERIFIED page fills a missing exact tier.
+    if (resolution.value_cents !== null && resolution.source !== "NONE") {
+      body.guide_value_cents = resolution.value_cents;
+      body.valuation_source = resolution.source;
+      body.tier_availability = "available";
+      body.selected_tier_key = tierKey;
+      if (resolution.source === "PRICECHARTING_PUBLIC_PAGE") {
+        const pageTier = page_snapshot?.tiers.find((t) => t.tier === tierKey);
         body.selected_tier_label = pageTier?.displayed_label ?? tierKey;
         body.designation_exact = true; // the page carries the exact designation tier
-        body.reference_artwork = page_snapshot.artwork;
-        body.public_page = {
-          provider_id: page_snapshot.provider_id,
-          canonical_url: page_snapshot.canonical_url,
-          retrieved_at: page_snapshot.retrieved_at,
-          identity_status: page_snapshot.identity_status,
-          displayed_label: pageTier?.displayed_label ?? tierKey,
-          displayed_price_text: pageTier?.displayed_price_text ?? "",
-        };
-        // Merge the complete page tier map so the UI can show every grade without
-        // a re-fetch. Page values only fill gaps; never overwrite an API value.
-        for (const [k, v] of Object.entries(snapshotTierMap(page_snapshot))) {
-          if (availableCents[k] === null || availableCents[k] === undefined) availableCents[k] = v;
-        }
+        body.price_source = "unavailable"; // the API had none; keep API price_source honest
         body.warnings.push(
-          "CGC/BGS premium tier value read from the confirmed PriceCharting public product page (guide/reference value, not a completed sale) because the official API omitted this tier.",
+          "Premium graded tier value read from the confirmed PriceCharting public product page (guide/reference value, not a completed sale) because the official API omitted this tier.",
         );
       }
+      // API-sourced value keeps the API tier label / designation_exact set at creation.
+    }
+    if (resolution.note) body.warnings.push(resolution.note);
+    if (page_snapshot && page_snapshot.identity_status === "REJECTED") {
+      body.warnings.push(
+        "PriceCharting public-page identity check FAILED for the linked product — its tiers and artwork were NOT used. Confirm the exact product before trusting this valuation.",
+      );
     }
   }
 

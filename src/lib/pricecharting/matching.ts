@@ -12,6 +12,7 @@ import { searchProducts, getProductById, getProductByUPC } from "./api";
 import { PriceChartingError, isPriceChartingError } from "./errors";
 import { cardNumberToken } from "./card-number";
 import { characterMatch } from "./character-name";
+import { normalizeLanguage, detectConsoleLanguage, languageFamily } from "./language";
 import type {
   ConfidenceLevel,
   ItemInput,
@@ -83,22 +84,6 @@ export function promoSuffix(fullNormalized: string | null): string | null {
   if (i < 0) return null;
   const suf = fullNormalized.slice(i + 1);
   return /[a-z]/i.test(suf) ? suf : null;
-}
-
-/**
- * Canonical language of a text blob, by the roots PriceCharting actually uses in
- * its catalog/console names. Returns null when NO language is recognizable, so
- * callers can distinguish "unrecognized requested language" (do not judge) from
- * "recognized as English". Asian catalogs are marked ("Pokemon Japanese ...");
- * English is unmarked, so an unmarked candidate is resolved to English by the
- * caller (`languageRoot(hay) ?? "english"`), never left unknown.
- */
-export function languageRoot(text: string): "japanese" | "korean" | "chinese" | "english" | null {
-  if (/japan/.test(text)) return "japanese";
-  if (/korea/.test(text)) return "korean";
-  if (/chin/.test(text)) return "chinese"; // chinese / china
-  if (/english/.test(text)) return "english";
-  return null;
 }
 
 /** Does `needle` (a card/issue number like "4" or "17a") appear as a token? */
@@ -447,22 +432,29 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       // language that disagrees with the candidate's (marked, or defaulted-English)
       // language is a HARD conflict — language materially changes the card and its
       // price. An UNRECOGNIZED requested language (null) never disqualifies.
-      const wantedLanguage = languageRoot(normalizeText(id.value));
-      const candidateMarked = languageRoot(hay); // positive marker, or null when unmarked
+      // Read language from the candidate's CONSOLE/SET name ONLY (never the card
+      // name — a card named "Chinchou" must not read as Chinese) and on whole-word
+      // tokens, never substrings. Compare by language FAMILY (Chinese Simplified /
+      // Traditional collapse to one family).
+      const wantedLanguage = languageFamily(normalizeLanguage(id.value));
+      const candidateMarked = (() => {
+        const l = detectConsoleLanguage(product.console_or_category);
+        return l ? languageFamily(l) : null; // null when the console is unmarked
+      })();
       if (wantedLanguage && candidateMarked && wantedLanguage !== candidateMarked) {
         // Two DIFFERENT positively-identified languages — unambiguously the wrong
-        // card (e.g. an English slab against a "... Japanese ..." catalog). Hard reject.
+        // card (e.g. a Japanese slab against a "... Korean ..." catalog). Hard reject.
         hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateMarked}`);
         disqualified = true;
         languageHard = true;
       } else if (wantedLanguage && wantedLanguage !== "english" && !candidateMarked) {
-        // Wanted an ASIAN language but the candidate carries NO language marker.
+        // Wanted a NON-English language but the candidate console carries NO marker.
         // Because English is unmarked, this is AMBIGUOUS — most likely the English
-        // product, but possibly an unmarked Asian catalog. Do NOT hard-reject (that
-        // could drop the correct product), but raise a conflict so it can NEVER be
-        // auto-confirmed: the exact language/catalog must be proven (public page or
-        // visual) before this reaches confirmed status. This is the guard that stops
-        // a Japanese slab from silently linking to the English "151" product.
+        // product, but possibly an unmarked non-English catalog. Do NOT hard-reject
+        // (that could drop the correct product), but raise a conflict so it can NEVER
+        // be auto-confirmed: the exact language/catalog must be proven (public page or
+        // visual) first. This is the guard that stops a Japanese slab from silently
+        // linking to the English product.
         softConflicts.push(
           `language unverified: requested ${wantedLanguage}, but the candidate carries no language marker (English is unmarked on PriceCharting) — confirm the exact catalog before accepting`,
         );

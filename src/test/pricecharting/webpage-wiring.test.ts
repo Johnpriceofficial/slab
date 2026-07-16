@@ -58,16 +58,23 @@ describe("public-page wiring into pricecharting-search value action", () => {
     expect(body.public_page).toBeNull();
   });
 
-  it("API HAS the exact tier → page is NEVER fetched (API-first)", async () => {
+  it("API HAS the exact tier → page STILL fetched (canonical) for artwork/table, but API value WINS", async () => {
     const mock = createMockFetch();
     mock.enqueue("/api/product?", { json: WITH_PRISTINE });
     let pageFetched = false;
     const fetchPageSnapshot = async () => { pageFetched = true; return pageSnapshot(); };
     const res = await handlePriceChartingRequest(PRISTINE_INPUT, { ...base(mock), fetchPageSnapshot });
     const body = res.body as unknown as Record<string, unknown>;
-    expect(pageFetched).toBe(false); // API-first: no page fetch
+    // Page is part of the canonical workflow: fetched even when the API has the tier,
+    // for the full grade table + reference artwork.
+    expect(pageFetched).toBe(true);
+    // …but a valid exact API value is never overwritten by the page.
     expect(body.valuation_source).toBe("PRICECHARTING_API");
     expect(body.guide_value_cents).toBe(4539); // from the API's condition-19
+    // Reference artwork still comes from the confirmed product page, decoupled from source.
+    expect((body.reference_artwork as Record<string, unknown> | null)?.is_reference_artwork).toBe(true);
+    // The full page tier map is merged for the UI (CGC 10 too), no re-fetch.
+    expect((body.available_values_cents as Record<string, number>).cgc_10).toBe(2100);
   });
 
   it("API gap + flag ON → fills CGC Pristine from the public page with distinct provenance", async () => {
