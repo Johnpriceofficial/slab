@@ -5,8 +5,6 @@
 
 // Fields these helpers read — a subset of Slab, so tests can pass minimal objects.
 export interface ListingSlab {
-  inventory_code?: string | null;
-  inventory_number?: number | null;
   card_name?: string | null;
   set_name?: string | null;
   card_number?: string | null;
@@ -22,17 +20,8 @@ export interface ListingSlab {
 
 const clean = (s: unknown): string => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
 
-/**
- * The canonical, immutable eBay SKU for a slab: the DB-generated public code
- * (e.g. "S0001") brand-prefixed → "GCV-S0001". Never the mutable-looking raw
- * inventory number. Deterministic, so order-sync maps a sale back to the slab.
- */
-export function ebaySkuForSlab(slab: ListingSlab): string {
-  const code = clean(slab.inventory_code);
-  if (code) return `GCV-${code}`;
-  const n = typeof slab.inventory_number === "number" ? slab.inventory_number : null;
-  return n != null ? `GCV-S${n}` : "GCV-UNKNOWN";
-}
+// NOTE: the SKU is intentionally NOT generated here — it is the single canonical
+// cross-marketplace value from marketplace-sku.ts (canonicalMarketplaceSku).
 
 /**
  * An optimized eBay title within eBay's 80-char cap. The card name and the
@@ -71,4 +60,73 @@ export function ebayListingTitle(slab: ListingSlab, max = 80): string {
 /** Stored image paths for a slab, front first — the inputs to signed-URL resolution. */
 export function slabImagePaths(slab: ListingSlab): string[] {
   return [slab.front_image_path, slab.back_image_path].filter((p): p is string => typeof p === "string" && p.trim().length > 0);
+}
+
+/** Names of the category aspects eBay marks REQUIRED (getItemAspectsForCategory). */
+export function requiredAspectNames(categoryAspects: unknown): string[] {
+  const aspects = (categoryAspects as { aspects?: unknown } | null)?.aspects;
+  if (!Array.isArray(aspects)) return [];
+  return aspects
+    .filter((a) => (a as { aspectConstraint?: { aspectRequired?: boolean } })?.aspectConstraint?.aspectRequired === true)
+    .map((a) => String((a as { localizedAspectName?: unknown })?.localizedAspectName ?? "").trim())
+    .filter(Boolean);
+}
+
+/** Human-readable allowed condition values (getItemConditionPolicies), for display. */
+export function conditionPolicyValues(conditionPolicies: unknown): string[] {
+  const policies = (conditionPolicies as { itemConditionPolicies?: unknown } | null)?.itemConditionPolicies;
+  const first = Array.isArray(policies) ? policies[0] as { itemConditions?: unknown } : null;
+  const conditions = first && Array.isArray(first.itemConditions) ? first.itemConditions as Array<Record<string, unknown>> : [];
+  return conditions.map((c) => String(c.conditionDescription ?? c.conditionId ?? "").trim()).filter(Boolean);
+}
+
+export interface PublishReadinessInput {
+  connected: boolean;
+  preparedOk: boolean;
+  preparedFailedResource: string | null;
+  sku: string;
+  title: string;
+  description: string;
+  price: number;
+  currency: string;
+  categoryId: string;
+  condition: string;
+  locationKey: string;
+  fulfillmentPolicyId: string;
+  paymentPolicyId: string;
+  returnPolicyId: string;
+  locationKeys: readonly string[];
+  fulfillmentPolicyIds: readonly string[];
+  paymentPolicyIds: readonly string[];
+  returnPolicyIds: readonly string[];
+  imageCount: number;
+  requiredAspects: readonly string[];
+  providedAspects: Record<string, unknown>;
+}
+
+/**
+ * The COMPLETE client-side publish gate. Publish is allowed only when every
+ * blocker is clear — the server's INCOMPLETE_LISTING is a backstop, never the
+ * primary gate. Unsupported required category aspects visibly block publish.
+ */
+export function evaluatePublishReadiness(i: PublishReadinessInput): { canPublish: boolean; blockers: string[] } {
+  const blockers: string[] = [];
+  if (!i.connected) blockers.push("No connected eBay account");
+  if (!i.preparedOk) blockers.push(i.preparedFailedResource ? `Requirements not loaded (${i.preparedFailedResource})` : "Load current eBay requirements first");
+  if (!i.sku.trim()) blockers.push("Missing canonical SKU");
+  const titleLen = i.title.trim().length;
+  if (titleLen < 1 || titleLen > 80) blockers.push("Title must be 1–80 characters");
+  if (!i.description.trim()) blockers.push("Description is required");
+  if (!(Number.isFinite(i.price) && i.price > 0)) blockers.push("Price must be a positive number");
+  if (i.currency !== "USD") blockers.push("Unsupported currency");
+  if (!i.categoryId.trim()) blockers.push("Category ID is required");
+  if (!i.condition.trim()) blockers.push("Condition is required");
+  if (!i.locationKey || !i.locationKeys.includes(i.locationKey)) blockers.push("Select an inventory location from discovery");
+  if (!i.fulfillmentPolicyId || !i.fulfillmentPolicyIds.includes(i.fulfillmentPolicyId)) blockers.push("Select a fulfillment policy from discovery");
+  if (!i.paymentPolicyId || !i.paymentPolicyIds.includes(i.paymentPolicyId)) blockers.push("Select a payment policy from discovery");
+  if (!i.returnPolicyId || !i.returnPolicyIds.includes(i.returnPolicyId)) blockers.push("Select a return policy from discovery");
+  if (i.imageCount < 1) blockers.push("At least one front image is required");
+  const missing = i.requiredAspects.filter((a) => !i.providedAspects[a]);
+  if (missing.length) blockers.push(`Required category aspects not provided: ${missing.join(", ")}`);
+  return { canPublish: blockers.length === 0, blockers };
 }

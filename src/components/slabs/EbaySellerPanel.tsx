@@ -9,8 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ebaySellerOperation, fetchEbayAccounts, fetchEbayBusinessPolicies, fetchEbayLocations, fetchEbaySyncCursors, signedImageUrl, startEbayOAuth } from "@/lib/slabs/data";
-import { ebayListingTitle, ebaySkuForSlab, slabImagePaths } from "@/lib/slabs/ebay-listing";
+import { ebaySellerOperation, fetchEbayAccounts, fetchEbayBusinessPolicies, fetchEbayLocations, fetchEbaySyncCursors, startEbayOAuth } from "@/lib/slabs/data";
+import { conditionPolicyValues, ebayListingTitle, evaluatePublishReadiness, requiredAspectNames, slabImagePaths } from "@/lib/slabs/ebay-listing";
+import { canonicalMarketplaceSku } from "@/lib/slabs/marketplace-sku";
 import type { Slab } from "@/lib/slabs/types";
 
 export function EbaySellerPanel({ slab }: { slab: Slab }) {
@@ -30,14 +31,16 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   // Exactly one operation runs at a time; drives distinct progress labels.
   const [activeOperation, setActiveOperation] = useState<null | "account_sync" | "order_sync" | "finances_sync" | "prepare_listing" | "publish_listing">(null);
   const [syncSummary, setSyncSummary] = useState<Record<string, { status: string; count: number | null; error_code: string | null }> | null>(null);
-  // order-sync's default response is a non-mutating audit; this holds that preview
-  // until the operator either applies the sales or dismisses it.
-  const [orderAudit, setOrderAudit] = useState<null | { order_count: number; message: string; proposed_sales: Array<{ order_id: string; line_item_id: string; slab_id: string; sku: string; sold_price_cents: number; currency: string }> }>(null);
+  // order-sync PERSISTS orders (non-destructive) and returns the proposed sales;
+  // this holds that result until the operator applies sales or dismisses it.
+  const [orderAudit, setOrderAudit] = useState<null | { orders_synced: number; matched: number; unmatched: number; message: string; proposed_sales: Array<{ order_id: string; line_item_id: string; slab_id: string; sku: string; sold_price_cents: number; currency: string }> }>(null);
   const anyBusy = activeOperation !== null;
   // Persistent inline result of the last OAuth callback (shown until dismissed).
   const [callbackResult, setCallbackResult] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [prepared, setPrepared] = useState<Record<string, any> | null>(null);
+  // Typed preparation result: `ok` is true ONLY when eBay returned the
+  // confirmation_required requirements. An error never marks the listing ready.
+  const [prepared, setPrepared] = useState<null | { ok: boolean; failedResource: string | null; category_aspects?: unknown; condition_policies?: unknown }>(null);
   const [form, setForm] = useState({
     title: ebayListingTitle(slab),
     description: `${slab.card_name ?? "Graded card"} · ${slab.set_name ?? ""} · #${slab.card_number ?? ""} · ${slab.grader ?? ""} ${slab.grade_label ?? ""} ${slab.grade ?? ""}`.slice(0, 1000),
@@ -49,7 +52,9 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     returnPolicyId: "",
     condition: "GRADED",
   });
-  const change = (key: keyof typeof form, value: string) => setForm((old) => ({ ...old, [key]: value }));
+  // Any listing-input change invalidates a prior preparation — the fetched
+  // requirements no longer match the current inputs, so Publish must re-block.
+  const change = (key: keyof typeof form, value: string) => { setForm((old) => ({ ...old, [key]: value })); setPrepared(null); };
 
   // Surface the OAuth callback result (?ebay=<result>) once when we land back
   // from the eBay hop: toast, refetch accounts on success, then strip the marker
@@ -83,12 +88,14 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setActiveOperation(op);
     const result = await ebaySellerOperation(name, { account_id: connected.id });
     setActiveOperation(null);
-    // order-sync default: a non-mutating audit. Nothing was written; show the
-    // preview and let the operator explicitly apply the sales.
-    if (result.status === "audit") {
-      setOrderAudit({ order_count: result.order_count ?? 0, message: result.message ?? "", proposed_sales: result.proposed_sales ?? [] });
-      toast.info(result.message ?? "eBay orders fetched (audit — nothing changed).");
-      refetchCursors();
+    // order-sync PERSISTS orders + lines non-destructively and returns the sales
+    // it would propose — it never marks anything sold. Show the result + preview.
+    if (name === "ebay-order-sync") {
+      if (result.status === "success") {
+        setOrderAudit({ orders_synced: result.orders_synced ?? 0, matched: result.matched ?? 0, unmatched: result.unmatched ?? 0, message: result.message ?? "", proposed_sales: result.proposed_sales ?? [] });
+        toast.success(result.message ?? "Orders synced.");
+      } else toast.error(result.message ?? result.error_code ?? "Order sync failed.");
+      refetch(); refetchCursors();
       return;
     }
     if (result.status === "success") toast.success("eBay synchronization completed.");
@@ -98,16 +105,21 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setSyncSummary(result.status === "success" || result.status === "partial" ? ((result.resources ?? null) as typeof syncSummary) : null);
     refetch(); refetchCursors();
   };
-  // The consequential path: record orders privately AND mark mapped slabs sold.
+  // SEPARATE consequential action: apply the persisted, selected sales (marks
+  // slabs sold + writes comps). Server-gated by EBAY_APPLY_SALES_ENABLED and a
+  // typed confirmation; the server acts only on already-persisted lines.
   const applyOrderSales = async () => {
     if (!connected || anyBusy || !orderAudit) return;
     const n = orderAudit.proposed_sales.length;
-    if (!window.confirm(`Record ${orderAudit.order_count} eBay order(s) and mark ${n} mapped slab(s) SOLD? This writes sold comps and updates inventory.`)) return;
+    if (n === 0) return;
+    const typed = window.prompt(`This marks ${n} mapped slab(s) SOLD and writes sold comps. Type APPLY_SALES to confirm.`);
+    if (typed !== "APPLY_SALES") { if (typed !== null) toast.info("Confirmation text did not match — nothing was applied."); return; }
     setActiveOperation("order_sync");
-    const result = await ebaySellerOperation("ebay-order-sync", { account_id: connected.id, confirmation: "APPLY_SALES" });
+    const result = await ebaySellerOperation("ebay-order-sync", { account_id: connected.id, confirmation: "APPLY_SALES", sales: orderAudit.proposed_sales });
     setActiveOperation(null);
-    if (result.status === "success") {
-      toast.success(`Recorded ${result.orders_synced ?? 0} order(s); marked ${result.sales_applied ?? 0} slab(s) sold.`);
+    if (result.status === "mutation_disabled") toast.error("Applying sales is disabled by server configuration.");
+    else if (result.status === "success") {
+      toast.success(`Applied ${result.sales_applied ?? 0} sale(s)${result.skipped_stale ? `, skipped ${result.skipped_stale} stale` : ""}.`);
       setOrderAudit(null);
     } else toast.error(result.message ?? result.error_code ?? "Applying eBay sales failed.");
     refetch(); refetchCursors();
@@ -115,7 +127,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const listingPayload = {
     account_id: connected?.id,
     slab_id: slab.id,
-    sku: ebaySkuForSlab(slab),
+    sku: canonicalMarketplaceSku(slab),
     marketplace_id: "EBAY_US",
     title: form.title,
     description: form.description,
@@ -136,22 +148,55 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setActiveOperation("prepare_listing");
     const result = await ebaySellerOperation("ebay-list-item", listingPayload);
     setActiveOperation(null);
-    setPrepared(result);
-    if (result.status === "error" || result.status === "unavailable") toast.error(result.message ?? "eBay listing requirements are unavailable.");
+    // Ready ONLY on the confirmation_required requirements. An error clears
+    // readiness and keeps Publish disabled with the exact failed resource.
+    if (result.status === "confirmation_required") {
+      setPrepared({ ok: true, failedResource: null, category_aspects: result.category_aspects, condition_policies: result.condition_policies });
+    } else {
+      setPrepared({ ok: false, failedResource: result.error_code ?? result.message ?? "requirements_unavailable" });
+      toast.error(result.message ?? result.error_code ?? "eBay listing requirements are unavailable.");
+    }
   };
   const publish = async () => {
-    if (anyBusy) return;
-    // Real slab photos (front, then back) resolved to short-lived signed URLs eBay
-    // fetches at publish time — never an empty image list.
-    const image_urls = (await Promise.all(slabImagePaths(slab).map((p) => signedImageUrl(p, 3600)))).filter((u): u is string => Boolean(u));
-    if (image_urls.length === 0) { toast.error("This slab has no stored images — add photos before publishing to eBay."); return; }
-    if (!window.confirm(`Publish to eBay with ${image_urls.length} photo(s), SKU ${listingPayload.sku}, and the displayed price, condition, and policies?`)) return;
+    if (anyBusy || !readiness.canPublish) return;
+    // Images are resolved SERVER-SIDE at publish time; the client only gates.
+    const typed = window.prompt(`Publish "${form.title}" to eBay as SKU ${listingPayload.sku} at USD ${form.price}? Type PUBLISH to confirm.`);
+    if (typed !== "PUBLISH") { if (typed !== null) toast.info("Confirmation text did not match — nothing was published."); return; }
     setActiveOperation("publish_listing");
-    const result = await ebaySellerOperation("ebay-list-item", { ...listingPayload, image_urls, confirmation: "PUBLISH" });
+    const result = await ebaySellerOperation("ebay-list-item", { ...listingPayload, confirmation: "PUBLISH" });
     setActiveOperation(null);
-    if (result.status === "success") toast.success(`Published eBay listing ${result.listing_id ?? ""}.`);
-    else toast.error(result.message ?? "eBay publish failed.");
+    if (result.status === "mutation_disabled") toast.error("eBay listing publishing is disabled by server configuration.");
+    else if (result.status === "published_unmapped") toast.error(`eBay listing ${result.listing_id ?? ""} is LIVE but local mapping failed — reconcile required. It was NOT withdrawn.`);
+    else if (result.status === "success") toast.success(result.reconciled ? `Listing already published (${result.listing_id ?? ""}).` : `Published eBay listing ${result.listing_id ?? ""}.`);
+    else toast.error(result.message ?? result.error_code ?? "eBay publish failed.");
   };
+  // The complete client-side publish gate (the server's INCOMPLETE_LISTING is a
+  // backstop). Recomputed every render from the current inputs + prepared state.
+  const requiredAspects = requiredAspectNames(prepared?.category_aspects);
+  const conditionValues = conditionPolicyValues(prepared?.condition_policies);
+  const readiness = evaluatePublishReadiness({
+    connected: !!connected,
+    preparedOk: !!prepared?.ok,
+    preparedFailedResource: prepared?.failedResource ?? null,
+    sku: listingPayload.sku,
+    title: form.title,
+    description: form.description,
+    price: Number(form.price),
+    currency: "USD",
+    categoryId: form.categoryId,
+    condition: form.condition,
+    locationKey: form.locationKey,
+    fulfillmentPolicyId: form.fulfillmentPolicyId,
+    paymentPolicyId: form.paymentPolicyId,
+    returnPolicyId: form.returnPolicyId,
+    locationKeys: locations.map((l) => l.merchant_location_key),
+    fulfillmentPolicyIds: policiesOfType("fulfillment").map((p) => p.policy_id),
+    paymentPolicyIds: policiesOfType("payment").map((p) => p.policy_id),
+    returnPolicyIds: policiesOfType("return").map((p) => p.policy_id),
+    imageCount: slabImagePaths(slab).length,
+    requiredAspects,
+    providedAspects: listingPayload.aspects,
+  });
 
   const banner = callbackResult ? ebayCallbackResultMessage(callbackResult) : null;
   const bannerClass = banner?.tone === "success"
@@ -181,14 +226,16 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         </div>
       )}
       {orderAudit && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-50 p-3 text-xs text-amber-900">
-          <div className="mb-1 flex items-center justify-between"><span className="font-medium">Order sync — audit (nothing written yet)</span><button type="button" aria-label="Dismiss order audit" className="opacity-70 hover:opacity-100" onClick={() => setOrderAudit(null)}>×</button></div>
-          <p className="mb-2">{orderAudit.message}</p>
-          {orderAudit.proposed_sales.length > 0 && (
-            <ul className="mb-2 grid gap-0.5">{orderAudit.proposed_sales.map((s) => <li key={`${s.order_id}:${s.line_item_id}`}>SKU {s.sku} → mark slab sold @ {s.currency} {(s.sold_price_cents / 100).toFixed(2)} <span className="text-amber-700">(order {s.order_id})</span></li>)}</ul>
-          )}
-          {orderAudit.proposed_sales.length > 0 && (
-            <Button size="sm" variant="destructive" disabled={anyBusy} onClick={applyOrderSales}>{activeOperation === "order_sync" ? "Applying…" : `Apply ${orderAudit.proposed_sales.length} sale(s)`}</Button>
+        <div className="rounded-md border p-3 text-xs">
+          <div className="mb-1 flex items-center justify-between"><span className="font-medium">Order sync — {orderAudit.orders_synced} order(s) persisted · {orderAudit.matched} matched · {orderAudit.unmatched} unmatched</span><button type="button" aria-label="Dismiss order result" className="opacity-70 hover:opacity-100" onClick={() => setOrderAudit(null)}>×</button></div>
+          <p className="mb-2 text-muted-foreground">Orders were recorded. Nothing was marked sold — that is a separate, confirmed step.</p>
+          {orderAudit.proposed_sales.length > 0 ? (
+            <>
+              <ul className="mb-2 grid gap-0.5">{orderAudit.proposed_sales.map((s) => <li key={`${s.order_id}:${s.line_item_id}`}>SKU {s.sku} → would mark slab sold @ {s.currency} {(s.sold_price_cents / 100).toFixed(2)} <span className="text-muted-foreground">(order {s.order_id})</span></li>)}</ul>
+              <Button size="sm" variant="destructive" disabled={anyBusy} onClick={applyOrderSales}>{activeOperation === "order_sync" ? "Applying…" : `Apply ${orderAudit.proposed_sales.length} sale(s)…`}</Button>
+            </>
+          ) : (
+            <p className="text-muted-foreground">No proposed sales — no persisted line maps to inventory.</p>
           )}
         </div>
       )}
@@ -202,8 +249,16 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         <DiscoverySelect label="Fulfillment policy" value={form.fulfillmentPolicyId} onChange={(v) => change("fulfillmentPolicyId", v)} options={policiesOfType("fulfillment").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
         <DiscoverySelect label="Payment policy" value={form.paymentPolicyId} onChange={(v) => change("paymentPolicyId", v)} options={policiesOfType("payment").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
         <DiscoverySelect label="Return policy" value={form.returnPolicyId} onChange={(v) => change("returnPolicyId", v)} options={policiesOfType("return").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
-        <div className="flex items-end gap-2"><Button variant="outline" disabled={anyBusy} onClick={prepare}>{activeOperation === "prepare_listing" ? "Loading…" : "Load current eBay requirements"}</Button><Button disabled={anyBusy || !prepared || !form.price} onClick={publish}>{activeOperation === "publish_listing" ? "Publishing…" : "Publish with confirmation"}</Button></div>
-        {prepared && <p className="sm:col-span-2 text-xs text-muted-foreground">eBay returned current privileges, locations, business policies, category aspects, and condition policies. Publishing remains blocked until the required IDs are supplied and explicitly confirmed.</p>}
+        <div className="flex items-end gap-2"><Button variant="outline" disabled={anyBusy} onClick={prepare}>{activeOperation === "prepare_listing" ? "Loading…" : "Load current eBay requirements"}</Button><Button disabled={anyBusy || !readiness.canPublish} onClick={publish}>{activeOperation === "publish_listing" ? "Publishing…" : "Publish with confirmation"}</Button></div>
+        {prepared?.ok && (
+          <div className="sm:col-span-2 space-y-1 text-xs">
+            {requiredAspects.length > 0 && <p className="text-destructive">eBay requires these item aspects for this category (not yet collected, so Publish is blocked): {requiredAspects.join(", ")}.</p>}
+            {conditionValues.length > 0 && <p className="text-muted-foreground">Allowed condition values: {conditionValues.join(", ")}.</p>}
+          </div>
+        )}
+        {!readiness.canPublish && (
+          <ul className="sm:col-span-2 grid gap-0.5 text-xs text-muted-foreground">{readiness.blockers.map((b) => <li key={b}>• {b}</li>)}</ul>
+        )}
       </div>
       <p className="text-muted-foreground">Seller orders and Finances records are stored server-side. Active Browse listings remain asking-price/reference evidence and are never sold comparables. Unknown external enum and CustomCode values are preserved as text.</p>
     </div> : <div className="space-y-3 text-sm"><p className="text-muted-foreground">Not connected. Active eBay Browse references can still be used when application credentials exist, but they are never labeled as sold comps.</p><Button variant="outline" onClick={connect} disabled={connecting}>{connecting ? "Starting eBay sign-in…" : "Connect eBay seller account"}</Button><p className="text-xs text-muted-foreground">Restricted capabilities remain unavailable until eBay grants the application/account access.</p></div>}

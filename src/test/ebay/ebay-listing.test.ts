@@ -1,16 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ebaySkuForSlab, ebayListingTitle, slabImagePaths, type ListingSlab } from "../../lib/slabs/ebay-listing";
-
-describe("ebaySkuForSlab", () => {
-  it("brand-prefixes the canonical public code, never the raw inventory number", () => {
-    expect(ebaySkuForSlab({ inventory_code: "S0001", inventory_number: 42 })).toBe("GCV-S0001");
-    expect(ebaySkuForSlab({ inventory_code: "  S0123  " })).toBe("GCV-S0123");
-  });
-  it("falls back to the inventory number only when the code is missing", () => {
-    expect(ebaySkuForSlab({ inventory_number: 42 })).toBe("GCV-S42");
-    expect(ebaySkuForSlab({})).toBe("GCV-UNKNOWN");
-  });
-});
+import { ebayListingTitle, slabImagePaths, requiredAspectNames, conditionPolicyValues, evaluatePublishReadiness, type ListingSlab, type PublishReadinessInput } from "../../lib/slabs/ebay-listing";
 
 describe("ebayListingTitle", () => {
   const full: ListingSlab = {
@@ -60,5 +49,79 @@ describe("slabImagePaths", () => {
     expect(slabImagePaths({ front_image_path: "f.jpg", back_image_path: null })).toEqual(["f.jpg"]);
     expect(slabImagePaths({ front_image_path: "  ", back_image_path: "b.jpg" })).toEqual(["b.jpg"]);
     expect(slabImagePaths({})).toEqual([]);
+  });
+});
+
+describe("requiredAspectNames", () => {
+  it("returns only the aspects eBay marks required", () => {
+    const aspects = { aspects: [
+      { localizedAspectName: "Grade", aspectConstraint: { aspectRequired: true } },
+      { localizedAspectName: "Card Name", aspectConstraint: { aspectRequired: true } },
+      { localizedAspectName: "Autographed", aspectConstraint: { aspectRequired: false } },
+    ] };
+    expect(requiredAspectNames(aspects)).toEqual(["Grade", "Card Name"]);
+  });
+  it("is safe on missing/garbage input", () => {
+    expect(requiredAspectNames(null)).toEqual([]);
+    expect(requiredAspectNames({})).toEqual([]);
+    expect(requiredAspectNames({ aspects: "nope" })).toEqual([]);
+  });
+});
+
+describe("conditionPolicyValues", () => {
+  it("lists allowed condition descriptions", () => {
+    const cp = { itemConditionPolicies: [{ itemConditions: [{ conditionId: "2750", conditionDescription: "Graded" }, { conditionId: "4000" }] }] };
+    expect(conditionPolicyValues(cp)).toEqual(["Graded", "4000"]);
+  });
+  it("is safe on missing input", () => {
+    expect(conditionPolicyValues(null)).toEqual([]);
+  });
+});
+
+describe("evaluatePublishReadiness", () => {
+  const ready: PublishReadinessInput = {
+    connected: true, preparedOk: true, preparedFailedResource: null,
+    sku: "GCV000047", title: "2016 XY Evolutions Charizard #11 PSA 10", description: "Graded card.",
+    price: 199.99, currency: "USD", categoryId: "183454", condition: "GRADED",
+    locationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1",
+    locationKeys: ["LOC-A"], fulfillmentPolicyIds: ["F1"], paymentPolicyIds: ["P1"], returnPolicyIds: ["R1"],
+    imageCount: 2, requiredAspects: [], providedAspects: {},
+  };
+
+  it("allows publish when every requirement is satisfied", () => {
+    const r = evaluatePublishReadiness(ready);
+    expect(r.canPublish).toBe(true);
+    expect(r.blockers).toEqual([]);
+  });
+
+  it("a failed/absent preparation never enables publish", () => {
+    expect(evaluatePublishReadiness({ ...ready, preparedOk: false, preparedFailedResource: null }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, preparedOk: false, preparedFailedResource: "config_error" }).blockers.join()).toContain("config_error");
+  });
+
+  it("blocks on invalid title, price, currency, and missing description", () => {
+    expect(evaluatePublishReadiness({ ...ready, title: "" }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, title: "X".repeat(81) }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, price: 0 }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, price: Number.NaN }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, currency: "EUR" }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, description: "  " }).canPublish).toBe(false);
+  });
+
+  it("requires location + policies chosen FROM discovery options", () => {
+    expect(evaluatePublishReadiness({ ...ready, locationKey: "NOT-IN-LIST" }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, fulfillmentPolicyId: "" }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, paymentPolicyIds: [] }).canPublish).toBe(false);
+  });
+
+  it("blocks when there is no front image", () => {
+    expect(evaluatePublishReadiness({ ...ready, imageCount: 0 }).canPublish).toBe(false);
+  });
+
+  it("blocks when a required category aspect is not provided, and lists it", () => {
+    const r = evaluatePublishReadiness({ ...ready, requiredAspects: ["Grade", "Card Name"], providedAspects: { Grade: "10" } });
+    expect(r.canPublish).toBe(false);
+    expect(r.blockers.join()).toContain("Card Name");
+    expect(r.blockers.join()).not.toContain("Grade,"); // Grade was provided
   });
 });

@@ -72,28 +72,62 @@ suite("eBay orders/finances apply RPCs", () => {
     ],
   }];
 
-  it("orders_apply records the ledger, writes ONE sold comp, and marks the mapped slab sold", async () => {
-    const res = await service.rpc("ebay_orders_apply", { p_account_id: accountId, p_orders: shapedOrders() });
+  const salesSelection = (slabOverride?: string | null) => [{
+    order_id: `ORD-PRB-${stamp}`, line_item_id: "LI-1",
+    slab_id: slabOverride === undefined ? slabId : slabOverride,
+    sold_price_cents: 1800, currency: "USD", sold_at: "2026-07-20T10:00:00.000Z", external_sale_id: extId,
+  }];
+
+  it("orders_persist records orders + lines and marks NOTHING sold (non-destructive)", async () => {
+    const res = await service.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shapedOrders() });
     expect(res.error).toBeNull();
-    // 1 order, 2 line items, but only the mapped+priced line is a sale.
-    expect(res.data).toEqual({ orders: 1, line_items: 2, sales_applied: 1 });
+    // 1 order, 2 lines, 1 matched (mapped SKU), 1 unmatched.
+    expect(res.data).toEqual({ orders: 1, line_items: 2, matched: 1, unmatched: 1 });
 
-    const comps = await service.from("sold_comps").select("slab_id, source, sold_price_cents, currency").eq("external_sale_id", extId);
-    expect(comps.data).toHaveLength(1);
-    expect(comps.data![0]).toMatchObject({ slab_id: slabId, source: "EBAY_SELLER_ORDER", sold_price_cents: 1800, currency: "USD" });
-    // The unmapped line created NO sold comp.
-    const unmapped = await service.from("sold_comps").select("id").eq("external_sale_id", `ORD-PRB-${stamp}:LI-2`);
-    expect(unmapped.data).toHaveLength(0);
-
+    // Persisting an order must NOT create a sold comp or touch inventory.
+    const comps = await service.from("sold_comps").select("id").eq("external_sale_id", extId);
+    expect(comps.data).toHaveLength(0);
     const slab = await service.from("slabs").select("inventory_status, sold_price_cents").eq("id", slabId).single();
-    expect(slab.data).toMatchObject({ inventory_status: "sold", sold_price_cents: 1800 });
+    expect(slab.data).toMatchObject({ inventory_status: "active", sold_price_cents: null });
   });
 
-  it("is idempotent — a second identical apply does not duplicate the sold comp", async () => {
-    const res = await service.rpc("ebay_orders_apply", { p_account_id: accountId, p_orders: shapedOrders() });
-    expect(res.data).toEqual({ orders: 1, line_items: 2, sales_applied: 1 });
-    const comps = await service.from("sold_comps").select("id").eq("external_sale_id", extId);
-    expect(comps.data).toHaveLength(1); // still one, not two
+  it("sales_apply acts ONLY on persisted, matching lines — writes one comp + marks the slab sold, idempotently", async () => {
+    const first = await service.rpc("ebay_sales_apply", { p_account_id: accountId, p_sales: salesSelection() });
+    expect(first.error).toBeNull();
+    expect(first.data).toEqual({ applied: 1, skipped_stale: 0, skipped_unmatched: 0 });
+
+    const comps = await service.from("sold_comps").select("slab_id, source, sold_price_cents").eq("external_sale_id", extId);
+    expect(comps.data).toHaveLength(1);
+    expect(comps.data![0]).toMatchObject({ slab_id: slabId, source: "EBAY_SELLER_ORDER", sold_price_cents: 1800 });
+    const slab = await service.from("slabs").select("inventory_status, sold_price_cents").eq("id", slabId).single();
+    expect(slab.data).toMatchObject({ inventory_status: "sold", sold_price_cents: 1800 });
+
+    // Idempotent: reapplying does not duplicate the comp.
+    const second = await service.rpc("ebay_sales_apply", { p_account_id: accountId, p_sales: salesSelection() });
+    expect(second.data).toEqual({ applied: 1, skipped_stale: 0, skipped_unmatched: 0 });
+    const still = await service.from("sold_comps").select("id").eq("external_sale_id", extId);
+    expect(still.data).toHaveLength(1);
+  });
+
+  it("sales_apply rejects a stale selection (slab mapping changed) and an unpersisted line", async () => {
+    // Stale: the audited slab_id no longer matches the persisted line's slab.
+    const stale = await service.rpc("ebay_sales_apply", { p_account_id: accountId, p_sales: salesSelection("00000000-0000-0000-0000-000000000000") });
+    expect(stale.data).toEqual({ applied: 0, skipped_stale: 1, skipped_unmatched: 0 });
+    // Unmatched: a line that was never persisted.
+    const unmatched = await service.rpc("ebay_sales_apply", { p_account_id: accountId, p_sales: [{ order_id: `ORD-PRB-${stamp}`, line_item_id: "DOES-NOT-EXIST", slab_id: slabId, sold_price_cents: 1800, external_sale_id: "x" }] });
+    expect(unmatched.data).toEqual({ applied: 0, skipped_stale: 0, skipped_unmatched: 1 });
+  });
+
+  it("a durable listing intent is admin-visible and unique per account+SKU", async () => {
+    const ins = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku: mappedSku, status: "preparing" });
+    expect(ins.error).toBeNull();
+    // One active intent per (account, sku): a duplicate insert is rejected.
+    const dup = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku: mappedSku, status: "preparing" });
+    expect(dup.error).not.toBeNull();
+    // The signed-in admin can read intents.
+    const seen = await adminClient.from("ebay_listing_intents").select("sku, status").eq("ebay_account_id", accountId);
+    expect(seen.error).toBeNull();
+    expect(seen.data?.some((r) => r.sku === mappedSku)).toBe(true);
   });
 
   it("finance_transactions_apply upserts idempotently and returns a confirmed total", async () => {
@@ -109,8 +143,9 @@ suite("eBay orders/finances apply RPCs", () => {
     expect(second.data).toEqual({ transactions: 2, total: 2 });
   });
 
-  it("denies both apply RPCs to the authenticated (non-service) role", async () => {
-    expect((await adminClient.rpc("ebay_orders_apply", { p_account_id: accountId, p_orders: [] })).error).not.toBeNull();
+  it("denies the persistence RPCs to the authenticated (non-service) role", async () => {
+    expect((await adminClient.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: [] })).error).not.toBeNull();
+    expect((await adminClient.rpc("ebay_sales_apply", { p_account_id: accountId, p_sales: [] })).error).not.toBeNull();
     expect((await adminClient.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: [] })).error).not.toBeNull();
   });
 });
