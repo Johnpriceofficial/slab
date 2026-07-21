@@ -8,7 +8,7 @@ import {
   type EbayPublicKey,
 } from "./ebay-notification-verify.ts";
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
-import { buildAuthorizeQuery, resolveEbayCallback } from "./ebay-oauth-core.ts";
+import { buildAuthorizeQuery, ebayApizBase, resolveEbayCallback } from "./ebay-oauth-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -287,7 +287,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
         };
       },
       fetchIdentity: async (accessToken) => {
-        const res = await fetch(`${API}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
+        // getUser lives on the apiz gateway — api.* returns 404 for this endpoint.
+        const res = await fetch(`${ebayApizBase(MODE)}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
         if (!res.ok) return { ok: false, status: res.status };
         const data = await res.json().catch(() => ({})) as Record<string, unknown>;
         return { ok: true, ebayUserId: String(data.userId ?? data.username ?? "") };

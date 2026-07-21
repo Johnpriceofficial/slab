@@ -2,9 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import {
   EBAY_OAUTH_SCOPES,
   buildAuthorizeQuery,
+  ebayApizBase,
   resolveEbayCallback,
   type CallbackDeps,
 } from "../../../supabase/functions/_shared/ebay-oauth-core";
+
+describe("ebayApizBase", () => {
+  it("targets the apiz gateway (the Identity API getUser is NOT on api.*)", () => {
+    expect(ebayApizBase("sandbox")).toBe("https://apiz.sandbox.ebay.com");
+    expect(ebayApizBase("production")).toBe("https://apiz.ebay.com");
+  });
+});
 
 describe("buildAuthorizeQuery", () => {
   it("requests base + Identity + all four seller scopes (Identity exactly once)", () => {
