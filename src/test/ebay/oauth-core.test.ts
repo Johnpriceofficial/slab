@@ -7,15 +7,25 @@ import {
 } from "../../../supabase/functions/_shared/ebay-oauth-core";
 
 describe("buildAuthorizeQuery", () => {
-  it("requests the base scope AND all four seller scopes", () => {
+  it("requests base + Identity + all four seller scopes (Identity exactly once)", () => {
     const scope = buildAuthorizeQuery({ clientId: "cid", ruName: "RU-NAME", state: "s", mode: "sandbox" }).get("scope") ?? "";
     const scopes = scope.split(" ");
-    expect(scopes).toContain("https://api.ebay.com/oauth/api_scope"); // base — required by Identity API
+    expect(scopes).toContain("https://api.ebay.com/oauth/api_scope"); // base
+    expect(scopes).toContain("https://api.ebay.com/oauth/api_scope/commerce.identity.readonly"); // Identity (getUser)
     expect(scopes).toContain("https://api.ebay.com/oauth/api_scope/sell.account");
     expect(scopes).toContain("https://api.ebay.com/oauth/api_scope/sell.inventory");
     expect(scopes).toContain("https://api.ebay.com/oauth/api_scope/sell.fulfillment");
     expect(scopes).toContain("https://api.ebay.com/oauth/api_scope/sell.finances");
-    expect(EBAY_OAUTH_SCOPES.length).toBe(5);
+    // Identity scope appears exactly once.
+    expect(scopes.filter((s) => s === "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly")).toHaveLength(1);
+    expect(EBAY_OAUTH_SCOPES.length).toBe(6);
+  });
+
+  it("requests ONLY the minimum identity scope — never the PII identity scopes", () => {
+    const scopes = EBAY_OAUTH_SCOPES as readonly string[];
+    for (const pii of ["email", "phone", "address", "name", "status"]) {
+      expect(scopes).not.toContain(`https://api.ebay.com/oauth/api_scope/commerce.identity.${pii}.readonly`);
+    }
   });
 
   it("adds prompt=login in sandbox, not in production", () => {

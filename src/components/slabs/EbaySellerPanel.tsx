@@ -15,6 +15,8 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const { data: accounts = [], refetch } = useQuery({ queryKey: ["ebay-accounts"], queryFn: fetchEbayAccounts });
   const connected = accounts.find((account) => account.connection_status === "connected");
   const [busy, setBusy] = useState(false);
+  // Persistent inline result of the last OAuth callback (shown until dismissed).
+  const [callbackResult, setCallbackResult] = useState<string | null>(null);
   const [prepared, setPrepared] = useState<Record<string, any> | null>(null);
   const [form, setForm] = useState({
     title: `${slab.card_name ?? "Graded card"} ${slab.grader ?? ""} ${slab.grade ?? ""}`.trim(),
@@ -40,6 +42,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     if (tone === "success") toast.success(message);
     else if (tone === "info") toast.info(message);
     else toast.error(message);
+    setCallbackResult(result); // persistent inline banner until dismissed
     if (result === "connected") void refetch();
     params.delete("ebay");
     const clean = window.location.pathname + (params.toString() ? `?${params.toString()}` : "") + window.location.hash;
@@ -95,7 +98,20 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     else toast.error(result.message ?? "eBay publish failed.");
   };
 
+  const banner = callbackResult ? ebayCallbackResultMessage(callbackResult) : null;
+  const bannerClass = banner?.tone === "success"
+    ? "border-green-600/40 bg-green-600/5 text-green-700"
+    : banner?.tone === "info"
+      ? "border-amber-500/40 bg-amber-50 text-amber-800"
+      : "border-destructive/40 bg-destructive/5 text-destructive";
+
   return <Card className="mt-6"><CardHeader><CardTitle>eBay Listing, Orders &amp; Fulfillment</CardTitle></CardHeader><CardContent>
+    {banner && (
+      <div role="status" className={`mb-4 flex items-start justify-between gap-3 rounded-md border p-3 text-sm ${bannerClass}`}>
+        <span>{banner.message}</span>
+        <button type="button" aria-label="Dismiss eBay status" className="shrink-0 opacity-70 hover:opacity-100" onClick={() => setCallbackResult(null)}>×</button>
+      </div>
+    )}
     {connected ? <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-center gap-2"><Badge>Connected</Badge><span>{connected.display_label ?? "eBay seller account"}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-account-sync")}>Verify privileges</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-order-sync")}>Sync orders</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-finances-sync")}>Sync fees</Button></div>
       <p>Privileges: {connected.privilege_status ?? "Checking"} · Last sync: {connected.last_synced_at?.slice(0, 16).replace("T", " ") ?? "Never"}</p>

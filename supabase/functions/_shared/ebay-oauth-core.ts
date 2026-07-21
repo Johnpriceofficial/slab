@@ -3,11 +3,15 @@
 // the exact scope set, prompt handling, and every callback failure stage are
 // unit-tested from src/test/ebay without a live eBay connection.
 
-// The BASE/default scope is REQUIRED: eBay's Identity API (getUser) returns the
-// opaque user id only when the token carries `api_scope`. Requesting only the
-// sell.* scopes yields a 403 on identity and the connection silently fails.
+// eBay's Identity API (getUser) — which the callback uses to obtain the opaque,
+// non-PII user id — requires `commerce.identity.readonly`. The base `api_scope`
+// alone does NOT grant it, so without this scope getUser returns 403 and the
+// connection silently fails. commerce.identity.readonly is the MINIMUM public
+// identity scope (returns username / business-account details / opaque id); the
+// email/phone/address/name/status identity scopes are deliberately NOT requested.
 export const EBAY_OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
   "https://api.ebay.com/oauth/api_scope/sell.account",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
