@@ -123,7 +123,7 @@ export default function SlabList() {
   });
 
   const togglePermanentDelete = async (enabled: boolean) => {
-    if (enabled && !window.confirm("Enable permanent deletion? This unlocks irreversible database purges for selected slabs.")) return;
+    if (enabled && !window.confirm("Enable permanent deletion? This unlocks irreversible database purges for slabs.")) return;
     setMaintenanceBusy(true);
     try {
       await setPermanentDeleteEnabled(enabled);
@@ -153,31 +153,47 @@ export default function SlabList() {
     } finally { setMaintenanceBusy(false); }
   };
 
-  const purgeSelected = async () => {
-    if (selectedRows.length === 0) return;
-    const archivedCount = selectedRows.filter((row) => !!row.archived_at).length;
-    const activeCount = selectedRows.length - archivedCount;
+  const confirmAndPurge = async (targets: Slab[], label: string) => {
+    if (targets.length === 0) return;
+    const archivedCount = targets.filter((row) => !!row.archived_at).length;
+    const activeCount = targets.length - archivedCount;
     const warning = [
-      `Permanently delete ${selectedRows.length} selected slab(s)?`,
-      `${archivedCount} archived; ${activeCount} active.`,
-      "This removes database records and attempts to remove their stored images. This cannot be undone.",
+      `Permanently delete ${label}?`,
+      `${targets.length} slab(s): ${archivedCount} archived; ${activeCount} active.`,
+      "This removes database records and attempts to remove stored images. This cannot be undone.",
       "External backups, provider records, or platform infrastructure logs are outside this application's purge boundary.",
     ].join("\n\n");
     if (!window.confirm(warning)) return;
-    const typed = window.prompt(`Type DELETE ${selectedRows.length} to confirm.`);
-    if (typed !== `DELETE ${selectedRows.length}`) {
+    const confirmation = targets.length === 1 ? "DELETE 1" : `DELETE ${targets.length}`;
+    const typed = window.prompt(`Type ${confirmation} to confirm.`);
+    if (typed !== confirmation) {
       toast.error("Permanent deletion cancelled: confirmation text did not match.");
       return;
     }
     setMaintenanceBusy(true);
     try {
-      const result = await purgeSlabs(selectedRows.map((row) => row.id));
+      const result = await purgeSlabs(targets.map((row) => row.id));
       if (result.storageErrors.length) toast.warning(`${result.purged} record(s) purged, but image cleanup reported: ${result.storageErrors.join("; ")}`);
       else toast.success(`${result.purged} slab(s) permanently purged.`);
       await refreshInventory();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Selected slabs could not be purged.");
+      toast.error(error instanceof Error ? error.message : "Slabs could not be purged.");
     } finally { setMaintenanceBusy(false); }
+  };
+
+  const purgeSelected = () => confirmAndPurge(selectedRows, `${selectedRows.length} selected slab(s)`);
+  const purgeOne = (slab: Slab) => confirmAndPurge([slab], slab.inventory_code ?? "this slab");
+
+  const purgeAll = async () => {
+    setMaintenanceBusy(true);
+    try {
+      const allSlabs = await fetchAllSlabs();
+      setMaintenanceBusy(false);
+      await confirmAndPurge(allSlabs, `ALL ${allSlabs.length} slabs in the inventory`);
+    } catch (error) {
+      setMaintenanceBusy(false);
+      toast.error(error instanceof Error ? error.message : "The complete inventory could not be loaded.");
+    }
   };
 
   const compactIds = async () => {
@@ -239,7 +255,8 @@ export default function SlabList() {
           <span className="mr-auto text-xs text-muted-foreground">Database safety switch. Turn it off after cleanup.</span>
           <span className="text-sm"><strong>{selected.size}</strong> selected</span>
           <Button variant="outline" size="sm" onClick={() => void compactIds()} disabled={maintenanceBusy}><Rows3 /> Compact visible IDs</Button>
-          <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || !permanentDeleteEnabled || selectedRows.length === 0}><Trash2 /> Permanently delete selected</Button>
+          <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || !permanentDeleteEnabled || selectedRows.length === 0}><Trash2 /> Delete selected</Button>
+          <Button variant="destructive" size="sm" onClick={() => void purgeAll()} disabled={maintenanceBusy || !permanentDeleteEnabled || total === 0}><Trash2 /> Delete all slabs</Button>
         </div>
       )}
 
@@ -256,7 +273,7 @@ export default function SlabList() {
                 <TableRow key={slab.id} data-state={selected.has(slab.id) ? "selected" : undefined}>
                   {isAdmin && <TableCell><input type="checkbox" aria-label={`Select ${slab.inventory_code}`} checked={selected.has(slab.id)} onChange={() => toggleRow(slab.id)} /></TableCell>}
                   {INVENTORY_TABLE_COLUMNS.map((column, index) => <TableCell key={String(column.key)} className="whitespace-nowrap">{index === 0 ? <Link to={`/slabs/${slab.id}`} className="font-medium text-primary hover:underline">{renderCell(slab, column)}</Link> : column.key === "pricecharting_match_status" && slab.pricecharting_match_status ? <Badge variant="outline">{slab.pricecharting_match_status}</Badge> : renderCell(slab, column)}</TableCell>)}
-                  {isAdmin && <TableCell><Button variant="ghost" size="sm" onClick={() => void editInventoryId(slab)} disabled={maintenanceBusy}><Pencil className="h-4 w-4" /> Edit ID</Button></TableCell>}
+                  {isAdmin && <TableCell><div className="flex items-center gap-1"><Button variant="ghost" size="sm" onClick={() => void editInventoryId(slab)} disabled={maintenanceBusy}><Pencil className="h-4 w-4" /> Edit ID</Button><Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => void purgeOne(slab)} disabled={maintenanceBusy || !permanentDeleteEnabled}><Trash2 className="h-4 w-4" /> Delete</Button></div></TableCell>}
                 </TableRow>
               ))}
             </TableBody>
