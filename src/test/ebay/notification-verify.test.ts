@@ -6,6 +6,7 @@ import {
   hashName,
   createPublicKeyCache,
   verifyEbayNotificationSignature,
+  processEbayNotification,
   type EbayPublicKey,
 } from "../../../supabase/functions/_shared/ebay-notification-verify";
 
@@ -190,5 +191,73 @@ describe("verifyEbayNotificationSignature", () => {
       getPublicKey: async () => ({ algorithm: "RSA", key: fx.publicKey.key }),
     });
     expect(res).toEqual({ ok: false, reason: "unsupported_algorithm", kid: "key-123" });
+  });
+});
+
+// ── inbox persistence contract (P1 finding A1) ───────────────────────────────
+describe("processEbayNotification — durable inbox before acknowledgement", () => {
+  const body = JSON.stringify({ metadata: { topic: "ITEM_SOLD" }, notification: { notificationId: "evt-1" } });
+
+  it("acknowledges (200) only after a successful persist, and stores the event", async () => {
+    const fx = await signedFixture(body, "SHA-256");
+    const writes: Array<{ notification_id: string; topic: string }> = [];
+    const decision = await processEbayNotification({
+      rawBody: body,
+      signatureHeader: fx.header,
+      getPublicKey: fx.getPublicKey,
+      persist: async (r) => { writes.push(r); return { error: null }; },
+    });
+    expect(decision.status).toBe(200);
+    expect(decision.persisted).toBe(true);
+    expect(decision.body).toMatchObject({ status: "success", notification_id: "evt-1" });
+    expect(writes).toEqual([{ notification_id: "evt-1", topic: "ITEM_SOLD", payload_sha256: expect.any(String) }]);
+  });
+
+  it("treats an ignored duplicate (persist resolves with no error) as 200 — replay safe", async () => {
+    const fx = await signedFixture(body, "SHA-256");
+    // upsert w/ ignoreDuplicates resolves { error: null } for an already-stored id.
+    const decision = await processEbayNotification({
+      rawBody: body, signatureHeader: fx.header, getPublicKey: fx.getPublicKey,
+      persist: async () => ({ error: null }),
+    });
+    expect(decision.status).toBe(200);
+    expect(decision.persisted).toBe(true);
+  });
+
+  it("returns a retryable 503 (NOT a false 200) when persistence resolves with { error }", async () => {
+    const fx = await signedFixture(body, "SHA-256");
+    const decision = await processEbayNotification({
+      rawBody: body, signatureHeader: fx.header, getPublicKey: fx.getPublicKey,
+      persist: async () => ({ error: { code: "57014", message: "canceling statement due to statement timeout" } }),
+    });
+    expect(decision.status).toBe(503);
+    expect(decision.persisted).toBe(false);
+    expect(decision.body.error_code).toBe("INBOX_PERSIST_FAILED");
+    // No raw body / PII / secret in the response — only the event id.
+    expect(JSON.stringify(decision.body)).not.toContain("statement timeout");
+    expect(JSON.stringify(decision.body)).not.toContain("ITEM_SOLD");
+  });
+
+  it("rejects an invalid signature with 412 and NEVER calls persist", async () => {
+    let calls = 0;
+    const decision = await processEbayNotification({
+      rawBody: body, signatureHeader: "@@@malformed@@@",
+      getPublicKey: async () => ({ algorithm: "ECDSA", key: "" }),
+      persist: async () => { calls++; return { error: null }; },
+    });
+    expect(decision.status).toBe(412);
+    expect(decision.persisted).toBe(false);
+    expect(calls).toBe(0);
+  });
+
+  it("rejects a tampered body with 412 and NEVER calls persist", async () => {
+    const fx = await signedFixture(body, "SHA-256");
+    let calls = 0;
+    const decision = await processEbayNotification({
+      rawBody: body + "TAMPERED", signatureHeader: fx.header, getPublicKey: fx.getPublicKey,
+      persist: async () => { calls++; return { error: null }; },
+    });
+    expect(decision.status).toBe(412);
+    expect(calls).toBe(0);
   });
 });

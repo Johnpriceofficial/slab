@@ -267,3 +267,64 @@ export async function verifyEbayNotificationSignature(args: {
     return { ok: false, reason: "verification_error", kid: parsed.kid };
   }
 }
+
+async function sha256Hex(value: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", toAb(new TextEncoder().encode(value)));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Idempotent-inbox write result: Supabase mutations RESOLVE with an `error`
+ *  property on failure (they do not throw), so callers must inspect it. */
+export interface NotificationInboxWrite {
+  notification_id: string;
+  topic: string;
+  payload_sha256: string;
+}
+export interface NotificationDecision {
+  status: number;
+  body: Record<string, unknown>;
+  persisted: boolean;
+}
+
+/**
+ * Full inbound-notification decision: verify the signature, then durably persist
+ * to the replay-safe inbox BEFORE acknowledging. Everything is injected (public
+ * key + persist), so all outcomes are unit-testable without live credentials.
+ *
+ * Response contract:
+ *   - invalid/missing/tampered signature → 412 (rejected; persist NOT called)
+ *   - persistence resolves with `{ error }` → 503 (retryable; NOT acknowledged,
+ *     no downstream processing, dedup path not poisoned — eBay will resend)
+ *   - persistence succeeds, incl. an ignored duplicate → 200 (acknowledged)
+ * The raw body, tokens, and buyer PII never appear in the response body.
+ */
+export async function processEbayNotification(args: {
+  rawBody: string;
+  signatureHeader: string | null | undefined;
+  getPublicKey: (kid: string) => Promise<EbayPublicKey>;
+  persist: (record: NotificationInboxWrite) => Promise<{ error: unknown }>;
+}): Promise<NotificationDecision> {
+  const verification = await verifyEbayNotificationSignature({
+    rawBody: args.rawBody,
+    signatureHeader: args.signatureHeader,
+    getPublicKey: args.getPublicKey,
+  });
+  if (!verification.ok) {
+    // 412 Precondition Failed is eBay's documented signature-rejection code.
+    return { status: 412, body: { status: "error", error_code: "SIGNATURE_NOT_VERIFIED", reason: verification.reason }, persisted: false };
+  }
+  let payload: Record<string, unknown> = {};
+  try { payload = JSON.parse(args.rawBody) as Record<string, unknown>; } catch { /* verified but unparseable body */ }
+  const notif = (payload.notification ?? {}) as Record<string, unknown>;
+  const meta = (payload.metadata ?? {}) as Record<string, unknown>;
+  const payloadHash = await sha256Hex(args.rawBody);
+  const notificationId = typeof notif.notificationId === "string" && notif.notificationId ? notif.notificationId : payloadHash;
+  const topic = String(meta.topic ?? payload.topic ?? "UNKNOWN");
+  const { error } = await args.persist({ notification_id: notificationId, topic, payload_sha256: payloadHash });
+  if (error) {
+    // Durable inbox write failed. Do NOT acknowledge — a retryable 503 keeps the
+    // inbox the single source of truth so eBay resends and no event is lost.
+    return { status: 503, body: { status: "error", error_code: "INBOX_PERSIST_FAILED", notification_id: notificationId }, persisted: false };
+  }
+  return { status: 200, body: { status: "success", notification_id: notificationId }, persisted: true };
+}

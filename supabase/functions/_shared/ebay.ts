@@ -4,9 +4,10 @@ import { isCallerAdmin, unauthorizedResponse } from "./auth.ts";
 import { getEbayAppToken } from "./ebay-app-token.ts";
 import {
   createPublicKeyCache,
-  verifyEbayNotificationSignature,
+  processEbayNotification,
   type EbayPublicKey,
 } from "./ebay-notification-verify.ts";
+import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -159,30 +160,40 @@ async function userAccessToken(admin: ReturnType<typeof createClient>, accountId
   const { data: credential } = await admin.schema("private").from("ebay_oauth_credentials")
     .select("refresh_token_encrypted,scopes").eq("ebay_account_id", accountId).maybeSingle();
   if (!credential) throw new Error("CONNECTED_ACCOUNT_REQUIRED");
+  const priorEncrypted = credential.refresh_token_encrypted as string;
   const params = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: await decryptToken(credential.refresh_token_encrypted),
+    refresh_token: await decryptToken(priorEncrypted),
   });
   if (Array.isArray(credential.scopes) && credential.scopes.length) params.set("scope", credential.scopes.join(" "));
   const refreshed = await oauthToken(params);
   if (typeof refreshed.access_token !== "string") throw new Error("OAUTH_REFRESH_FAILED");
-  // eBay MAY rotate the refresh token on a refresh. When a new one comes back,
-  // re-encrypt and persist it (with its expiry) so the stored credential never
-  // goes stale. The access token is already valid, so persistence is best-effort
-  // and never blocks the caller.
-  if (typeof refreshed.refresh_token === "string" && refreshed.refresh_token) {
-    try {
-      const patch: Record<string, unknown> = {
-        refresh_token_encrypted: await encryptToken(refreshed.refresh_token),
-        rotated_at: new Date().toISOString(),
-      };
-      if (refreshed.refresh_token_expires_in) {
-        patch.refresh_token_expires_at = new Date(Date.now() + Number(refreshed.refresh_token_expires_in) * 1000).toISOString();
-      }
-      await admin.schema("private").from("ebay_oauth_credentials").update(patch).eq("ebay_account_id", accountId);
-    } catch {
-      // Rotation persistence is best-effort; the refreshed access token stands.
-    }
+  // eBay MAY return a rotated refresh token. Persist it with optimistic
+  // concurrency (write conditioned on the ciphertext we refreshed from) and
+  // VERIFY the write: a failed persist means the stored credential is now stale,
+  // so mark the account for reauthorization and fail rather than report a false
+  // success. No token value is ever logged or returned.
+  const rotation = await persistRotatedRefreshToken({
+    accountId,
+    priorEncrypted,
+    newRefreshToken: typeof refreshed.refresh_token === "string" ? refreshed.refresh_token : null,
+    refreshTokenExpiresInSec: refreshed.refresh_token_expires_in ? Number(refreshed.refresh_token_expires_in) : null,
+    scopes: typeof refreshed.scope === "string" ? refreshed.scope.split(" ") : null,
+    encrypt: encryptToken,
+    update: async (patch, where) => {
+      const { data, error } = await admin.schema("private").from("ebay_oauth_credentials")
+        .update(patch)
+        .eq("ebay_account_id", where.accountId)
+        .eq("refresh_token_encrypted", where.priorEncrypted)
+        .select("ebay_account_id");
+      return { error, rowCount: Array.isArray(data) ? data.length : 0 };
+    },
+  });
+  if (rotation.outcome === "persist_failed") {
+    // Best-effort flag so the UI surfaces a reconnect; the throw stops any caller
+    // from proceeding on a credential we know is now stale.
+    await admin.from("ebay_accounts").update({ connection_status: "reauthorization_required" }).eq("id", accountId);
+    throw new Error("REFRESH_TOKEN_ROTATION_PERSIST_FAILED");
   }
   return refreshed.access_token;
 }
@@ -210,35 +221,26 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     return reply({ challengeResponse: await sha256(challenge + token + endpoint) });
   }
   if (operation === "notification") {
-    // Verify eBay's message signature over the RAW body (see
-    // _shared/ebay-notification-verify.ts). Fail closed on any problem: only a
-    // cryptographically valid notification is persisted or acknowledged.
+    // Verify eBay's signature over the RAW body, then durably persist to the
+    // replay-safe inbox BEFORE acknowledging. A persistence failure returns a
+    // retryable 503 (never a false 200) — see processEbayNotification.
     const rawBody = await req.text();
-    const verification = await verifyEbayNotificationSignature({
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const decision = await processEbayNotification({
       rawBody,
       signatureHeader: req.headers.get("x-ebay-signature"),
       getPublicKey: (kid) => publicKeyCache.get(kid, fetchEbayPublicKey),
+      persist: async (record) => {
+        // Supabase resolves with `{ error }` on failure; upsert w/ ignoreDuplicates
+        // makes a replayed notification a no-op success (replay-safe idempotency).
+        const { error } = await admin.from("ebay_notifications").upsert(
+          { notification_id: record.notification_id, topic: record.topic, status: "received", payload_sha256: record.payload_sha256 },
+          { onConflict: "notification_id", ignoreDuplicates: true },
+        );
+        return { error };
+      },
     });
-    if (!verification.ok) {
-      // 412 Precondition Failed is eBay's documented signature-rejection code.
-      return reply({ status: "error", error_code: "SIGNATURE_NOT_VERIFIED", reason: verification.reason }, 412);
-    }
-    let payload: Record<string, unknown> = {};
-    try { payload = JSON.parse(rawBody) as Record<string, unknown>; } catch { /* verified but unparseable body */ }
-    const notif = (payload.notification ?? {}) as Record<string, unknown>;
-    const meta = (payload.metadata ?? {}) as Record<string, unknown>;
-    const notificationId = typeof notif.notificationId === "string" && notif.notificationId
-      ? notif.notificationId
-      : await sha256(rawBody);
-    const topic = String(meta.topic ?? payload.topic ?? "UNKNOWN");
-    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    // Replay-safe + idempotent: notification_id is UNIQUE, so a replayed event is
-    // a no-op insert rather than duplicate processing.
-    await admin.from("ebay_notifications").upsert(
-      { notification_id: notificationId, topic, status: "received", payload_sha256: await sha256(rawBody) },
-      { onConflict: "notification_id", ignoreDuplicates: true },
-    );
-    return reply({ status: "success", notification_id: notificationId }, 200);
+    return reply(decision.body, decision.status);
   }
 
   if (operation === "oauth_callback") {
