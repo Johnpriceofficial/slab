@@ -533,6 +533,22 @@ export async function fetchEbaySyncCursors(accountId: string): Promise<Array<{ r
   return data ?? [];
 }
 
+/** Persisted eBay inventory locations from account discovery — the options for
+ *  the listing's merchant-location selector. Empty until an account-sync runs. */
+export async function fetchEbayLocations(accountId: string): Promise<Array<{ merchant_location_key: string; status: string | null }>> {
+  const { data, error } = await sb.from("ebay_inventory_locations").select("merchant_location_key,status").eq("ebay_account_id", accountId).order("merchant_location_key", { ascending: true });
+  if (error) return [];
+  return data ?? [];
+}
+
+/** Persisted eBay business policies from account discovery, grouped by type — the
+ *  options for the fulfillment/payment/return policy selectors. */
+export async function fetchEbayBusinessPolicies(accountId: string): Promise<Array<{ policy_id: string; policy_type: string; name: string | null }>> {
+  const { data, error } = await sb.from("ebay_business_policies").select("policy_id,policy_type,name").eq("ebay_account_id", accountId).order("name", { ascending: true });
+  if (error) return [];
+  return data ?? [];
+}
+
 export async function fetchIntegrationHealth(): Promise<{ failed_sync_jobs: number; unresolved_errors: number }> {
   const [{ count: failed }, { count: errors }] = await Promise.all([
     sb.from("pricecharting_sync_runs").select("id", { count: "exact", head: true }).eq("status", "failed"),
