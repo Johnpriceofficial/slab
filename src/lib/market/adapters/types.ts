@@ -18,6 +18,7 @@ import type { SourceProvenance } from "../provenance";
 export type AdapterErrorCode =
   | "rate_limited"
   | "unauthorized"
+  | "not_configured"
   | "not_found"
   | "provider_error"
   | "parse_error"

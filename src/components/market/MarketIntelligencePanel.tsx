@@ -16,6 +16,27 @@ const pct = (n: number) => `${Math.round(n * 100)}%`;
 const money = (c: number | null) => (c === null ? "—" : formatCents(c));
 const date = (iso: string | null) => (iso ? iso.slice(0, 10) : "—");
 
+const SOURCE_LABEL: Record<string, string> = {
+  pricecharting: "PriceCharting",
+  ebay_active: "eBay active",
+  ebay_sold: "Connected seller sales",
+  population: "Population",
+  manual: "Operator comps",
+};
+
+// Success reads green, "nothing found" reads neutral, everything else (not
+// configured / failed / rate-limited) reads amber — so a degraded provider is
+// never mistaken for zero market activity.
+const STATUS_META: Record<string, { label: string; cls: string }> = {
+  success: { label: "OK", cls: "border-emerald-500/40 bg-emerald-50 text-emerald-700" },
+  no_results: { label: "No results", cls: "border-muted bg-muted text-muted-foreground" },
+  not_configured: { label: "Not configured", cls: "border-slate-400/40 bg-slate-50 text-slate-600" },
+  unauthorized: { label: "Auth failed", cls: "border-amber-400/50 bg-amber-50 text-amber-800" },
+  rate_limited: { label: "Rate-limited", cls: "border-amber-400/50 bg-amber-50 text-amber-800" },
+  provider_error: { label: "Failed", cls: "border-amber-400/50 bg-amber-50 text-amber-800" },
+  network_error: { label: "Unreachable", cls: "border-amber-400/50 bg-amber-50 text-amber-800" },
+};
+
 export function MarketIntelligencePanel({
   data,
   isLoading,
@@ -78,6 +99,33 @@ export function MarketIntelligencePanel({
                 <Row key={i} title={t.label ?? GRADE_TIER_LABELS[t.tier]} sub="pricecharting" value={money(t.value_cents)} />
               ))}
             </Section>
+
+            {/* Provider Status — per-source health, so a failed/unconfigured
+                provider is never rendered as "no market activity". */}
+            <section>
+              <h3 className="mb-2 text-sm font-semibold">Provider Status</h3>
+              <div className="divide-y rounded-md border">
+                {data.sources.map((s, i) => {
+                  const meta = STATUS_META[s.status] ?? { label: s.status, cls: "border-muted bg-muted text-muted-foreground" };
+                  return (
+                    <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
+                      <span className="min-w-0 truncate font-medium">{SOURCE_LABEL[s.source] ?? s.source}</span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span className="hidden text-xs text-muted-foreground sm:inline">{s.message}</span>
+                        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${meta.cls}`}>{meta.label}</span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {data.identity_completeness.status !== "complete" && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Identity {data.identity_completeness.status}
+                  {data.identity_completeness.missing.length > 0 && <> · missing: {data.identity_completeness.missing.join(", ")}</>}
+                  {" "}— match quality may be reduced, but market data is still shown.
+                </p>
+              )}
+            </section>
 
             {/* Source and Last Updated */}
             <section className="border-t pt-3 text-xs text-muted-foreground">

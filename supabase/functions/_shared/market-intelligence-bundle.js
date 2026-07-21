@@ -182,6 +182,45 @@ function marketConfidence(input) {
   return clamp01(0.5 * sample + 0.2 * diversity + 0.3 * tightness);
 }
 
+// src/lib/identity/completeness.ts
+var RAW_RULES = [
+  { field: "card_name", effect: "blocks_all", detail: "Without a card name, no market match is possible." },
+  { field: "card_number", effect: "blocks_exact", detail: "A missing card number generally blocks exact-card matching; results may include other cards from the set." },
+  { field: "language", effect: "downgrades_exact", detail: "Missing language may downgrade exact matching when language affects price." },
+  { field: "variation", effect: "downgrades_exact", detail: "Missing variation may downgrade exact matching if printing variants exist." },
+  { field: "finish", effect: "downgrades_exact", detail: "Missing finish may downgrade exact matching if foil/holo finishes vary." },
+  { field: "certification_number", effect: "irrelevant", detail: "A certification number is not relevant to raw-card valuation." }
+];
+var CERTIFIED_RULES = [
+  { field: "card_name", effect: "blocks_all", detail: "Without a card name, no market match is possible." },
+  { field: "card_number", effect: "blocks_exact", detail: "A missing card number generally blocks exact-card matching; results may include other cards from the set." },
+  { field: "language", effect: "downgrades_exact", detail: "Missing language may downgrade exact matching when language affects price." },
+  { field: "variation", effect: "downgrades_exact", detail: "Missing variation may downgrade exact matching if printing variants exist." },
+  { field: "finish", effect: "downgrades_exact", detail: "Missing finish may downgrade exact matching if foil/holo finishes vary." },
+  { field: "certification_number", effect: "irrelevant", detail: "A missing certification number affects physical-specimen verification, not card valuation." }
+];
+function present(value) {
+  if (value === null || value === void 0) return false;
+  return String(value).trim().length > 0;
+}
+function assessIdentityCompleteness(identity, kind) {
+  const rules = kind === "raw" ? RAW_RULES : CERTIFIED_RULES;
+  const notes = [];
+  const missing = [];
+  let hasBlocking = false;
+  let hasDowngrade = false;
+  for (const rule of rules) {
+    if (present(identity[rule.field])) continue;
+    notes.push({ field: rule.field, effect: rule.effect, detail: rule.detail });
+    if (rule.effect === "irrelevant") continue;
+    missing.push(rule.field);
+    if (rule.effect === "blocks_all" || rule.effect === "blocks_exact") hasBlocking = true;
+    if (rule.effect === "downgrades_exact") hasDowngrade = true;
+  }
+  const status = hasBlocking ? "ambiguous" : hasDowngrade ? "partial" : "complete";
+  return { status, missing, notes };
+}
+
 // src/lib/identity/identity.ts
 var CARD_IDENTITY_FIELDS = [
   "card_name",
@@ -231,6 +270,20 @@ function ebayQueryFor(input) {
 function priceChartingUrl(productId) {
   return productId ? `https://www.pricecharting.com/offers?product=${encodeURIComponent(productId)}` : "";
 }
+function normCert(value) {
+  return value.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+}
+function specimenKeyResult(identity, inventoryCode) {
+  const cert = normCert(identity.certification_number);
+  if (cert) return { status: "certified", key: `${identity.hash}:${normText(identity.grader)}:${cert}` };
+  const code = (inventoryCode ?? "").trim().toUpperCase();
+  if (code) return { status: "raw", key: `${identity.hash}:${code}` };
+  return {
+    status: "incomplete",
+    key: null,
+    reason: "A specimen key requires a certification number (certified) or an inventory code (raw); neither was provided, so the physical specimen is not uniquely identifiable."
+  };
+}
 async function buildIdentity(input) {
   const productId = text(input.pricecharting_product_id);
   return {
@@ -260,6 +313,24 @@ async function buildIdentity(input) {
 function cacheKey(source, identityHash2, params = {}) {
   const encoded = Object.keys(params).sort().map((k) => `${k}=${String(params[k])}`).join("&");
   return encoded ? `${source}|${identityHash2}|${encoded}` : `${source}|${identityHash2}`;
+}
+var MARKET_QUERY_VERSION = 2;
+function marketCacheKey(d) {
+  if (d.scope === "owner-private" && !(d.ownerId ?? "").trim()) {
+    throw new Error(
+      "marketCacheKey: owner-private scope requires an ownerId — private seller data must never be shared across users via cache reuse."
+    );
+  }
+  const providers = [...d.providers].map((p) => p.trim()).filter(Boolean).sort();
+  const parts = [
+    `v=${d.queryVersion ?? MARKET_QUERY_VERSION}`,
+    `scope=${d.scope}`,
+    `id=${d.identityHash}`,
+    `tier=${d.tier}`,
+    `providers=${providers.join(",")}`
+  ];
+  if (d.scope === "owner-private") parts.push(`owner=${(d.ownerId ?? "").trim()}`);
+  return parts.join("|");
 }
 
 // src/lib/market/adapters/pricecharting.ts
@@ -344,27 +415,171 @@ function mapManualComps(comps, retrievedAt) {
   }));
 }
 
+// src/lib/pricecharting/grade-mapping.ts
+function fieldToCardTier(field) {
+  switch (field) {
+    case "loose-price":
+      return { key: "ungraded", label: "Ungraded" };
+    case "cib-price":
+      return { key: "grade_7_to_7_5", label: "Grade 7–7.5" };
+    case "new-price":
+      return { key: "grade_8_to_8_5", label: "Grade 8–8.5" };
+    case "graded-price":
+      return { key: "grade_9_general", label: "Grade 9 (general)" };
+    case "box-only-price":
+      return { key: "grade_9_5_general", label: "Grade 9.5 (general)" };
+    case "manual-only-price":
+      return { key: "psa_10", label: "PSA 10" };
+    case "bgs-10-price":
+      return { key: "bgs_10", label: "BGS 10" };
+    case "condition-17-price":
+      return { key: "cgc_10", label: "CGC 10" };
+    case "condition-18-price":
+      return { key: "sgc_10", label: "SGC 10" };
+    case "condition-19-price":
+      return { key: "cgc_10_pristine", label: "CGC 10 Pristine" };
+    case "condition-20-price":
+      return { key: "bgs_10_black_label", label: "BGS 10 Black Label" };
+    case "condition-21-price":
+      return { key: "tag_10", label: "TAG 10" };
+    case "condition-22-price":
+      return { key: "ace_10", label: "ACE 10" };
+    default:
+      return { key: null, label: null };
+  }
+}
+var CARD_TIER_FIELD_SPECS = [
+  { field: "loose-price", grader: null, grade: null },
+  // Ungraded
+  { field: "cib-price", grader: null, grade: "7" },
+  // Grade 7–7.5
+  { field: "new-price", grader: null, grade: "8" },
+  // Grade 8–8.5
+  { field: "graded-price", grader: null, grade: "9" },
+  // GENERAL Grade 9
+  { field: "box-only-price", grader: null, grade: "9.5" },
+  // Grade 9.5 (general)
+  { field: "manual-only-price", grader: "PSA", grade: "10" },
+  // PSA 10
+  { field: "bgs-10-price", grader: "BGS", grade: "10" },
+  // BGS 10
+  { field: "condition-17-price", grader: "CGC", grade: "10" },
+  // CGC 10
+  { field: "condition-18-price", grader: "SGC", grade: "10" }
+  // SGC 10
+];
+function priceChartingCardTiers(rawPrices) {
+  const prices = rawPrices ?? {};
+  return CARD_TIER_FIELD_SPECS.map((spec) => {
+    const raw = prices[spec.field];
+    const price_cents = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    const label = fieldToCardTier(spec.field).label;
+    return { grader: spec.grader, grade: spec.grade, grade_label: label ?? spec.field, price_cents };
+  });
+}
+
 // src/server/market-intelligence/engine.ts
+var SOURCE_LABELS = {
+  pricecharting: "PriceCharting",
+  ebay_active: "eBay active listings",
+  ebay_sold: "Connected-seller sales",
+  population: "Population data",
+  manual: "Operator comps"
+};
+function sourceLabel(source) {
+  return SOURCE_LABELS[source] ?? source;
+}
+function statusFromErrorCode(code) {
+  switch (code) {
+    case "not_configured":
+      return "not_configured";
+    case "unauthorized":
+      return "unauthorized";
+    case "rate_limited":
+      return "rate_limited";
+    case "network_error":
+      return "network_error";
+    case "not_found":
+      return "no_results";
+    // 404 = no data, not a failure
+    default:
+      return "provider_error";
+  }
+}
+function safeMessage(source, status, count) {
+  const label = sourceLabel(source);
+  switch (status) {
+    case "success":
+      return `${count} result${count === 1 ? "" : "s"} from ${label}.`;
+    case "no_results":
+      return `No matching results from ${label}.`;
+    case "not_configured":
+      return `${label} is not configured.`;
+    case "unauthorized":
+      return `${label} authorization failed.`;
+    case "rate_limited":
+      return `${label} is rate-limited; try again shortly.`;
+    case "network_error":
+      return `Could not reach ${label}.`;
+    case "provider_error":
+      return `${label} request failed.`;
+  }
+}
+function deriveSourceState(result, exactCount) {
+  const p = result.provenance;
+  if (result.error) {
+    const status2 = statusFromErrorCode(result.error.code);
+    return {
+      source: result.source,
+      status: status2,
+      query: p.query,
+      retrieved_at: p.retrieved_at,
+      candidate_count: 0,
+      exact_count: 0,
+      retryable: result.error.retryable,
+      message: safeMessage(result.source, status2, 0)
+    };
+  }
+  const count = result.candidates.length;
+  const status = count === 0 ? "no_results" : "success";
+  return {
+    source: result.source,
+    status,
+    query: p.query,
+    retrieved_at: p.retrieved_at,
+    candidate_count: count,
+    exact_count: exactCount,
+    retryable: false,
+    message: safeMessage(result.source, status, count)
+  };
+}
 function buildMarketIntelligence(identity, targetTier, results, asOf) {
   const allPoints = [];
   const provenance = [];
   const gradeTiers = [];
+  const sources = [];
   for (const result of results) {
     if (result.source === "pricecharting") {
       for (const c of result.candidates) {
         const tier = mapGradeToTier(c.grader, c.grade, c.grade_label);
         if (typeof c.price_cents === "number" && c.price_cents > 0) {
-          gradeTiers.push({ tier, label: GRADE_TIER_LABELS[tier], value_cents: c.price_cents, source: "pricecharting" });
+          gradeTiers.push({ tier, label: c.grade_label ?? GRADE_TIER_LABELS[tier], value_cents: c.price_cents, source: "pricecharting" });
         }
       }
       provenance.push({ ...result.provenance, exact_count: result.candidates.length });
+      sources.push(deriveSourceState(result, result.candidates.length));
       continue;
     }
     const points = classifyCandidates(identity, targetTier, result.candidates, asOf);
     allPoints.push(...points);
     const exact = points.filter((p) => p.match === "exact").length;
     provenance.push({ ...result.provenance, exact_count: exact });
+    sources.push(deriveSourceState(result, exact));
   }
+  const identityCompleteness = assessIdentityCompleteness(
+    identity,
+    targetTier === "raw" ? "raw" : "certified"
+  );
   const { sales, active } = separateMarket(allPoints);
   const summary = summarizeSales(sales);
   const lowestActive = active.length > 0 ? Math.min(...active.map((p) => p.price_cents)) : null;
@@ -384,13 +599,18 @@ function buildMarketIntelligence(identity, targetTier, results, asOf) {
     liquidity: liquidityScore(sales, asOf),
     confidence: marketConfidence({ summary, sourceCount: sourcesWithSales, asOf }),
     provenance,
+    sources,
+    identity_completeness: identityCompleteness,
     generated_at: asOf
   };
 }
 export {
+  MARKET_QUERY_VERSION,
+  assessIdentityCompleteness,
   buildIdentity,
   buildMarketIntelligence,
   cacheKey,
+  deriveSourceState,
   ebayCompatibleQuery,
   ebayExactQuery,
   mapEbayActive,
@@ -398,5 +618,8 @@ export {
   mapGradeToTier,
   mapManualComps,
   mapPriceCharting,
-  priceChartingQuery
+  marketCacheKey,
+  priceChartingCardTiers,
+  priceChartingQuery,
+  specimenKeyResult
 };
