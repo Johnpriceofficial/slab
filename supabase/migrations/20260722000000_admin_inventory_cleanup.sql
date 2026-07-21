@@ -8,8 +8,6 @@
 -- client from the paths returned by purge_slabs().
 -- ============================================================================
 
--- Permit the inventory immutability trigger only while a guarded maintenance RPC
--- has enabled a transaction-local flag. Direct table updates remain blocked.
 create or replace function public.enforce_inventory_id_immutable()
 returns trigger
 language plpgsql
@@ -88,6 +86,7 @@ set search_path = public, auth
 as $$
 declare
   v_count integer;
+  v_offset integer;
 begin
   if not public.is_admin((select auth.uid())) then
     raise exception 'NOT_AUTHORIZED' using errcode = '42501';
@@ -95,14 +94,16 @@ begin
 
   perform pg_advisory_xact_lock(918273646);
   perform set_config('app.inventory_maintenance', 'on', true);
+  select coalesce(max(inventory_sequence), 0) + 1 into v_offset from public.slabs;
 
-  -- Move all current sequences out of the positive keyspace first so the unique
-  -- index cannot collide while assigning the compact 1..N sequence.
-  update public.slabs set inventory_sequence = -inventory_sequence;
+  -- Move every row above the current maximum before assigning 1..N. This stays
+  -- positive and therefore satisfies the existing positive-sequence constraint.
+  update public.slabs
+     set inventory_sequence = inventory_sequence + v_offset;
 
   with ordered as (
     select id, row_number() over (
-      order by abs(inventory_sequence), created_at, id
+      order by inventory_sequence, created_at, id
     )::integer as next_sequence
     from public.slabs
   )
@@ -142,15 +143,11 @@ begin
     raise exception 'HARD_DELETE_DISABLED' using errcode = '42501';
   end if;
 
-  -- Return storage paths before deleting rows. The browser removes the private
-  -- objects after this transaction commits and reports any orphan cleanup error.
   return query
     select s.id, s.front_image_path, s.back_image_path
     from public.slabs s
     where s.id = any(p_ids);
 
-  -- Remove references that otherwise preserve a trace through SET NULL FKs or
-  -- non-FK entity identifiers. CASCADE relationships are removed with slabs.
   delete from private.ebay_order_line_items where slab_id = any(p_ids);
   delete from public.marketplace_events where slab_id = any(p_ids);
   delete from public.sold_comps where slab_id = any(p_ids);
