@@ -190,9 +190,11 @@ begin
     where s.id = any(p_ids)
     order by s.id;
 
-  delete from private.ebay_order_line_items where slab_id = any(p_ids);
-  delete from public.marketplace_events where slab_id = any(p_ids);
-  delete from public.sold_comps where slab_id = any(p_ids);
+  -- Qualify slab_id with the table name: the function's RETURNS TABLE(slab_id …)
+  -- output column is an in-scope variable and would otherwise be ambiguous (42702).
+  delete from private.ebay_order_line_items where ebay_order_line_items.slab_id = any(p_ids);
+  delete from public.marketplace_events where marketplace_events.slab_id = any(p_ids);
+  delete from public.sold_comps where sold_comps.slab_id = any(p_ids);
   delete from public.audit_log
    where (entity_type = 'slab' and entity_id = any(select x::text from unnest(p_ids) x))
       or detail->>'slab_id' = any(select x::text from unnest(p_ids) x);
