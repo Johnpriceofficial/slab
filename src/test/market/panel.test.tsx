@@ -66,4 +66,17 @@ describe("MarketIntelligencePanel", () => {
     rerender(<MarketIntelligencePanel data={undefined} isLoading={false} error="providers offline" />);
     expect(screen.getByText(/Market data is unavailable/i)).toBeInTheDocument();
   });
+
+  it("renders empty states (never crashes) when the payload is missing arrays/objects", () => {
+    // Reproduces the live crash: a 200 response whose shape is missing arrays the
+    // panel maps over (e.g. a deployed edge function older than the frontend).
+    // Before the fix, `.map()` on undefined threw and the top-level boundary
+    // blanked the page. After, the panel degrades to empty sections.
+    const partial = { generated_at: "2026-07-15T00:00:00Z" } as unknown as MarketIntelligence;
+    expect(() => render(<MarketIntelligencePanel data={partial} isLoading={false} error={null} />)).not.toThrow();
+    expect(screen.getByText(/Market Intelligence/i)).toBeInTheDocument();
+    expect(screen.getByText(/No verified completed sales yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/No active listings found/i)).toBeInTheDocument();
+    expect(screen.getByText(/No PriceCharting product matched/i)).toBeInTheDocument();
+  });
 });
