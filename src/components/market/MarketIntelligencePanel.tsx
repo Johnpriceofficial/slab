@@ -37,6 +37,27 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   network_error: { label: "Unreachable", cls: "border-amber-400/50 bg-amber-50 text-amber-800" },
 };
 
+/**
+ * The market-intelligence Edge Function is the only remote data this page
+ * renders inline (not through a data-access layer with a fixed return type).
+ * A malformed 200 response (partial body from a runtime crash, an old cached
+ * shape, a schema drift) must never throw during render — it must degrade to
+ * the same "unavailable" treatment as a network/provider error.
+ */
+function isWellFormedMarketIntelligence(data: unknown): data is MarketIntelligence {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Partial<MarketIntelligence>;
+  return (
+    !!d.summary &&
+    Array.isArray(d.verified_sales) &&
+    Array.isArray(d.active_listings) &&
+    Array.isArray(d.grade_tiers) &&
+    Array.isArray(d.sources) &&
+    Array.isArray(d.provenance) &&
+    !!d.identity_completeness
+  );
+}
+
 export function MarketIntelligencePanel({
   data,
   isLoading,
@@ -54,13 +75,17 @@ export function MarketIntelligencePanel({
       </CardHeader>
       <CardContent className="space-y-6">
         {isLoading && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Gathering market data…</div>}
-        {error && !isLoading && (
+        {(error || (data && !isWellFormedMarketIntelligence(data))) && !isLoading && (
           <div className="flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-3 text-sm text-amber-800">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> <span>Market data is unavailable right now: {error}</span>
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{" "}
+            <span>
+              Market data is unavailable right now:{" "}
+              {error ?? "the server returned an unexpected response."}
+            </span>
           </div>
         )}
 
-        {data && !isLoading && (
+        {data && isWellFormedMarketIntelligence(data) && !isLoading && (
           <>
             {/* Market Summary — from VERIFIED SALES only */}
             <section>

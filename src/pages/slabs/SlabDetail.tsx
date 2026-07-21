@@ -248,11 +248,17 @@ export default function SlabDetail() {
       </div>
 
       {/* Comps — CRUD + stats + operator-approved Final Value */}
-      <SlabCompsSection slab={slab} />
+      <PanelErrorBoundary panelName="Sales Comps">
+        <SlabCompsSection slab={slab} />
+      </PanelErrorBoundary>
 
-      <MarketIntelligenceSection request={{ slab_id: slab.id }} />
+      <PanelErrorBoundary panelName="Market Intelligence">
+        <MarketIntelligenceSection request={{ slab_id: slab.id }} />
+      </PanelErrorBoundary>
 
-      <SlabEvidencePanel slab={slab} />
+      <PanelErrorBoundary panelName="Verification & Field Evidence">
+        <SlabEvidencePanel slab={slab} />
+      </PanelErrorBoundary>
 
       {/* Marketplace + eBay selling are administrative tools, not part of a
           customer's private inventory. RLS keeps the underlying tables
