@@ -383,6 +383,93 @@ async function reverifyCertificationNumber(
   );
 }
 
+/**
+ * Parse a grade reading into its numeric grade and (optional) designation token.
+ * Self-contained (this module is bundled standalone for the Edge Function),
+ * mirroring the semantics of normalizeDesignation in the PriceCharting grade map:
+ * "10" and "Pristine 10" are the SAME numeric grade with a designation, not two
+ * conflicting grades.
+ */
+function parseGradeReading(raw: string | null): { numeric: number | null; designation: string | null } {
+  const s = (raw ?? "").trim();
+  if (!s) return { numeric: null, designation: null };
+  const m = s.match(/\d{1,2}(?:\.\d)?/);
+  const n = m ? Number(m[0]) : NaN;
+  const numeric = Number.isFinite(n) ? n : null;
+  const lower = s.toLowerCase();
+  let designation: string | null = null;
+  if (/black\s*label/.test(lower)) designation = "BLACK LABEL";
+  else if (lower.includes("pristine")) designation = "PRISTINE";
+  else if (lower.includes("perfect")) designation = "PERFECT";
+  else if (lower.includes("gem")) designation = "GEM MINT";
+  return { numeric, designation };
+}
+
+export interface GradeReconciliation {
+  grade: ProposedField;
+  /** A designation extracted from either reading, to backfill grade_label. */
+  grade_label_designation: string | null;
+  warning: string | null;
+}
+
+/**
+ * Reconcile two independent grade readings by SEMANTIC components (numeric grade
+ * + designation), NOT literal strings. "10" and "Pristine 10" agree on grade 10
+ * and yield grade="10" + a "PRISTINE" designation for grade_label — never a
+ * conflict. Genuinely different numeric grades (9 vs 10, 9.5 vs 10) remain a
+ * conflict that clears the grade for manual review. Never guesses a numeric grade
+ * and never weakens the never-guess rule for a real disagreement.
+ */
+export function reconcileGradeReadings(first: ProposedField, second: ProposedField): GradeReconciliation {
+  if (!first.readable || !second.readable) {
+    return {
+      grade: { value: null, confidence: 0, source: first.source, readable: false },
+      grade_label_designation: null,
+      warning: "grade needs review: independent readings could not both resolve the evidence.",
+    };
+  }
+  const a = parseGradeReading(first.value);
+  const b = parseGradeReading(second.value);
+  if (a.numeric !== null && b.numeric !== null && a.numeric === b.numeric) {
+    return {
+      grade: {
+        value: String(a.numeric), // canonical numeric only: "10", "9.5" (designation stripped)
+        confidence: Math.max(first.confidence, second.confidence, 0.95),
+        source: first.source,
+        readable: true,
+      },
+      grade_label_designation: a.designation ?? b.designation,
+      warning: null,
+    };
+  }
+  return {
+    grade: { value: null, confidence: 0, source: first.source, readable: false },
+    grade_label_designation: null,
+    warning: `grade needs review: independent readings disagree ("${first.value}" vs "${second.value}").`,
+  };
+}
+
+/**
+ * Reconcile two independent VARIATION readings. Variation is low-stakes identity
+ * context: a benign cross-pass wording difference (e.g. "Holo" vs "RRR - Holo")
+ * must NOT clear a readable variation, because that drops evidence like the foil
+ * finish. Keep the first readable reading and warn; never report it unreadable
+ * just because the two passes phrased it differently.
+ */
+export function reconcileVariationReadings(first: ProposedField, second: ProposedField): { variation: ProposedField; warning: string | null } {
+  const norm = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (first.readable && second.readable && norm(first.value) !== norm(second.value)) {
+    return {
+      variation: { ...first, confidence: Math.min(first.confidence, 0.9) },
+      warning: `variation readings differ ("${first.value}" vs "${second.value}") — kept "${first.value}"; confirm against the label.`,
+    };
+  }
+  if (first.readable && second.readable) {
+    return { variation: { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) }, warning: null };
+  }
+  return { variation: first, warning: null }; // one side unreadable — keep original, never clear
+}
+
 async function reverifyCriticalIdentity(
   deps: AnalyzeDeps,
   images: AnalyzeModelRequest["images"],
@@ -409,6 +496,32 @@ async function reverifyCriticalIdentity(
     const first = proposed[key];
     const second = mapField(reread[key]);
     if (!first.readable && !second.readable) continue;
+
+    if (key === "grade") {
+      // Compare grade by numeric value + designation, not literal string, so a
+      // bare "10" and a "Pristine 10" are recognized as the SAME grade rather
+      // than a conflict that clears the grade and drops the slab to ungraded.
+      const rec = reconcileGradeReadings(first, second);
+      proposed.grade = rec.grade;
+      if (rec.warning) warnings.push(rec.warning);
+      // Backfill the designation into grade_label WITHOUT overwriting an existing
+      // readable label. AI evidence only — never invented.
+      if (rec.grade_label_designation) {
+        const label = proposed.grade_label;
+        if (!label.readable || !(label.value ?? "").trim()) {
+          proposed.grade_label = { value: rec.grade_label_designation, confidence: rec.grade.confidence, source: first.source, readable: true };
+        }
+      }
+      continue;
+    }
+
+    if (key === "variation") {
+      const rec = reconcileVariationReadings(first, second);
+      proposed.variation = rec.variation;
+      if (rec.warning) warnings.push(rec.warning);
+      continue;
+    }
+
     if (!first.readable || !second.readable || normalize(first.value) !== normalize(second.value)) {
       proposed[key] = { value: null, confidence: 0, source: first.source, readable: false };
       warnings.push(

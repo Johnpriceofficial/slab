@@ -39,6 +39,8 @@ export interface ReviewItem {
 
 export interface InventoryCard {
   id: string;
+  /** Permanent public raw-card identifier, e.g. "R0001". */
+  inventory_code: string;
   card_name: string;
   set_name: string;
   card_number: string;

@@ -12,7 +12,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
 import { makePriceChartingReserver } from "../_shared/rate-limit.ts";
 // deno-lint-ignore no-explicit-any
-import { handlePriceChartingRequest } from "../_shared/pricecharting-bundle.js";
+import { handlePriceChartingRequest, getProductPageSnapshot } from "../_shared/pricecharting-bundle.js";
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -45,10 +45,33 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Durable, DB-backed 1 req/sec reservation across all isolates + retries.
+    const reserve = makePriceChartingReserver();
+
+    // The public-page adapter is DISABLED BY DEFAULT and explicitly operator-
+    // controlled: it is injected ONLY when PRICECHARTING_PAGE_ADAPTER_ENABLED is
+    // exactly "true". Enabling it in production is gated behind the PriceCharting
+    // Terms / production-request-policy review — it never defaults on. When on, the
+    // page is fetched server-side for every confirmed graded product to supply the
+    // full grade table + reference artwork, reusing the same ≤1 req/s reserver; it
+    // never returns raw HTML. Anything other than "true" ⇒ API-only.
+    const pageEnabled = (Deno.env.get("PRICECHARTING_PAGE_ADAPTER_ENABLED") ?? "").trim().toLowerCase() === "true";
+    // deno-lint-ignore no-explicit-any
+    const fetchPageSnapshot = pageEnabled
+      ? (pageInput: any) =>
+          getProductPageSnapshot(pageInput, {
+            // deno-lint-ignore no-explicit-any
+            fetch: (u: string, init: any) => fetch(u, init),
+            beforeRequest: () => reserve("pricecharting-page"),
+            now: () => new Date().toISOString(),
+            getEnv: (name: string) => Deno.env.get(name),
+          })
+      : undefined;
+
     const result = await handlePriceChartingRequest(input, {
       tokenProvider: () => token,
-      // Durable, DB-backed 1 req/sec reservation across all isolates + retries.
-      beforeRequest: makePriceChartingReserver(),
+      beforeRequest: reserve,
+      fetchPageSnapshot,
     });
     // result.body never contains the token (guaranteed by the handler/library).
     return json(result.body, result.statusCode);

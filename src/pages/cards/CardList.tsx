@@ -19,7 +19,7 @@ export default function CardList() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return cards;
-    return cards.filter((card) => [card.card_name, card.set_name, card.card_number, card.rarity ?? ""].some((value) => value.toLowerCase().includes(q)));
+    return cards.filter((card) => [card.card_name, card.set_name, card.card_number, card.rarity ?? "", card.inventory_code ?? ""].some((value) => value.toLowerCase().includes(q)));
   }, [cards, search]);
 
   return (
@@ -42,7 +42,7 @@ export default function CardList() {
             <Link key={card.id} to={`/cards/${card.id}`} className="group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
               <Card className="h-full overflow-hidden transition group-hover:-translate-y-0.5 group-hover:shadow-lg">
                 <div className="aspect-[5/7] overflow-hidden bg-slate-950">{card.thumbnail_url ? <img src={card.thumbnail_url} alt={`${card.card_name} scan`} className="h-full w-full object-contain transition group-hover:scale-[1.02]" /> : <div className="grid h-full place-items-center text-xs text-white/60">Private scan image</div>}</div>
-                <CardContent className="p-4"><div className="flex items-start justify-between gap-2"><h2 className="font-semibold leading-tight">{card.card_name}</h2><Badge variant={card.identification_confidence >= 0.9 ? "secondary" : "outline"}>{Math.round(card.identification_confidence * 100)}%</Badge></div><p className="mt-2 text-sm text-muted-foreground">{card.set_name}</p><p className="text-sm font-medium">#{card.card_number}</p>{card.rarity && <p className="mt-2 text-xs text-muted-foreground">{card.rarity}</p>}</CardContent>
+                <CardContent className="p-4"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="font-mono text-xs text-muted-foreground">{card.inventory_code}</p><h2 className="font-semibold leading-tight">{card.card_name}</h2></div><Badge variant={card.identification_confidence >= 0.9 ? "secondary" : "outline"}>{Math.round(card.identification_confidence * 100)}%</Badge></div><p className="mt-2 text-sm text-muted-foreground">{card.set_name}</p><p className="text-sm font-medium">#{card.card_number}</p>{card.rarity && <p className="mt-2 text-xs text-muted-foreground">{card.rarity}</p>}</CardContent>
               </Card>
             </Link>
           ))}

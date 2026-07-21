@@ -289,7 +289,7 @@ async function handleAction(body: Record<string, unknown>, userId: string, admin
   if (action === "list_cards") {
     const requestedStatus = body.inventory_status === "archived" ? "archived" : "active";
     const { data: cards, error } = await admin.from("cards")
-      .select("id,card_name,set_name,card_number,rarity,condition_notes,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
+      .select("id,inventory_code,card_name,set_name,card_number,rarity,condition_notes,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
       .eq("created_by", userId).eq("inventory_status", requestedStatus)
       .order("created_at", { ascending: false }).limit(500);
     if (error) throw error;
@@ -303,7 +303,7 @@ async function handleAction(body: Record<string, unknown>, userId: string, admin
     const cardId = typeof body.card_id === "string" ? body.card_id : "";
     if (!cardId) return json({ status: "error", error_code: "CARD_ID_REQUIRED", message: "card_id is required." }, 400);
     const { data: card, error } = await admin.from("cards")
-      .select("id,source_scan_id,card_name,set_name,card_number,rarity,condition_notes,condition_issues,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
+      .select("id,inventory_code,source_scan_id,card_name,set_name,card_number,rarity,condition_notes,condition_issues,identification_confidence,scan_image_path,inventory_status,created_at,updated_at")
       .eq("id", cardId).eq("created_by", userId).single();
     if (error || !card) return json({ status: "error", error_code: "CARD_NOT_FOUND", message: "Card not found." }, 404);
     const { data: scan } = await admin.from("card_scans")

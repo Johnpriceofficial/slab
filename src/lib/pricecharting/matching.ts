@@ -12,6 +12,7 @@ import { searchProducts, getProductById, getProductByUPC } from "./api";
 import { PriceChartingError, isPriceChartingError } from "./errors";
 import { cardNumberToken } from "./card-number";
 import { characterMatch } from "./character-name";
+import { normalizeLanguage, detectConsoleLanguage, languageFamily } from "./language";
 import type {
   ConfidenceLevel,
   ItemInput,
@@ -421,13 +422,42 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
     let charHard = false;
     let languageHard = false;
     if (id.key === "language") {
-      const known = ["japanese", "korean", "english", "chinese"];
-      const wantedLanguage = known.find((l) => normalizeText(id.value).includes(l));
-      const candidateLanguage = known.find((l) => hay.includes(l));
-      if (wantedLanguage && candidateLanguage && wantedLanguage !== candidateLanguage) {
-        hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateLanguage}`);
+      // PriceCharting marks ASIAN-language catalogs explicitly ("Pokemon Japanese
+      // ...", "... Korean ...", "... Chinese ...") and leaves ENGLISH as the
+      // UNMARKED default. Treating an unmarked candidate as "unknown" (the old
+      // behavior) is exactly what let a Japanese slab link to the ENGLISH product:
+      // both carry the same character and the same 151/165 number, and the English
+      // page has no "japanese" token, so no conflict was ever raised. An unmarked
+      // candidate is therefore ENGLISH, not unknown. A RECOGNIZED requested
+      // language that disagrees with the candidate's (marked, or defaulted-English)
+      // language is a HARD conflict — language materially changes the card and its
+      // price. An UNRECOGNIZED requested language (null) never disqualifies.
+      // Read language from the candidate's CONSOLE/SET name ONLY (never the card
+      // name — a card named "Chinchou" must not read as Chinese) and on whole-word
+      // tokens, never substrings. Compare by language FAMILY (Chinese Simplified /
+      // Traditional collapse to one family).
+      const wantedLanguage = languageFamily(normalizeLanguage(id.value));
+      const candidateMarked = (() => {
+        const l = detectConsoleLanguage(product.console_or_category);
+        return l ? languageFamily(l) : null; // null when the console is unmarked
+      })();
+      if (wantedLanguage && candidateMarked && wantedLanguage !== candidateMarked) {
+        // Two DIFFERENT positively-identified languages — unambiguously the wrong
+        // card (e.g. a Japanese slab against a "... Korean ..." catalog). Hard reject.
+        hardConflicts.push(`language mismatch: wanted ${wantedLanguage}, candidate is ${candidateMarked}`);
         disqualified = true;
         languageHard = true;
+      } else if (wantedLanguage && wantedLanguage !== "english" && !candidateMarked) {
+        // Wanted a NON-English language but the candidate console carries NO marker.
+        // Because English is unmarked, this is AMBIGUOUS — most likely the English
+        // product, but possibly an unmarked non-English catalog. Do NOT hard-reject
+        // (that could drop the correct product), but raise a conflict so it can NEVER
+        // be auto-confirmed: the exact language/catalog must be proven (public page or
+        // visual) first. This is the guard that stops a Japanese slab from silently
+        // linking to the English product.
+        softConflicts.push(
+          `language unverified: requested ${wantedLanguage}, but the candidate carries no language marker (English is unmarked on PriceCharting) — confirm the exact catalog before accepting`,
+        );
       }
     }
     if (id.key === "card_name") {

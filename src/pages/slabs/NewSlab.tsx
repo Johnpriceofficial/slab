@@ -30,6 +30,7 @@ import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
 import {
+  deriveValuationProvenance,
   identityChangeAction,
   isAutoDerived,
   isManualProvenance,
@@ -126,7 +127,15 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // rather than re-hydrating a stale photo.
   useEffect(() => {
     const captured = consumeCameraCapture();
-    if (captured) setFront(captured);
+    if (captured) {
+      setFront(captured.image);
+      if (captured.back) setBack(captured.back);
+      // The universal scanner already analyzed this capture (front, and back when
+      // present) to classify it as a slab; reuse that combined result so the
+      // proposal panel appears without a second AI call. The operator still
+      // reviews and applies every field.
+      if (captured.analysis) setAnalysis(captured.analysis);
+    }
   }, []);
 
   const NUMERIC_VAL_FIELDS: ReadonlyArray<keyof typeof EMPTY_VALUATION> = ["final", "quick", "replacement", "guide"];
@@ -335,17 +344,18 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     // value using the documented ratios — never leave confidence on "Manual" when
     // the numbers actually came from PriceCharting. A guide value returned at the
     // slab's own grade is the exact tier; Verified still requires visual confirmation.
-    // §4/§5: only treat this as the EXACT designation tier when the server
-    // confirmed the returned tier represents the slab's grade+designation. A
-    // Pristine slab valued from the ordinary CGC 10 tier is a COMPATIBLE tier,
-    // never a "Verified exact Pristine".
-    const sourceProvenance: ValuationProvenance = sel.value_cents === null
-      ? "tier_unavailable"
-      : sel.is_estimate
-        ? "pricecharting_estimate"
-        : sel.designation_exact
-          ? "pricecharting_exact_tier"
-          : "pricecharting_compatible_tier";
+    // §4/§5: the EXACT-vs-COMPATIBLE-vs-unavailable decision is shared pure logic
+    // (deriveValuationProvenance), never re-implemented here. It also enforces the
+    // hard invariant that a GRADED slab is never valued from the ungraded/loose
+    // tier — a Pristine slab valued from the ordinary CGC 10 tier is COMPATIBLE,
+    // and one that fell through to loose-price is `tier_unavailable`, never raw.
+    const sourceProvenance: ValuationProvenance = deriveValuationProvenance({
+      value_cents: sel.value_cents,
+      is_estimate: sel.is_estimate,
+      designation_exact: sel.designation_exact,
+      grader_present: !!id.grader.trim(),
+      field_used: sel.grade_field,
+    });
     const derived = deriveValuation({
       guide_cents: sel.value_cents,
       confidence_score: sel.confidence_score,
@@ -458,10 +468,46 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // §3 Save-action gating. A DRAFT needs only a front image (and no duplicate
   // cert); a VERIFIED record needs the full identity plus all blockers resolved.
   const verifiedMissing = verifiedBlockers(buildInput("verified"), !!front);
+  const graded = !!id.grader.trim();
+  // A verified record must carry a RESOLVED valuation — a value the operator can
+  // stand behind — never a blank. When the exact tier is unavailable, the mandatory
+  // manual-valuation path (enter a guide/final, or completed-sale evidence) must be
+  // used before this can be saved as a verified record. This is what stops a 99%
+  // scan from producing a "verified" record with an empty valuation.
+  const valuationResolved =
+    dollarsToCents(val.final) !== null || dollarsToCents(val.guide) !== null;
+  // Whether the operator is valuing MANUALLY (they take responsibility for the value).
+  const isManualVal = valProvenance === "manual_guide" || valProvenance === "manual_value";
+  // The operator visually confirmed the linked product's artwork.
+  const visualConfirmed = !!pc && visual?.product_id === pc.product_id && visual.status === "user_confirmed";
+  // For an AUTO (PriceCharting-derived) valuation of a graded slab, the exact
+  // grader + grade + designation tier must have RESOLVED to a usable value — a
+  // compatible/estimated tier, a null value, or "tier unavailable" is NOT a
+  // verified record (item 7). designation_exact + tier_availability=available +
+  // a non-null guide together mean "the exact tier resolved".
+  const exactTierResolved =
+    !!pc &&
+    pc.tier_availability === "available" &&
+    pc.designation_exact === true &&
+    (pc.value_cents ?? null) !== null;
   const verifyBlockers = [
     ...(verifiedMissing.length ? [`missing ${verifiedMissing.join(", ").toLowerCase()}`] : []),
     ...(dup ? [`a duplicate certification (Inventory #${dup.inventory_number})`] : []),
     ...(pc && pcStale ? ["an unresolved (stale) PriceCharting link — re-check it"] : []),
+    ...(!valuationResolved
+      ? ["an unresolved valuation — enter an exact tier, completed-sale evidence, or a manual guide/final value"]
+      : []),
+    // A graded slab reaches "verified" only when the EXACT tier resolved, OR the
+    // operator visually confirmed the exact card, OR they valued it manually. This
+    // is the precise guard against a false "Ready to save" on an unresolved/ambiguous
+    // valuation (wrong-language link, compatible-only tier, unavailable tier).
+    ...(graded && !isManualVal && !exactTierResolved && !visualConfirmed
+      ? [
+          pc
+            ? "an unresolved exact valuation — the exact grader/grade/designation tier did not resolve (or the product identity is unconfirmed); confirm the exact card + tier, value manually, or reject the link"
+            : "no confirmed PriceCharting product and no manual valuation — confirm the exact product or enter a manual value",
+        ]
+      : []),
   ];
   const canVerify = verifyBlockers.length === 0 && !saving && !saveRecovery;
   const draftBlockers = [
@@ -853,6 +899,31 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
               }}
               onReject={rejectPc}
             />
+
+            {/* Reference artwork — the confirmed PriceCharting product-page image.
+                Shown whenever it is available, INDEPENDENT of which source supplied
+                the value (item 5: artwork is decoupled from valuation_source). */}
+            {pc?.reference_artwork && (
+              <div className="mt-3 flex items-center gap-2 rounded-md border p-3">
+                <img src={pc.reference_artwork.image_url} alt="PriceCharting reference artwork" className="h-16 w-auto rounded border bg-background" />
+                <span className="text-xs text-muted-foreground">PriceCharting reference artwork (confirmed product page)</span>
+              </div>
+            )}
+
+            {/* Public-page VALUE provenance — shown only when the official API lacked
+                the exact tier and the public-page adapter supplied the value.
+                Distinct source; a guide/reference value, never a completed sale. */}
+            {pc?.valuation_source === "PRICECHARTING_PUBLIC_PAGE" && pc.public_page && (
+              <div className="mt-3 rounded-md border border-blue-400/40 bg-blue-50 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded border border-blue-500/50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">PriceCharting public page</span>
+                  <span className="font-medium text-blue-900">{pc.public_page.displayed_label} {pc.public_page.displayed_price_text} — exact reference value</span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The official PriceCharting API omitted this tier; the value was read from the confirmed public product page (current guide/reference value, not a completed sale). Retrieved {pc.public_page.retrieved_at.slice(0, 10)}.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -862,6 +933,21 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
             <CardTitle>Valuation</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* Mandatory manual-valuation workflow — the exact graded tier was not
+                resolved from any source, so the operator MUST value by hand rather
+                than be left with a dead blank. This is the actionable resolution
+                path a 99% scan drops into when no exact tier/evidence exists. */}
+            {graded && !valuationResolved && (
+              <div className="col-span-2 flex items-start gap-2 rounded-md border border-amber-500/50 bg-amber-50 p-3 text-sm text-amber-900 sm:col-span-4">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">Manual valuation required — no exact tier value was resolved.</p>
+                  <p className="mt-0.5 text-amber-800">
+                    No exact {id.grade_label ? `${id.grade_label} ` : ""}{id.grader || "graded"} tier value came back from PriceCharting (official API or public page){pc ? "" : ", and no product is linked yet"}. Enter a Guide Value below (which fills Final / Quick-Sale / Replacement), or type a Final value from verified completed-sale evidence. This slab cannot be saved as a verified record while the valuation is blank.
+                  </p>
+                </div>
+              </div>
+            )}
             {valStale && isManualProvenance(valProvenance) && hasManualFigures() && (
               <div className="col-span-2 flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 p-2 text-sm text-amber-800 sm:col-span-4">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />

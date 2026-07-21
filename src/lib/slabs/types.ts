@@ -8,7 +8,14 @@ import type { ValuationProvenance } from "./valuation-provenance";
 
 export interface Slab {
   id: string;
+  /** Internal, permanent number that keys image storage paths and eBay SKUs. */
   inventory_number: number;
+  /** Public identifier prefix — "S" for slabs. Immutable after creation. */
+  inventory_prefix: string;
+  /** Per-type public sequence (1, 2, …). Immutable, never reused. */
+  inventory_sequence: number;
+  /** DB-generated public code, e.g. "S0001". Immutable, never reused. */
+  inventory_code: string;
   card_name: string | null;
   final_value_cents: number | null;
   quick_sale_value_cents: number | null;

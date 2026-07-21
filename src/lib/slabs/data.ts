@@ -10,6 +10,7 @@ import type { MarketplaceInput, MarketplaceHandlerBody, MarketplaceSnapshot } fr
 import type { SlabDataAccess, SlabDataError } from "./save-slab";
 import { buildPricingPersist } from "./pricing-tiers";
 import { resolveRefreshProduct, buildRefreshScalars } from "./pricing-refresh";
+import { parseInventoryQuery } from "./inventory-code";
 import { buildConfirmationPatch, confirmationEventType, isRetryableConfirmationError } from "./confirmation-patch";
 import type {
   SearchResponse,
@@ -175,9 +176,17 @@ export async function fetchSlabs(query: SlabQuery = {}): Promise<{ rows: Slab[];
 
   if (query.search && query.search.trim()) {
     const s = query.search.trim().replace(/[%,]/g, "");
-    q = q.or(
-      `card_name.ilike.%${s}%,certification_number.ilike.%${s}%,set_name.ilike.%${s}%,card_number.ilike.%${s}%`,
-    );
+    const filters = [
+      `card_name.ilike.%${s}%`,
+      `certification_number.ilike.%${s}%`,
+      `set_name.ilike.%${s}%`,
+      `card_number.ilike.%${s}%`,
+      // Public identifier: match the full code ("S0001") or its numeric portion.
+      `inventory_code.ilike.%${s.toUpperCase()}%`,
+    ];
+    const parsed = parseInventoryQuery(s);
+    if (parsed) filters.push(`inventory_sequence.eq.${parsed.sequence}`);
+    q = q.or(filters.join(","));
   }
   if (query.grader) q = q.eq("grader", query.grader);
   if (query.grade) q = q.eq("grade", query.grade);
@@ -207,6 +216,34 @@ export async function fetchAllSlabs(): Promise<Slab[]> {
     .range(0, 9999);
   if (error) throw error;
   return (data ?? []) as Slab[];
+}
+
+/**
+ * Resolve a public inventory query ("S0001", "0001", "1") to the accessible
+ * slab(s) via the ownership-scoped RPC. Used for QR codes, deep links, exports,
+ * and Copilot lookups. Returns [] for free text or a non-slab prefix.
+ */
+export async function resolveSlabInventory(query: string): Promise<Slab[]> {
+  const { data, error } = await sb.rpc("resolve_slab_inventory", { p_query: query });
+  if (error) throw error;
+  return (data ?? []) as Slab[];
+}
+
+export interface ResolvedInventoryItem {
+  item_type: "slab" | "raw_card";
+  id: string;
+  inventory_code: string;
+  inventory_sequence: number;
+}
+
+/**
+ * Resolve a public inventory query across BOTH inventories: "S0001" → a slab,
+ * "R0001" → a raw card, a bare number → both. Ownership-scoped by the RPC.
+ */
+export async function resolveInventory(query: string): Promise<ResolvedInventoryItem[]> {
+  const { data, error } = await sb.rpc("resolve_inventory", { p_query: query });
+  if (error) throw error;
+  return (data ?? []) as ResolvedInventoryItem[];
 }
 
 export async function fetchSlabById(id: string): Promise<Slab | null> {
@@ -511,15 +548,28 @@ export async function ebaySellerOperation(
   return (data ?? { status: "error", message: "eBay returned no response." }) as Record<string, any>;
 }
 
+/**
+ * Full identity sent with a value request. The confirmed product page is part of
+ * the canonical workflow, so the server needs the whole identity — the canonical
+ * URL (to fetch the exact page), and card_number + language (to VERIFY the page is
+ * the same card before any tier/artwork is trusted), plus set/name/year/variation
+ * for persistence and audit. Every field is optional except product_id; empty
+ * values are dropped so the server derives what it can.
+ */
+export interface PriceChartingValueArgs extends PriceChartingSearchArgs {
+  product_id: string;
+  canonical_url?: string | null;
+}
+
 export async function priceChartingValue(
-  productId: string,
-  grader?: string,
-  grade?: string | number,
-  grade_label?: string,
+  args: PriceChartingValueArgs,
 ): Promise<ValueResponse | HandlerErrorBody> {
-  const { data, error } = await sb.functions.invoke("pricecharting-search", {
-    body: { action: "value", product_id: productId, grader, grade, grade_label },
-  });
+  const { product_id, ...identity } = args;
+  const body: Record<string, unknown> = { action: "value", product_id };
+  for (const [k, v] of Object.entries(identity)) {
+    if (v !== undefined && v !== null && v !== "") body[k] = v;
+  }
+  const { data, error } = await sb.functions.invoke("pricecharting-search", { body });
   if (error) return { status: "error", error_code: "NETWORK_ERROR", message: error.message, retryable: true };
   return data as ValueResponse | HandlerErrorBody;
 }
@@ -663,7 +713,18 @@ export async function refreshSlabPricing(slab: Slab): Promise<RefreshPricingResu
       return { status: "no_product", message: "No PriceCharting product is linked and none could be matched automatically." };
     }
 
-    const value = await priceChartingValue(resolution.product_id, slab.grader ?? undefined, slab.grade ?? undefined, slab.grade_label ?? undefined);
+    const value = await priceChartingValue({
+      product_id: resolution.product_id,
+      card_name: slab.card_name ?? undefined,
+      set: slab.set_name ?? undefined,
+      card_number: slab.card_number ?? undefined,
+      year: slab.year ?? undefined,
+      language: slab.language ?? undefined,
+      variation: slab.variation ?? undefined,
+      grader: slab.grader ?? undefined,
+      grade: slab.grade ?? undefined,
+      grade_label: slab.grade_label ?? undefined,
+    });
     if (value.status === "error") return { status: "error", message: value.message };
 
     // ONE atomic, stale-guarded write: tiers + raw + the scalar mirror fields all

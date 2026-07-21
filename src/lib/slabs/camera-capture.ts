@@ -1,54 +1,67 @@
 /**
- * Hand-off buffer for a camera capture on its way to the Add a Slab screen.
+ * Hand-off buffer for a universal-scanner capture on its way to an intake screen.
  *
- * `CardScanner` stages the captured front image here, stops the camera, and
- * navigates to /slabs/new; `NewSlab` consumes it once on mount and drops it
- * into the Front image slot. Because both live in the same SPA bundle, a
- * client-side `navigate()` preserves this module's state — the image never has
- * to be serialized.
+ * The scanner captures once, analyzes once, and classifies the item. For a
+ * graded slab it stages the captured front image AND the analysis here, then
+ * navigates to /slabs/new — which consumes both on mount, so the photo lands in
+ * the Front slot and the AI proposal is shown WITHOUT a second analysis call.
  *
- * Deliberately NOT a query-string base64 payload and NOT a second upload:
- *   - a base64 data URL of a 1800px JPEG blows past practical URL limits and
- *     would be re-decoded on arrival, and
- *   - re-uploading the capture would create a second stored object (and, in the
- *     old scan flow, a separate /cards inventory row) for one physical slab.
- * The staged value is the very same `SlabImageState` — the same File objects and
- * the same preview object URL — that a manual upload produces, so exactly one
- * slab and one set of images are written on save.
+ * Because both live in the same SPA bundle, a client-side navigate() preserves
+ * this module's state — nothing is serialized, no query-string payload, no
+ * duplicate upload. The staged image is the very same SlabImageState a manual
+ * upload produces, so exactly one slab and one set of images are written on save.
  *
- * The buffer holds at most one capture. Staging a second one releases the first
+ * The buffer holds at most one capture. Staging a second releases the first
  * (an operator who re-scans before reaching the form must not leak its preview
- * URL), and consuming clears the slot so a later visit to /slabs/new starts
- * empty instead of re-hydrating a stale photo.
+ * URL), and consuming clears the slot so a later visit starts empty.
  */
 
 import { releaseSlabImageState, type SlabImageState } from "./image-state";
+import type { AnalyzeResult } from "@/server/analyze-slab/handler";
 
-let staged: SlabImageState | null = null;
+export interface StagedCapture {
+  image: SlabImageState;
+  /** Optional back image captured during front/back intake. */
+  back: SlabImageState | null;
+  /** The analysis computed at capture time, so the intake screen needn't re-run it. */
+  analysis: AnalyzeResult | null;
+}
 
-/** Stages the capture for the next /slabs/new mount, replacing any prior one. */
-export function stageCameraCapture(image: SlabImageState): void {
-  if (staged && staged !== image) releaseSlabImageState(staged);
-  staged = image;
+let staged: StagedCapture | null = null;
+
+/** Stage a capture (front, optional back, optional analysis) for the next mount. */
+export function stageCameraCapture(
+  image: SlabImageState,
+  back: SlabImageState | null = null,
+  analysis: AnalyzeResult | null = null,
+): void {
+  if (staged) {
+    if (staged.image !== image) releaseSlabImageState(staged.image);
+    if (staged.back && staged.back !== back) releaseSlabImageState(staged.back);
+  }
+  staged = { image, back, analysis };
 }
 
 /**
- * Returns the staged capture and clears the slot, so it hydrates the form
- * exactly once. Ownership of the preview URL transfers to the caller.
+ * Return the staged capture and clear the slot, so it hydrates the form exactly
+ * once. Ownership of the preview URL transfers to the caller.
  */
-export function consumeCameraCapture(): SlabImageState | null {
-  const image = staged;
+export function consumeCameraCapture(): StagedCapture | null {
+  const value = staged;
   staged = null;
-  return image;
+  return value;
 }
 
-/** Reads the staged capture without consuming it (tests/diagnostics). */
-export function peekCameraCapture(): SlabImageState | null {
+/** Read the staged capture without consuming it (tests/diagnostics). */
+export function peekCameraCapture(): StagedCapture | null {
   return staged;
 }
 
-/** Discards a staged capture that will never be consumed, releasing its URL. */
+/** Discard a staged capture that will never be consumed, releasing its URLs. */
 export function clearCameraCapture(): void {
-  releaseSlabImageState(staged);
+  if (staged) {
+    releaseSlabImageState(staged.image);
+    releaseSlabImageState(staged.back);
+  }
   staged = null;
 }

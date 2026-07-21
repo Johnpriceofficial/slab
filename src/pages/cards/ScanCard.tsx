@@ -18,18 +18,18 @@ export default function ScanCardPage() {
 
   return (
     <main className="mx-auto w-full max-w-6xl sm:px-4 sm:py-6">
-      <PageHead title="Scan Card · GradedCardValue.com" noindex />
+      <PageHead title="Scan Item · GradedCardValue.com" noindex />
       <div className="px-4 py-4 sm:px-0">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="flex items-center gap-2 text-2xl font-bold"><Camera className="text-primary" /> Scan Card</h1>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Point your phone at one slab, align it, and capture. The photo opens straight in Add a Slab with the front image already loaded—nothing is saved to your camera roll.</p>
+            <h1 className="flex items-center gap-2 text-2xl font-bold"><Camera className="text-primary" /> Scan Item</h1>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Point your phone at any card or slab and capture. The AI decides whether it's a graded slab or a raw card and files it accordingly—if it's unsure, you choose. Nothing is saved to your camera roll.</p>
           </div>
           <Button variant="outline" asChild><Link to="/slabs/new"><ImagePlus /> Manual photo upload</Link></Button>
         </div>
       </div>
 
-      <CardScanner />
+      <CardScanner onInventoryChange={refresh} />
 
       <section className="px-4 py-6 sm:px-0">
         <details className="group" open={reviews.length > 0}>
