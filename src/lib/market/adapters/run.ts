@@ -1,13 +1,25 @@
 /**
- * Shared adapter runner: one place for HTTP status handling, parse-error
- * isolation, and network-error capture, so every adapter maps consistently and
- * a provider failure becomes a typed AdapterError rather than a throw.
+ * Shared adapter runner: one place for HTTP status handling, schema/parse-error
+ * isolation, and network-error capture, so every current or future provider
+ * degrades to a typed AdapterError rather than throwing into the page.
  */
 
 import type { MarketSource, RawCandidate } from "../types";
 import { buildProvenance } from "../provenance";
 import type { AdapterContext, AdapterResult } from "./types";
 import { httpStatusToError } from "./types";
+import { ProviderSchemaError } from "@/lib/providers/response-schema";
+
+function validateCandidates(source: MarketSource, value: unknown): RawCandidate[] {
+  if (!Array.isArray(value)) throw new ProviderSchemaError(source, "$mapped", "adapter must return an array");
+  return value.filter((candidate): candidate is RawCandidate => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+    const row = candidate as Record<string, unknown>;
+    return row.source === source
+      && (row.price_cents === null || row.price_cents === undefined
+        || (typeof row.price_cents === "number" && Number.isFinite(row.price_cents)));
+  });
+}
 
 export async function runAdapter(
   source: MarketSource,
@@ -20,16 +32,42 @@ export async function runAdapter(
   try {
     const res = await ctx.fetch(request);
     if (!res.ok) {
-      return { source, candidates: [], provenance: buildProvenance({ ...base, candidate_count: 0 }), error: httpStatusToError(source, res.status) };
+      return {
+        source,
+        candidates: [],
+        provenance: buildProvenance({ ...base, candidate_count: 0 }),
+        error: httpStatusToError(source, res.status),
+      };
     }
-    let candidates: RawCandidate[];
     try {
-      candidates = map(res.body, ctx.retrieved_at);
-    } catch (e) {
-      return { source, candidates: [], provenance: buildProvenance({ ...base, candidate_count: 0 }), error: { source, code: "parse_error", message: e instanceof Error ? e.message : "Unreadable response.", retryable: false } };
+      const candidates = validateCandidates(source, map(res.body, ctx.retrieved_at));
+      return {
+        source,
+        candidates,
+        provenance: buildProvenance({ ...base, candidate_count: candidates.length }),
+        error: null,
+      };
+    } catch (error) {
+      return {
+        source,
+        candidates: [],
+        provenance: buildProvenance({ ...base, candidate_count: 0 }),
+        error: {
+          source,
+          code: "parse_error",
+          message: error instanceof ProviderSchemaError
+            ? `${source} returned data in an unsupported format.`
+            : "Unreadable provider response.",
+          retryable: false,
+        },
+      };
     }
-    return { source, candidates, provenance: buildProvenance({ ...base, candidate_count: candidates.length }), error: null };
-  } catch (e) {
-    return { source, candidates: [], provenance: buildProvenance({ ...base, candidate_count: 0 }), error: { source, code: "network_error", message: e instanceof Error ? e.message : "Request failed.", retryable: true } };
+  } catch {
+    return {
+      source,
+      candidates: [],
+      provenance: buildProvenance({ ...base, candidate_count: 0 }),
+      error: { source, code: "network_error", message: "Request failed.", retryable: true },
+    };
   }
 }
