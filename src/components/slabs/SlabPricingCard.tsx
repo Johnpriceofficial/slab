@@ -72,7 +72,16 @@ export function SlabPricingCard({ model }: { model: PricingModel }) {
         <p className="mt-1 text-sm font-medium">{basis_label}</p>
 
         <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
-          <Metric label="PriceCharting Guide Value" value={formatCents(guide_cents)} />
+          <Metric
+            // Never label a manually-typed number "PriceCharting Guide Value" --
+            // that field holds whatever number is in the guide/final-value form
+            // regardless of provenance, and match_kind === "manual" is exactly
+            // the case where it was hand-entered, not sourced from PriceCharting
+            // (verified against production record 3455aa7b-a727-4814-91eb-
+            // 9a3dd6f17846 / slab S0001, which is exactly this case).
+            label={match_kind === "manual" ? "Manually-Entered Guide Value" : "PriceCharting Guide Value"}
+            value={formatCents(guide_cents)}
+          />
           <Metric label="Quick-Sale Value" value={formatCents(quick_cents)} />
           <Metric label="Replacement Value" value={formatCents(replacement_cents)} />
           <Metric label="Valuation Confidence" value={confidence_label} />

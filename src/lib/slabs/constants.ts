@@ -128,6 +128,13 @@ export const INVENTORY_TABLE_COLUMNS: ColumnDef[] = [
   { key: "variation", label: "Variation", type: "text" },
   { key: "verification_status", label: "Verification Status", type: "text" },
   { key: "valuation_confidence", label: "Valuation Confidence", type: "text" },
+  // Exported next to Valuation Confidence, matching EXCEL_MASTER_COLUMNS below,
+  // so "PriceCharting Value" is never shown without its discriminator: a
+  // manually-typed guide value (valuation_provenance = manual_guide/manual_value)
+  // is otherwise indistinguishable on this table from a real PriceCharting-
+  // sourced figure (verified against production record
+  // 3455aa7b-a727-4814-91eb-9a3dd6f17846 / slab S0001).
+  { key: "valuation_provenance", label: "Valuation Provenance", type: "text" },
   { key: "quick_sale_value_cents", label: "Quick-Sale Value", type: "currency" },
   { key: "replacement_value_cents", label: "Replacement Value", type: "currency" },
   { key: "pricecharting_value_cents", label: "PriceCharting Value", type: "currency" },
