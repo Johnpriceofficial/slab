@@ -1,0 +1,31 @@
+name: Copy Slab Cleanup UI
+
+on:
+  push:
+    branches:
+      - agent/production-slab-cleanup
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/production-slab-cleanup
+          fetch-depth: 0
+      - name: Copy validated slab list UI
+        run: |
+          git fetch origin agent/phase1-card-operations
+          git show origin/agent/phase1-card-operations:src/pages/slabs/SlabList.tsx > src/pages/slabs/SlabList.tsx
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/pages/slabs/SlabList.tsx
+          if git diff --cached --quiet; then
+            echo "UI already current"
+          else
+            git commit -m "Add direct, selected, and delete-all slab controls"
+            git push origin HEAD:agent/production-slab-cleanup
+          fi
