@@ -8,7 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ebaySellerOperation, fetchEbayAccounts, fetchEbaySyncCursors, startEbayOAuth } from "@/lib/slabs/data";
+import { ebaySellerOperation, fetchEbayAccounts, fetchEbaySyncCursors, signedImageUrl, startEbayOAuth } from "@/lib/slabs/data";
+import { ebayListingTitle, ebaySkuForSlab, slabImagePaths } from "@/lib/slabs/ebay-listing";
 import type { Slab } from "@/lib/slabs/types";
 
 export function EbaySellerPanel({ slab }: { slab: Slab }) {
@@ -33,7 +34,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const [connecting, setConnecting] = useState(false);
   const [prepared, setPrepared] = useState<Record<string, any> | null>(null);
   const [form, setForm] = useState({
-    title: `${slab.card_name ?? "Graded card"} ${slab.grader ?? ""} ${slab.grade ?? ""}`.trim(),
+    title: ebayListingTitle(slab),
     description: `${slab.card_name ?? "Graded card"} · ${slab.set_name ?? ""} · #${slab.card_number ?? ""} · ${slab.grader ?? ""} ${slab.grade_label ?? ""} ${slab.grade ?? ""}`.slice(0, 1000),
     price: slab.final_value_cents ? (slab.final_value_cents / 100).toFixed(2) : "",
     categoryId: "",
@@ -109,7 +110,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const listingPayload = {
     account_id: connected?.id,
     slab_id: slab.id,
-    sku: String(slab.inventory_number),
+    sku: ebaySkuForSlab(slab),
     marketplace_id: "EBAY_US",
     title: form.title,
     description: form.description,
@@ -123,7 +124,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     condition: form.condition,
     quantity: 1,
     aspects: {},
-    image_urls: [],
+    // image_urls are resolved to fresh signed URLs at publish time (see publish()).
   };
   const prepare = async () => {
     if (anyBusy) return;
@@ -135,9 +136,13 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   };
   const publish = async () => {
     if (anyBusy) return;
-    if (!window.confirm("Publish this item to eBay with the displayed price, condition, policies, and SKU?")) return;
+    // Real slab photos (front, then back) resolved to short-lived signed URLs eBay
+    // fetches at publish time — never an empty image list.
+    const image_urls = (await Promise.all(slabImagePaths(slab).map((p) => signedImageUrl(p, 3600)))).filter((u): u is string => Boolean(u));
+    if (image_urls.length === 0) { toast.error("This slab has no stored images — add photos before publishing to eBay."); return; }
+    if (!window.confirm(`Publish to eBay with ${image_urls.length} photo(s), SKU ${listingPayload.sku}, and the displayed price, condition, and policies?`)) return;
     setActiveOperation("publish_listing");
-    const result = await ebaySellerOperation("ebay-list-item", { ...listingPayload, confirmation: "PUBLISH" });
+    const result = await ebaySellerOperation("ebay-list-item", { ...listingPayload, image_urls, confirmation: "PUBLISH" });
     setActiveOperation(null);
     if (result.status === "success") toast.success(`Published eBay listing ${result.listing_id ?? ""}.`);
     else toast.error(result.message ?? "eBay publish failed.");
@@ -183,7 +188,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         </div>
       )}
       <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2">
-        <div className="sm:col-span-2"><Label>Listing title</Label><Input value={form.title} onChange={(e) => change("title", e.target.value)} /></div>
+        <div className="sm:col-span-2"><Label>Listing title <span className="text-muted-foreground">({form.title.length}/80)</span></Label><Input value={form.title} maxLength={80} onChange={(e) => change("title", e.target.value)} /></div>
         <div className="sm:col-span-2"><Label>Description and grade disclosure</Label><Textarea value={form.description} onChange={(e) => change("description", e.target.value)} /></div>
         <div><Label>Price (USD)</Label><Input type="number" min="0" step="0.01" value={form.price} onChange={(e) => change("price", e.target.value)} /></div>
         <div><Label>Condition policy value</Label><Input value={form.condition} onChange={(e) => change("condition", e.target.value)} /></div>
