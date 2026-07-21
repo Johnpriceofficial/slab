@@ -1,8 +1,9 @@
 /**
  * Admin actions for a slab detail page:
  *   - Archive / Unarchive real inventory (preserves number, comps, images).
- *   - A SEPARATE, explicitly-confirmed hard delete for temporary TEST records
- *     that removes comps + both images + the row, reporting partial failures.
+ *   - A SEPARATE, explicitly-confirmed hard delete for temporary TEST records.
+ *     Every destructive route uses the transactional purge and durable storage
+ *     cleanup queue; failed object removal remains recoverable and visible.
  */
 
 import { useState } from "react";
@@ -30,8 +31,6 @@ export function SlabAdminActions({ slab }: { slab: Slab }) {
   const queryClient = useQueryClient();
   const { status } = useAuth();
   const isArchived = !!slab.archived_at;
-  // An owner may archive their own slab (archival is part of maintaining an
-  // inventory). Permanent destruction stays an administrative tool.
   const canHardDelete = HARD_DELETE_ENABLED && status === "admin";
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["slab", slab.id] });
@@ -71,8 +70,7 @@ function HardDeleteDialog({ slab, onDeleted }: { slab: Slab; onDeleted: () => vo
     try {
       const report = await hardDeleteSlab(slab.id);
       if (report.image_errors.length > 0) {
-        // Partial cleanup — DB row gone, but some images could not be removed.
-        toast.warning(`Record deleted, but ${report.image_errors.length} image(s) could not be removed: ${report.image_errors.join("; ")}`);
+        toast.warning(`Record deleted. ${report.image_errors.length} image cleanup operation(s) remain safely queued for retry: ${report.image_errors.join("; ")}`);
       } else {
         toast.success("Test record and its images were permanently deleted");
       }
@@ -82,7 +80,7 @@ function HardDeleteDialog({ slab, onDeleted }: { slab: Slab; onDeleted: () => vo
       const msg = e instanceof Error ? e.message : "Delete failed";
       toast.error(
         /HARD_DELETE_DISABLED/.test(msg)
-          ? "Hard delete is disabled on this project. An admin must set slab_settings.allow_hard_delete = true to remove test records."
+          ? "Hard delete is disabled on this project. Enable the permanent-delete safety switch before removing test records."
           : msg,
       );
     } finally {
@@ -91,7 +89,7 @@ function HardDeleteDialog({ slab, onDeleted }: { slab: Slab; onDeleted: () => vo
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { setOpen(o); setConfirmed(false); }}>
+    <Dialog open={open} onOpenChange={(nextOpen) => { setOpen(nextOpen); setConfirmed(false); }}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="text-destructive">
           <Trash2 className="mr-1 h-4 w-4" /> Delete test record
@@ -104,12 +102,12 @@ function HardDeleteDialog({ slab, onDeleted }: { slab: Slab; onDeleted: () => vo
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <p>
               This permanently removes slab <strong>#{slab.inventory_number}</strong>, its sales comps, and both images.
-              Use archival for real inventory — this is only for temporary test records. Inventory number
-              #{slab.inventory_number} will remain a permanent gap and is never reused.
+              Use archival for real inventory — this is only for temporary test records. Failed image removal remains
+              in the protected cleanup queue until it succeeds.
             </p>
           </div>
           <label className="flex items-center gap-2">
-            <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+            <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
             <span>I understand this is permanent and this is a test record.</span>
           </label>
         </div>

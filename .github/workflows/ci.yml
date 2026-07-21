@@ -38,12 +38,6 @@ jobs:
       - name: Production build
         run: bun run build
 
-      # Every production Edge Function is either deno-checked here or listed as a
-      # justified exclusion in supabase/functions/CI-COVERAGE.md. The eBay and
-      # scan-card functions are excluded ONLY because they have pre-existing type
-      # errors under these strict flags (Deno WebCrypto Buffer typings and the
-      # `.schema("private")` client overload) that require a Deno-aware config to
-      # resolve; that cleanup is tracked separately and is out of scope here.
       - name: Deno-check edge functions
         run: >-
           deno check --no-config --node-modules-dir=manual --no-remote
@@ -95,14 +89,25 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Start disposable Supabase stack
-        run: supabase start
+        run: |
+          set -o pipefail
+          for attempt in 1 2; do
+            echo "Starting disposable Supabase stack (attempt $attempt of 2)"
+            if timeout 240s supabase start; then
+              exit 0
+            fi
+            echo "::warning::Disposable Supabase startup attempt $attempt failed or timed out"
+            docker ps -a || true
+            docker system df || true
+            supabase stop --no-backup || true
+            if [ "$attempt" = "1" ]; then sleep 10; fi
+          done
+          echo "::error::Disposable Supabase stack failed to start after two bounded clean attempts"
+          exit 1
 
       - name: Reset database from migrations
         run: supabase db reset --local --no-seed
 
-      # The whole directory, not one hard-coded file: a new integration suite must
-      # RUN, not sit skipped while CI reports green. `db reset` above applied every
-      # migration, so these exercise the real schema, RLS, and RPCs.
       - name: Run database integration tests
         run: |
           eval "$(supabase status -o env)"
@@ -117,9 +122,6 @@ jobs:
             bunx vitest run src/test/integration \
               --reporter=verbose --reporter=json --outputFile=/tmp/integration.json
 
-      # A skipped integration suite proves nothing. If the live-Supabase env ever
-      # stops reaching vitest, every test would silently skip and CI would still
-      # report green — so fail loudly on any skip.
       - name: Assert no integration test was skipped
         run: |
           SKIPPED=$(bun -e "const r = await Bun.file('/tmp/integration.json').json(); console.log(r.numPendingTests + r.numTodoTests)")
