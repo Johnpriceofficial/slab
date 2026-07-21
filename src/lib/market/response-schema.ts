@@ -122,5 +122,5 @@ export function normalizeMarketIntelligenceResponse(payload: unknown): MarketInt
     generated_at: stringValue(body.generated_at, new Date().toISOString()),
   };
 
-  return normalized as MarketIntelligence;
+  return normalized as unknown as MarketIntelligence;
 }
