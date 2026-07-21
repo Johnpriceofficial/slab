@@ -19,12 +19,12 @@ export interface PriceChartingProductResponse {
   product_id: string;
   product_name: string;
   url?: string | null;
-  sales_volume?: number | null;
+  sales_volume?: string | number | null;
   tiers: Array<{
     grader?: string | null;
     grade?: string | null;
     grade_label?: string | null;
-    price_cents: number | null;
+    price_cents: string | number | null;
   }>;
 }
 
@@ -50,12 +50,13 @@ export function parsePriceChartingProductResponse(value: unknown): PriceCharting
 }
 
 export function mapPriceCharting(response: PriceChartingProductResponse, retrievedAt: string): RawCandidate[] {
-  return response.tiers
-    .filter((tier) => typeof tier.price_cents === "number" && tier.price_cents > 0)
-    .map((tier) => ({
+  return response.tiers.flatMap((tier) => {
+    const value = tier.price_cents === null || tier.price_cents === undefined ? null : Number(tier.price_cents);
+    if (!Number.isFinite(value) || value <= 0) return [];
+    return [{
       source: "pricecharting" as const,
       title: response.product_name,
-      price_cents: tier.price_cents!,
+      price_cents: Math.round(value),
       currency: "USD",
       url: response.url ?? null,
       sold: true,
@@ -64,7 +65,8 @@ export function mapPriceCharting(response: PriceChartingProductResponse, retriev
       grader: tier.grader ?? null,
       grade: tier.grade ?? null,
       grade_label: tier.grade_label ?? null,
-    }));
+    }];
+  });
 }
 
 export function fetchPriceCharting(args: { url: string; query: string }, ctx: AdapterContext): Promise<AdapterResult> {
