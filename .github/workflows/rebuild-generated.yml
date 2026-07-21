@@ -1,0 +1,35 @@
+name: Rebuild Generated Edge Bundles
+
+on:
+  push:
+    branches:
+      - agent/phase0-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/phase0-reliability
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: |
+          bun run build:edge-bundle
+          bun run build:analyze-bundle
+          bun run build:marketplace-bundle
+          bun run build:market-intel-bundle
+      - name: Commit generated bundles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add supabase/functions/_shared/*-bundle.js
+          if git diff --cached --quiet; then
+            echo "Generated bundles already current"
+          else
+            git commit -m "Rebuild generated edge bundles"
+            git push origin HEAD:agent/phase0-reliability
+          fi
