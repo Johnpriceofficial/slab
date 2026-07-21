@@ -157,8 +157,10 @@ function confirmation(body: Record<string, unknown>, phrase: string): Response |
 }
 
 async function userAccessToken(admin: ReturnType<typeof createClient>, accountId: string): Promise<string> {
-  const { data: credential } = await admin.schema("private").from("ebay_oauth_credentials")
-    .select("refresh_token_encrypted,scopes").eq("ebay_account_id", accountId).maybeSingle();
+  // Private-schema reads/writes go through SECURITY DEFINER RPCs (service_role
+  // only); the `private` schema is intentionally not exposed to the Data API.
+  const { data: credential } = await admin
+    .rpc("ebay_oauth_credential_get", { p_account_id: accountId }).maybeSingle();
   if (!credential) throw new Error("CONNECTED_ACCOUNT_REQUIRED");
   const priorEncrypted = credential.refresh_token_encrypted as string;
   const params = new URLSearchParams({
@@ -181,12 +183,17 @@ async function userAccessToken(admin: ReturnType<typeof createClient>, accountId
     scopes: typeof refreshed.scope === "string" ? refreshed.scope.split(" ") : null,
     encrypt: encryptToken,
     update: async (patch, where) => {
-      const { data, error } = await admin.schema("private").from("ebay_oauth_credentials")
-        .update(patch)
-        .eq("ebay_account_id", where.accountId)
-        .eq("refresh_token_encrypted", where.priorEncrypted)
-        .select("ebay_account_id");
-      return { error, rowCount: Array.isArray(data) ? data.length : 0 };
+      // The RPC applies the optimistic-concurrency guard (prior ciphertext) in
+      // SQL and returns the row count; 0 => a concurrent rotation won.
+      const { data, error } = await admin.rpc("ebay_oauth_credential_rotate", {
+        p_account_id: where.accountId,
+        p_prior_encrypted: where.priorEncrypted,
+        p_new_encrypted: patch.refresh_token_encrypted,
+        p_refresh_token_expires_at: patch.refresh_token_expires_at ?? null,
+        p_scopes: patch.scopes ?? null,
+        p_rotated_at: patch.rotated_at,
+      });
+      return { error, rowCount: typeof data === "number" ? data : 0 };
     },
   });
   if (rotation.outcome === "persist_failed") {
@@ -253,7 +260,7 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (!state || !code || !RU_NAME) return appRedirect(null, "invalid_callback");
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const stateHash = await sha256(state);
-    const { data: stored } = await admin.schema("private").from("ebay_oauth_states").select("requested_by,expires_at,consumed_at,redirect_after").eq("state_hash", stateHash).maybeSingle();
+    const { data: stored } = await admin.rpc("ebay_oauth_state_get", { p_state_hash: stateHash }).maybeSingle();
     // Single-use + unexpired: a replayed or stale callback is rejected here.
     if (!stored || stored.consumed_at || new Date(stored.expires_at) <= new Date()) return appRedirect(null, "invalid_state");
     if (!Deno.env.get("EBAY_TOKEN_ENCRYPTION_KEY")) return appRedirect(null, "config_error");
@@ -273,15 +280,18 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
         last_synced_at: new Date().toISOString(),
       }, { onConflict: "ebay_user_id" }).select("id").single();
       if (accountError || !account) return appRedirect(null, "persist_error");
-      await admin.schema("private").from("ebay_oauth_credentials").upsert({
-        ebay_account_id: account.id,
-        refresh_token_encrypted: await encryptToken(refreshToken),
-        refresh_token_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
-        scopes: typeof token.scope === "string" ? token.scope.split(" ") : [],
-        rotated_at: new Date().toISOString(),
-      }, { onConflict: "ebay_account_id" });
+      const { error: credError } = await admin.rpc("ebay_oauth_credential_upsert", {
+        p_account_id: account.id,
+        p_refresh_token_encrypted: await encryptToken(refreshToken),
+        p_refresh_token_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
+        p_scopes: typeof token.scope === "string" ? token.scope.split(" ") : [],
+        p_rotated_at: new Date().toISOString(),
+      });
+      // The encrypted credential MUST persist — without it the account is connected
+      // but unusable. Surface a failure instead of a false success.
+      if (credError) return appRedirect(null, "persist_error");
       // Consume the state only after a successful exchange (single-use).
-      await admin.schema("private").from("ebay_oauth_states").update({ consumed_at: new Date().toISOString() }).eq("state_hash", stateHash);
+      await admin.rpc("ebay_oauth_state_consume", { p_state_hash: stateHash });
       return appRedirect(stored.redirect_after, "connected");
     } catch {
       return appRedirect(null, "error");
@@ -296,9 +306,11 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (!RU_NAME || !REDIRECT_URI) return unavailable(operation, "OAuth authorization-code flow");
     const state = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { error: stateError } = await admin.schema("private").from("ebay_oauth_states").insert({
-      state_hash: await sha256(state), requested_by: auth.user!.id,
-      expires_at: new Date(Date.now() + 10 * 60_000).toISOString(), redirect_after: body.redirect_after ?? null,
+    const { error: stateError } = await admin.rpc("ebay_oauth_state_create", {
+      p_state_hash: await sha256(state),
+      p_requested_by: auth.user!.id,
+      p_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+      p_redirect_after: body.redirect_after ?? null,
     });
     // Without a persisted state the callback can never validate — fail loudly
     // instead of handing the user an authorization URL that will always reject.
