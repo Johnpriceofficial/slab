@@ -1,5 +1,11 @@
 -- ============================================================================
 -- GradedCardValue.com — administrative slab cleanup and public-ID maintenance.
+--
+-- The internal slabs.inventory_number remains immutable because it keys storage
+-- paths and marketplace integrations. Administrators may correct the visible
+-- S0001-style inventory_sequence through guarded RPCs. Permanent deletion is
+-- transactionally atomic inside Postgres; storage objects are deleted through
+-- the Storage API and every pending path is durably tracked until acknowledged.
 -- ============================================================================
 
 create or replace function public.enforce_inventory_id_immutable()
@@ -19,6 +25,18 @@ begin
 end;
 $$;
 
+create table if not exists private.slab_storage_cleanup_queue (
+  bucket_id text not null default 'slab-images',
+  storage_path text primary key,
+  slab_id uuid,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  attempts integer not null default 0,
+  last_error text
+);
+
+revoke all on table private.slab_storage_cleanup_queue from public, anon, authenticated;
+
 create or replace function public.reassign_slab_inventory_id(
   p_slab_id uuid,
   p_sequence integer
@@ -37,6 +55,9 @@ begin
   if p_sequence is null or p_sequence < 1 then
     raise exception 'INVALID_INVENTORY_SEQUENCE' using errcode = '22023';
   end if;
+
+  perform pg_advisory_xact_lock(918273646);
+
   if exists (
     select 1 from public.slabs
     where inventory_prefix = 'S'
@@ -124,6 +145,9 @@ language plpgsql
 security definer
 set search_path = public, private, auth
 as $$
+declare
+  v_requested integer;
+  v_found integer;
 begin
   if not public.is_admin((select auth.uid())) then
     raise exception 'NOT_AUTHORIZED' using errcode = '42501';
@@ -135,10 +159,31 @@ begin
     raise exception 'HARD_DELETE_DISABLED' using errcode = '42501';
   end if;
 
+  perform pg_advisory_xact_lock(918273646);
+
+  select count(*) into v_requested from (select distinct unnest(p_ids) as id) requested;
+  select count(*) into v_found from public.slabs where id = any(p_ids);
+  if v_found <> v_requested then
+    raise exception 'SLAB_NOT_FOUND_OR_DUPLICATE_INPUT' using errcode = 'P0002';
+  end if;
+
+  insert into private.slab_storage_cleanup_queue (storage_path, slab_id)
+  select path, slab_id
+  from (
+    select s.id as slab_id, s.front_image_path as path from public.slabs s where s.id = any(p_ids)
+    union all
+    select s.id as slab_id, s.back_image_path as path from public.slabs s where s.id = any(p_ids)
+  ) queued
+  where path is not null and btrim(path) <> ''
+  on conflict (storage_path) do update
+    set slab_id = excluded.slab_id,
+        updated_at = now();
+
   return query
     select s.id, s.front_image_path, s.back_image_path
     from public.slabs s
-    where s.id = any(p_ids);
+    where s.id = any(p_ids)
+    order by s.id;
 
   delete from private.ebay_order_line_items where slab_id = any(p_ids);
   delete from public.marketplace_events where slab_id = any(p_ids);
@@ -154,9 +199,79 @@ $$;
 revoke all on function public.purge_slabs(uuid[]) from public, anon;
 grant execute on function public.purge_slabs(uuid[]) to authenticated;
 
+create or replace function public.list_pending_slab_storage_cleanup()
+returns table (storage_path text)
+language plpgsql
+security definer
+set search_path = public, private, auth
+as $$
+begin
+  if not public.is_admin((select auth.uid())) then
+    raise exception 'NOT_AUTHORIZED' using errcode = '42501';
+  end if;
+  return query
+    select q.storage_path
+    from private.slab_storage_cleanup_queue q
+    order by q.created_at, q.storage_path;
+end;
+$$;
+
+create or replace function public.acknowledge_slab_storage_cleanup(p_paths text[])
+returns integer
+language plpgsql
+security definer
+set search_path = public, private, auth
+as $$
+declare
+  v_count integer;
+begin
+  if not public.is_admin((select auth.uid())) then
+    raise exception 'NOT_AUTHORIZED' using errcode = '42501';
+  end if;
+  if p_paths is null or cardinality(p_paths) = 0 then
+    return 0;
+  end if;
+  delete from private.slab_storage_cleanup_queue where storage_path = any(p_paths);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+create or replace function public.record_slab_storage_cleanup_failure(p_paths text[], p_error text)
+returns integer
+language plpgsql
+security definer
+set search_path = public, private, auth
+as $$
+declare
+  v_count integer;
+begin
+  if not public.is_admin((select auth.uid())) then
+    raise exception 'NOT_AUTHORIZED' using errcode = '42501';
+  end if;
+  if p_paths is null or cardinality(p_paths) = 0 then
+    return 0;
+  end if;
+  update private.slab_storage_cleanup_queue
+     set attempts = attempts + 1,
+         last_error = left(coalesce(p_error, 'Unknown Storage API failure'), 2000),
+         updated_at = now()
+   where storage_path = any(p_paths);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+revoke all on function public.list_pending_slab_storage_cleanup() from public, anon;
+revoke all on function public.acknowledge_slab_storage_cleanup(text[]) from public, anon;
+revoke all on function public.record_slab_storage_cleanup_failure(text[], text) from public, anon;
+grant execute on function public.list_pending_slab_storage_cleanup() to authenticated;
+grant execute on function public.acknowledge_slab_storage_cleanup(text[]) to authenticated;
+grant execute on function public.record_slab_storage_cleanup_failure(text[], text) to authenticated;
+
 comment on function public.reassign_slab_inventory_id(uuid, integer) is
   'Admin-only correction of the visible S-number. Internal inventory_number is unchanged.';
 comment on function public.compact_slab_inventory_ids() is
-  'Admin-only renumbering of all remaining visible slab IDs to S0001..S00NN.';
+  'Admin-only serialized renumbering of all remaining visible slab IDs to S0001..S00NN.';
 comment on function public.purge_slabs(uuid[]) is
-  'Admin-only permanent database purge. Returns storage paths for post-commit object deletion.';
+  'Admin-only transactional database purge. Storage paths are queued durably for Storage API deletion and retry.';
