@@ -66,12 +66,34 @@ export interface BenchmarkSample {
   glare?: string;
   blur?: string;
   crop_quality?: string;
+  /**
+   * Expected PriceCharting product id, WHEN KNOWN. Absent/blank → the product
+   * match is "unjudgeable" for this sample (excluded from match accuracy, never
+   * scored as wrong). This is truth for the product-match dimension, which is
+   * separate from the analyze-slab OCR fields above.
+   */
+  pricecharting_product_id?: string;
 }
 
 export interface PredictedField {
   value: string | null;
   confidence: number;
   readable: boolean;
+}
+
+/** Whether the matcher auto-confirmed a product, punted to review, or gave up. */
+export type MatchStatus = "confirmed" | "manual_review" | "unresolved";
+
+/**
+ * The PriceCharting product the pipeline selected for a sample. `null` id means
+ * the matcher abstained (nothing confident enough). Produced by the LIVE runner
+ * from the production matcher; supplied directly by dry-run fixtures.
+ */
+export interface MatchPrediction {
+  pricecharting_id: string | null;
+  /** Matcher confidence (0–100), or null when it abstained. */
+  confidence: number | null;
+  status: MatchStatus;
 }
 
 /** The model's reading of one sample, decoupled from the AnalyzeResult shape. */
@@ -87,7 +109,22 @@ export interface SamplePrediction {
   };
   /** The untouched provider response, preserved verbatim for audit. */
   raw: unknown;
+  /**
+   * The product match, when the run scored the PriceCharting dimension. Absent
+   * when only OCR accuracy was measured — the sample is then match-unjudgeable.
+   */
+  match?: MatchPrediction | null;
 }
+
+/**
+ * How the product match came out for one sample:
+ *   match_correct    — truth id known, pred id equals it
+ *   false_confident  — truth id known, matcher CONFIRMED a DIFFERENT id (dangerous)
+ *   match_wrong      — truth id known, pred produced a wrong id without confirming
+ *   match_abstained  — truth id known, matcher abstained (null id → review/unresolved)
+ *   unjudgeable      — truth id unknown, correctness cannot be judged
+ */
+export type MatchClass = "match_correct" | "false_confident" | "match_wrong" | "match_abstained" | "unjudgeable";
 
 export type CertClass = "correct" | "blank_unreadable" | "incorrect" | "confidently_incorrect";
 
@@ -116,6 +153,8 @@ export interface SampleResult {
   grade_correct: boolean;
   needs_manual_review: boolean;
   unreadable_count: number;
+  /** PriceCharting product-match outcome ("unjudgeable" when no truth id). */
+  match_outcome: MatchClass;
   latency_ms: number | null;
   status: number;
   model: string | null;
@@ -130,6 +169,10 @@ export interface BenchmarkThresholds {
   certification_accuracy: number;
   max_confident_wrong_certs: number;
   manual_review_rate: number;
+  /** Min product-match accuracy over JUDGEABLE samples (truth id known). */
+  product_match_accuracy: number;
+  /** Max samples where the matcher CONFIRMED a wrong product. 0 = any is a fail. */
+  max_confident_wrong_matches: number;
 }
 
 export const DEFAULT_THRESHOLDS: BenchmarkThresholds = {
@@ -138,6 +181,8 @@ export const DEFAULT_THRESHOLDS: BenchmarkThresholds = {
   certification_accuracy: 0.999,
   max_confident_wrong_certs: 0,
   manual_review_rate: 0.05,
+  product_match_accuracy: 0.95,
+  max_confident_wrong_matches: 0,
 };
 
 export interface BenchmarkConfig {

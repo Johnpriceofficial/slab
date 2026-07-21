@@ -56,7 +56,24 @@ export function buildSummaryMarkdown(report: BenchmarkReport): string {
   lines.push(`| Grade accuracy | ${pct(m.grade_accuracy)} | ≥ ${pct(t.grade_accuracy)} | ${mark(tr.grade_accuracy)} |`);
   lines.push(`| Certification accuracy | ${pct(m.certification_accuracy)} | ≥ ${pct(t.certification_accuracy)} | ${mark(tr.certification_accuracy)} |`);
   lines.push(`| Confidently wrong certs | ${m.certification.confidently_incorrect} | ≤ ${t.max_confident_wrong_certs} | ${mark(tr.confident_wrong_certs)} |`);
-  lines.push(`| Manual review rate | ${pct(m.manual_review_rate)} | ≤ ${pct(t.manual_review_rate)} | ${mark(tr.manual_review_rate)} |`, "");
+  lines.push(`| Manual review rate | ${pct(m.manual_review_rate)} | ≤ ${pct(t.manual_review_rate)} | ${mark(tr.manual_review_rate)} |`);
+  if (m.product_match) {
+    lines.push(`| PriceCharting match accuracy | ${pct(m.product_match.accuracy)} | ≥ ${pct(t.product_match_accuracy)} | ${mark(tr.product_match_accuracy)} |`);
+    lines.push(`| Confidently wrong matches | ${m.product_match.false_confident} | ≤ ${t.max_confident_wrong_matches} | ${mark(tr.confident_wrong_matches)} |`);
+  }
+  lines.push("");
+
+  if (m.product_match) {
+    const pm = m.product_match;
+    lines.push("## PriceCharting product match", "");
+    lines.push(`- Judgeable samples (truth id known): ${pm.judgeable}`);
+    lines.push(`- Correct: ${pm.correct}  (${pct(pm.accuracy)})`);
+    lines.push(`- Confirmed matches: ${pm.confirmed}`);
+    lines.push(`- **Confidently wrong (confirmed a wrong product): ${pm.false_confident}  (${pct(pm.false_confident_rate)} of confirmed)**`);
+    lines.push(`- Abstained to manual review: ${pm.abstained}  (${pct(pm.abstention_rate)})`, "");
+  } else {
+    lines.push("## PriceCharting product match", "", "- Not measured (no sample carried a truth `pricecharting_product_id`).", "");
+  }
 
   lines.push("## Certification safety", "");
   lines.push(`- Correct: ${m.certification.correct}`);

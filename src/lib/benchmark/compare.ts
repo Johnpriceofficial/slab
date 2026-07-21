@@ -12,6 +12,8 @@ import {
   type CertClass,
   type ComparedField,
   type FieldOutcome,
+  type MatchClass,
+  type MatchPrediction,
   type PredictedField,
   type SamplePrediction,
 } from "./types";
@@ -149,6 +151,26 @@ export function classifyCertification(
   if (normalizeCertification(predValue) === normalizeCertification(truth)) return "correct";
   const confidence = predicted?.readable ? predicted.confidence : 0;
   return confidence >= acceptanceThreshold ? "confidently_incorrect" : "incorrect";
+}
+
+/**
+ * Classify the PriceCharting product match for one sample. Correctness is only
+ * judgeable when the TRUTH product id is known; otherwise `unjudgeable` (never
+ * silently "wrong"). A CONFIRMED wrong id is `false_confident` — the dangerous
+ * case, kept distinct from an honest abstention. `truthId`/predicted ids are
+ * compared verbatim (PriceCharting ids are opaque, canonical tokens).
+ */
+export function classifyProductMatch(
+  truthId: string | null | undefined,
+  match: MatchPrediction | null | undefined,
+): MatchClass {
+  const truth = (truthId ?? "").trim();
+  if (truth === "") return "unjudgeable";
+  const predId = match?.pricecharting_id ?? null;
+  if (predId !== null && predId === truth) return "match_correct";
+  if (match?.status === "confirmed" && predId !== null) return "false_confident";
+  if (predId !== null) return "match_wrong";
+  return "match_abstained";
 }
 
 /**
