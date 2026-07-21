@@ -15,4 +15,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
+      - name: Capture diagnostics
+        id: typecheck
+        continue-on-error: true
+        run: bun run typecheck > typecheck.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typecheck-diagnostics
+          path: typecheck.log
+      - name: Fail if typecheck failed
+        if: steps.typecheck.outcome == 'failure'
+        run: |
+          cat typecheck.log
+          exit 1
