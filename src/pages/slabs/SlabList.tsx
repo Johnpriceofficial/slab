@@ -13,7 +13,13 @@ import { useAuth } from "@/auth/AuthProvider";
 import { Plus, Download, ArrowDown, ArrowUp, ArrowUpDown, Loader2, Pencil, Trash2, Rows3 } from "lucide-react";
 import { INVENTORY_TABLE_COLUMNS, GRADERS, LANGUAGES, VERIFICATION_STATUSES, DUPLICATE_STATUSES } from "@/lib/slabs/constants";
 import { fetchSlabs, fetchAllSlabs, fetchAllComps, type SlabQuery } from "@/lib/slabs/data";
-import { compactSlabInventoryIds, purgeSlabs, reassignSlabInventoryId } from "@/lib/slabs/inventory-maintenance";
+import {
+  compactSlabInventoryIds,
+  fetchPermanentDeleteEnabled,
+  purgeSlabs,
+  reassignSlabInventoryId,
+  setPermanentDeleteEnabled,
+} from "@/lib/slabs/inventory-maintenance";
 import { formatCents, dollarsToCents } from "@/lib/slabs/format";
 import { guideValueSourceMarker } from "@/lib/slabs/valuation-provenance";
 import type { Slab } from "@/lib/slabs/types";
@@ -73,6 +79,11 @@ export default function SlabList() {
   }), [search, grader, grade, language, verification, duplicate, minVal, maxVal, includeArchived, sortKey, sortDir, page]);
 
   const { data, isLoading } = useQuery({ queryKey: ["slabs", query], queryFn: () => fetchSlabs(query) });
+  const { data: permanentDeleteEnabled = false } = useQuery({
+    queryKey: ["slab-settings", "allow-hard-delete"],
+    queryFn: fetchPermanentDeleteEnabled,
+    enabled: isAdmin,
+  });
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -110,6 +121,18 @@ export default function SlabList() {
     else rows.forEach((row) => next.add(row.id));
     return next;
   });
+
+  const togglePermanentDelete = async (enabled: boolean) => {
+    if (enabled && !window.confirm("Enable permanent deletion? This unlocks irreversible database purges for selected slabs.")) return;
+    setMaintenanceBusy(true);
+    try {
+      await setPermanentDeleteEnabled(enabled);
+      await queryClient.invalidateQueries({ queryKey: ["slab-settings", "allow-hard-delete"] });
+      toast.success(enabled ? "Permanent deletion enabled." : "Permanent deletion disabled.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Delete setting could not be changed.");
+    } finally { setMaintenanceBusy(false); }
+  };
 
   const editInventoryId = async (slab: Slab) => {
     const current = slab.inventory_sequence ?? Number(String(slab.inventory_code ?? "").replace(/\D/g, ""));
@@ -149,11 +172,8 @@ export default function SlabList() {
     setMaintenanceBusy(true);
     try {
       const result = await purgeSlabs(selectedRows.map((row) => row.id));
-      if (result.storageErrors.length) {
-        toast.warning(`${result.purged} record(s) purged, but image cleanup reported: ${result.storageErrors.join("; ")}`);
-      } else {
-        toast.success(`${result.purged} slab(s) permanently purged.`);
-      }
+      if (result.storageErrors.length) toast.warning(`${result.purged} record(s) purged, but image cleanup reported: ${result.storageErrors.join("; ")}`);
+      else toast.success(`${result.purged} slab(s) permanently purged.`);
       await refreshInventory();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Selected slabs could not be purged.");
@@ -193,9 +213,7 @@ export default function SlabList() {
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div><h1 className="text-2xl font-bold">{isAdmin ? "Slab Inventory" : "My Slabs"}</h1><p className="text-sm text-muted-foreground">{total} slabs</p></div>
         <div className="flex flex-wrap gap-2">
-          <Button variant={includeArchived ? "secondary" : "outline"} onClick={() => { setIncludeArchived((value) => !value); setPage(0); setSelected(new Set()); }}>
-            {includeArchived ? "Hide archived" : "Show archived"}
-          </Button>
+          <Button variant={includeArchived ? "secondary" : "outline"} onClick={() => { setIncludeArchived((value) => !value); setPage(0); setSelected(new Set()); }}>{includeArchived ? "Hide archived" : "Show archived"}</Button>
           {isAdmin && <Button variant="outline" onClick={handleExport} disabled={exporting}>{exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}Export Inventory</Button>}
           <Button asChild><Link to="/slabs/new"><Plus className="mr-1 h-4 w-4" /> Add Slab</Link></Button>
         </div>
@@ -213,10 +231,15 @@ export default function SlabList() {
       </div>
 
       {isAdmin && (
-        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
-          <span className="mr-auto text-sm"><strong>{selected.size}</strong> selected</span>
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border bg-muted/30 p-3">
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input type="checkbox" checked={permanentDeleteEnabled} disabled={maintenanceBusy} onChange={(event) => void togglePermanentDelete(event.target.checked)} />
+            Enable permanent deletion
+          </label>
+          <span className="mr-auto text-xs text-muted-foreground">Database safety switch. Turn it off after cleanup.</span>
+          <span className="text-sm"><strong>{selected.size}</strong> selected</span>
           <Button variant="outline" size="sm" onClick={() => void compactIds()} disabled={maintenanceBusy}><Rows3 /> Compact visible IDs</Button>
-          <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || selectedRows.length === 0}><Trash2 /> Permanently delete selected</Button>
+          <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || !permanentDeleteEnabled || selectedRows.length === 0}><Trash2 /> Permanently delete selected</Button>
         </div>
       )}
 
@@ -225,24 +248,14 @@ export default function SlabList() {
           <Table>
             <TableHeader><TableRow>
               {isAdmin && <TableHead className="w-10"><input type="checkbox" aria-label="Select all slabs on this page" checked={allPageSelected} onChange={togglePage} /></TableHead>}
-              {INVENTORY_TABLE_COLUMNS.map((column) => (
-                <TableHead key={String(column.key)} className="whitespace-nowrap">
-                  <button type="button" className="flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort(column.key)} aria-label={`Sort by ${column.label}`}>
-                    {column.label}{sortIcon(column.key)}
-                  </button>
-                </TableHead>
-              ))}
+              {INVENTORY_TABLE_COLUMNS.map((column) => <TableHead key={String(column.key)} className="whitespace-nowrap"><button type="button" className="flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort(column.key)} aria-label={`Sort by ${column.label}`}>{column.label}{sortIcon(column.key)}</button></TableHead>)}
               {isAdmin && <TableHead className="whitespace-nowrap">Admin</TableHead>}
             </TableRow></TableHeader>
             <TableBody>
               {rows.length === 0 ? <TableRow><TableCell colSpan={INVENTORY_TABLE_COLUMNS.length + (isAdmin ? 2 : 0)} className="py-10 text-center text-muted-foreground">No slabs yet. <Link to="/slabs/new" className="underline">Add your first slab.</Link></TableCell></TableRow> : rows.map((slab) => (
                 <TableRow key={slab.id} data-state={selected.has(slab.id) ? "selected" : undefined}>
                   {isAdmin && <TableCell><input type="checkbox" aria-label={`Select ${slab.inventory_code}`} checked={selected.has(slab.id)} onChange={() => toggleRow(slab.id)} /></TableCell>}
-                  {INVENTORY_TABLE_COLUMNS.map((column, index) => (
-                    <TableCell key={String(column.key)} className="whitespace-nowrap">
-                      {index === 0 ? <Link to={`/slabs/${slab.id}`} className="font-medium text-primary hover:underline">{renderCell(slab, column)}</Link> : column.key === "pricecharting_match_status" && slab.pricecharting_match_status ? <Badge variant="outline">{slab.pricecharting_match_status}</Badge> : renderCell(slab, column)}
-                    </TableCell>
-                  ))}
+                  {INVENTORY_TABLE_COLUMNS.map((column, index) => <TableCell key={String(column.key)} className="whitespace-nowrap">{index === 0 ? <Link to={`/slabs/${slab.id}`} className="font-medium text-primary hover:underline">{renderCell(slab, column)}</Link> : column.key === "pricecharting_match_status" && slab.pricecharting_match_status ? <Badge variant="outline">{slab.pricecharting_match_status}</Badge> : renderCell(slab, column)}</TableCell>)}
                   {isAdmin && <TableCell><Button variant="ghost" size="sm" onClick={() => void editInventoryId(slab)} disabled={maintenanceBusy}><Pencil className="h-4 w-4" /> Edit ID</Button></TableCell>}
                 </TableRow>
               ))}
@@ -251,10 +264,7 @@ export default function SlabList() {
         </div>
       )}
 
-      <div className="mt-4 flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">Page {page + 1} of {pageCount}</span>
-        <div className="flex gap-2"><Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button variant="outline" size="sm" disabled={page + 1 >= pageCount} onClick={() => setPage((value) => value + 1)}>Next</Button></div>
-      </div>
+      <div className="mt-4 flex items-center justify-between"><span className="text-sm text-muted-foreground">Page {page + 1} of {pageCount}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button variant="outline" size="sm" disabled={page + 1 >= pageCount} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>
     </div>
   );
 }
