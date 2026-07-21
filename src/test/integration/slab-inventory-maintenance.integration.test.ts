@@ -60,6 +60,12 @@ suite("slab inventory maintenance", () => {
     return row;
   }
 
+  async function acknowledge(paths: string[]) {
+    if (paths.length === 0) return;
+    const result = await adminClient.rpc("acknowledge_slab_storage_cleanup", { p_paths: paths });
+    expect(result.error).toBeNull();
+  }
+
   beforeAll(async () => {
     service = createClient(URL!, SERVICE!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `maint-service-${stamp}` } });
     adminClient = await makeUser("maint-admin", true);
@@ -127,9 +133,28 @@ suite("slab inventory maintenance", () => {
     const pending = await adminClient.rpc("list_pending_slab_storage_cleanup");
     expect(pending.error).toBeNull();
     expect((pending.data as Array<{ storage_path: string }>).map((row) => row.storage_path)).toEqual(expect.arrayContaining(paths));
-    const acknowledged = await adminClient.rpc("acknowledge_slab_storage_cleanup", { p_paths: paths });
-    expect(acknowledged.error).toBeNull();
+    await acknowledge(paths);
 
+    const index = slabIds.indexOf(slab.id);
+    if (index >= 0) slabIds.splice(index, 1);
+  });
+
+  it("routes the legacy hard-delete RPC through the same durable cleanup queue", async () => {
+    const slab = await createSlab(`MAINT-LEGACY-${stamp}`);
+    await adminClient.from("slab_settings").update({ allow_hard_delete: true }).eq("id", true);
+    const deleted = await adminClient.rpc("hard_delete_slab", { p_id: slab.id });
+    expect(deleted.error).toBeNull();
+    const rows = (deleted.data ?? []) as Array<{ front_image_path: string | null }>;
+    const paths = rows.map((row) => row.front_image_path).filter(Boolean) as string[];
+    expect(paths).toContain(slab.front_image_path);
+
+    const pending = await adminClient.rpc("list_pending_slab_storage_cleanup");
+    expect(pending.error).toBeNull();
+    expect((pending.data as Array<{ storage_path: string }>).map((row) => row.storage_path)).toEqual(expect.arrayContaining(paths));
+    await acknowledge(paths);
+
+    const { data } = await service.from("slabs").select("id").eq("id", slab.id).maybeSingle();
+    expect(data).toBeNull();
     const index = slabIds.indexOf(slab.id);
     if (index >= 0) slabIds.splice(index, 1);
   });
