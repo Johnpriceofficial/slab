@@ -12,9 +12,9 @@ import { formatCents } from "@/lib/slabs/format";
 import { GRADE_TIER_LABELS } from "@/lib/market/grade-tier";
 import type { MarketIntelligence } from "@/lib/market/client";
 
-const pct = (n: number) => `${Math.round(n * 100)}%`;
-const money = (c: number | null) => (c === null ? "—" : formatCents(c));
-const date = (iso: string | null) => (iso ? iso.slice(0, 10) : "—");
+const pct = (n: number | null | undefined) => (n == null || Number.isNaN(n) ? "—" : `${Math.round(n * 100)}%`);
+const money = (c: number | null | undefined) => (c == null ? "—" : formatCents(c));
+const date = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "—");
 
 const SOURCE_LABEL: Record<string, string> = {
   pricecharting: "PriceCharting",
@@ -46,6 +46,19 @@ export function MarketIntelligencePanel({
   isLoading: boolean;
   error: string | null;
 }) {
+  // Defensive normalization. The panel renders whatever the edge function
+  // returns, INCLUDING a partial or older payload shape (e.g. a deployed function
+  // predating a field). A missing array would otherwise throw on `.map()` and
+  // crash the entire page through the top-level error boundary. Every array/
+  // nested object the render reads is defaulted here so the worst case is an
+  // empty section, never a crash.
+  const verifiedSales = data?.verified_sales ?? [];
+  const activeListings = data?.active_listings ?? [];
+  const gradeTiers = data?.grade_tiers ?? [];
+  const sources = data?.sources ?? [];
+  const provenance = data?.provenance ?? [];
+  const summaryCount = data?.summary?.count ?? 0;
+  const completeness = data?.identity_completeness ?? { status: "complete" as const, missing: [] as string[], notes: [] as string[] };
   return (
     <Card className="mt-6">
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -72,7 +85,7 @@ export function MarketIntelligencePanel({
                 <Stat label="High sold" value={money(data.high_sold_cents)} />
               </div>
               <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Stat label="Verified sales" value={String(data.summary.count)} />
+                <Stat label="Verified sales" value={String(summaryCount)} />
                 <Stat label="Lowest active" value={money(data.lowest_active_cents)} hint="asking, not sold" />
                 <Stat label="Liquidity" value={pct(data.liquidity)} icon={<Gauge className="h-3 w-3" />} />
                 <Stat label="Confidence" value={pct(data.confidence)} />
@@ -80,22 +93,22 @@ export function MarketIntelligencePanel({
             </section>
 
             {/* Verified Sales */}
-            <Section title="Verified Sales" count={data.verified_sales.length} empty="No verified completed sales yet.">
-              {data.verified_sales.map((s, i) => (
+            <Section title="Verified Sales" count={verifiedSales.length} empty="No verified completed sales yet.">
+              {verifiedSales.map((s, i) => (
                 <Row key={i} title={s.title ?? "Sale"} sub={`${s.source} · sold ${date(s.sold_at)}`} value={money(s.price_cents)} url={s.url} />
               ))}
             </Section>
 
             {/* Current Listings — asking prices, clearly not sold */}
-            <Section title="Current Listings" count={data.active_listings.length} empty="No active listings found." note="Asking prices — supply context, not sold evidence.">
-              {data.active_listings.map((l, i) => (
+            <Section title="Current Listings" count={activeListings.length} empty="No active listings found." note="Asking prices — supply context, not sold evidence.">
+              {activeListings.map((l, i) => (
                 <Row key={i} title={l.title ?? "Listing"} sub={`${l.source} · asking`} value={money(l.price_cents)} url={l.url} />
               ))}
             </Section>
 
             {/* PriceCharting Grade Tiers — generic reference */}
-            <Section title="PriceCharting Grade Tiers" count={data.grade_tiers.length} empty="No PriceCharting product matched.">
-              {data.grade_tiers.map((t, i) => (
+            <Section title="PriceCharting Grade Tiers" count={gradeTiers.length} empty="No PriceCharting product matched.">
+              {gradeTiers.map((t, i) => (
                 <Row key={i} title={t.label ?? GRADE_TIER_LABELS[t.tier]} sub="pricecharting" value={money(t.value_cents)} />
               ))}
             </Section>
@@ -105,7 +118,7 @@ export function MarketIntelligencePanel({
             <section>
               <h3 className="mb-2 text-sm font-semibold">Provider Status</h3>
               <div className="divide-y rounded-md border">
-                {data.sources.map((s, i) => {
+                {sources.map((s, i) => {
                   const meta = STATUS_META[s.status] ?? { label: s.status, cls: "border-muted bg-muted text-muted-foreground" };
                   return (
                     <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
@@ -118,10 +131,10 @@ export function MarketIntelligencePanel({
                   );
                 })}
               </div>
-              {data.identity_completeness.status !== "complete" && (
+              {completeness.status !== "complete" && (
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Identity {data.identity_completeness.status}
-                  {data.identity_completeness.missing.length > 0 && <> · missing: {data.identity_completeness.missing.join(", ")}</>}
+                  Identity {completeness.status}
+                  {completeness.missing.length > 0 && <> · missing: {completeness.missing.join(", ")}</>}
                   {" "}— match quality may be reduced, but market data is still shown.
                 </p>
               )}
@@ -130,10 +143,10 @@ export function MarketIntelligencePanel({
             {/* Source and Last Updated */}
             <section className="border-t pt-3 text-xs text-muted-foreground">
               <p className="font-semibold">Sources</p>
-              {data.provenance.length === 0 ? (
+              {provenance.length === 0 ? (
                 <p>No sources responded.</p>
               ) : (
-                data.provenance.map((p, i) => (
+                provenance.map((p, i) => (
                   <p key={i}>{p.source}: {p.exact_count}/{p.candidate_count} exact · {date(p.retrieved_at)}</p>
                 ))
               )}
