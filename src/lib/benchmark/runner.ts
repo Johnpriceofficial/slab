@@ -10,6 +10,7 @@ import {
   PRODUCTION_PROJECT_REF,
   type BenchmarkConfig,
   type BenchmarkSample,
+  type MatchPrediction,
   type SamplePrediction,
   type SampleResult,
 } from "./types";
@@ -38,6 +39,13 @@ export class MemoryResumeStore implements ResumeStore {
 export interface RunnerDeps {
   /** Calls the deployed analyze-slab Edge Function for one sample. */
   analyze: (sample: BenchmarkSample) => Promise<SamplePrediction>;
+  /**
+   * OPTIONAL: run the production PriceCharting matcher for one sample, given its
+   * OCR prediction, and return the selected product. Omit to score OCR only (the
+   * match dimension is then unjudgeable). A throw here degrades to an abstained
+   * match (null) rather than failing the whole sample.
+   */
+  matchOf?: (sample: BenchmarkSample, prediction: SamplePrediction) => Promise<MatchPrediction | null>;
   store: ResumeStore;
   sleep: (ms: number) => Promise<void>;
   onProgress?: (info: { sample_id: string; index: number; total: number; resumed: boolean; error?: string }) => void;
@@ -131,6 +139,15 @@ export async function runBenchmark(
 
       try {
         const prediction = await withRetry(() => deps.analyze(sample), { ...config.retry, sleep: deps.sleep });
+        // OPTIONAL product-match step. A matcher failure must not lose the whole
+        // sample — degrade to an abstained match so OCR is still scored.
+        if (deps.matchOf) {
+          try {
+            prediction.match = await deps.matchOf(sample, prediction);
+          } catch {
+            prediction.match = { pricecharting_id: null, confidence: null, status: "unresolved" };
+          }
+        }
         const result = evaluateSample(sample, prediction, config);
         deps.store.put(result, prediction);
         results[index] = result;

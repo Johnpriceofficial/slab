@@ -10,13 +10,31 @@ directory holds only the Node/Bun CLI that wires it to real I/O.
 ## Dataset manifest
 
 CSV or JSON. Required columns (must be non-empty): `sample_id`,
-`front_image_path`, `grader`, `grade`, `card_name`, `set_name`, `card_number`,
-`language`. Also read when present: `back_image_path` (may be blank),
-`grade_label`, `certification_number`, `rarity`, `finish`, `variation`,
-`label_color`, `lighting_condition`, `orientation`, `notes`, and the optional
-capture-quality columns `glare`, `blur`, `crop_quality`.
+`front_image_path`, `card_name`, `set_name`, `card_number`, `language`. Also read
+when present: `back_image_path` (may be blank), `grader`, `grade`, `grade_label`,
+`certification_number`, `rarity`, `finish`, `variation`, `year`,
+`pricecharting_product_id`, `label_color`, `lighting_condition`, `orientation`,
+`notes`, and the capture-quality columns `glare`, `blur`, `crop_quality`.
+
+`grader`/`grade` are optional so **raw (ungraded) cards** can be included with
+them left blank (a blank truth scores as not-evaluable, never wrong). Slab rows
+should still fill them — see `dataset-template/LABELING-GUIDE.md`.
 
 Image paths are resolved relative to the manifest file.
+
+**Building the dataset:** copy `dataset-template/manifest.template.csv`, follow
+`dataset-template/LABELING-GUIDE.md`. **Standing up a test project to run
+against:** `TEST-PROJECT-SETUP.md`.
+
+## PriceCharting product-match scoring (`--match`)
+
+By default the harness scores the analyze-slab OCR fields only. Add `--match`
+(with `PRICECHARTING_API_TOKEN` in the shell) to ALSO score the product match:
+the model's predicted identity is fed to the production matcher, and the selected
+product is compared to the manifest's `pricecharting_product_id` (rows without one
+are unjudgeable). Adds a **PriceCharting product match** section to the report and
+two gates: match accuracy (`--min-match`, default 0.95) and confidently-wrong
+matches (`--max-confident-match-errors`, default 0 — any is a hard fail).
 
 ## Running against a TEST project
 

@@ -1,0 +1,3 @@
+sample_id,front_image_path,back_image_path,card_name,set_name,card_number,language,year,variation,finish,rarity,grader,grade,grade_label,certification_number,pricecharting_product_id,label_color,lighting_condition,orientation,glare,blur,crop_quality,notes
+EXAMPLE-slab-001,images/EXAMPLE-slab-001-front.jpg,images/EXAMPLE-slab-001-back.jpg,Charizard,Base Set,4/102,English,1999,,Holo,Holo Rare,PSA,10,GEM MINT,12345678,,red,studio,vertical,none,none,tight,"Clean slab, unambiguous — delete this example row before running."
+EXAMPLE-raw-001,images/EXAMPLE-raw-001-front.jpg,images/EXAMPLE-raw-001-back.jpg,Eevee,Fossil,16/64,English,1999,,Reverse Holo,Common,,,,,,,ambient,vertical,slight,none,tight,"Raw card: grader/grade/cert left BLANK on purpose. Delete before running."

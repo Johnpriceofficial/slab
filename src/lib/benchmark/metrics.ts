@@ -3,7 +3,7 @@
  * and threshold gating. All pure.
  */
 
-import { classifyCertification, compareField } from "./compare";
+import { classifyCertification, classifyProductMatch, compareField } from "./compare";
 import {
   BREAKDOWN_KEYS,
   COMPARED_FIELDS,
@@ -42,6 +42,7 @@ export function evaluateSample(
     grade_correct,
     needs_manual_review,
     unreadable_count,
+    match_outcome: classifyProductMatch(sample.pricecharting_product_id, prediction.match),
     latency_ms: prediction.meta.latency_ms,
     status: prediction.meta.status,
     model: prediction.meta.model,
@@ -74,6 +75,44 @@ export interface CertificationReport {
   confidently_incorrect: number;
 }
 
+/**
+ * PriceCharting product-match report, over JUDGEABLE samples only (truth id
+ * known). `false_confident_rate` is the trust metric: of matches the pipeline
+ * CONFIRMED, the fraction that were wrong.
+ */
+export interface ProductMatchReport {
+  judgeable: number;
+  correct: number;
+  accuracy: number;
+  confirmed: number;
+  false_confident: number;
+  false_confident_rate: number;
+  abstained: number;
+  abstention_rate: number;
+}
+
+/** Null when NO sample carried a truth product id — match was not measured. */
+function productMatchReport(results: SampleResult[]): ProductMatchReport | null {
+  const judgeableResults = results.filter((r) => r.match_outcome !== "unjudgeable");
+  if (judgeableResults.length === 0) return null;
+  const correct = judgeableResults.filter((r) => r.match_outcome === "match_correct").length;
+  const falseConfident = judgeableResults.filter((r) => r.match_outcome === "false_confident").length;
+  const abstained = judgeableResults.filter((r) => r.match_outcome === "match_abstained").length;
+  // "Confirmed" = correct-and-confirmed plus every false-confident. A correct id
+  // that was only routed to review is not a confirmation.
+  const confirmed = correct + falseConfident;
+  return {
+    judgeable: judgeableResults.length,
+    correct,
+    accuracy: ratio(correct, judgeableResults.length),
+    confirmed,
+    false_confident: falseConfident,
+    false_confident_rate: ratio(falseConfident, confirmed),
+    abstained,
+    abstention_rate: ratio(abstained, judgeableResults.length),
+  };
+}
+
 export interface BenchmarkMetrics {
   total_samples: number;
   field_accuracy: Record<ComparedField, { accuracy: number; evaluable: number; correct: number }>;
@@ -81,6 +120,8 @@ export interface BenchmarkMetrics {
   grade_accuracy: number;
   certification_accuracy: number;
   certification: CertificationReport;
+  /** Null when no sample carried a truth product id (match not measured). */
+  product_match: ProductMatchReport | null;
   average_field_confidence: number;
   latency_ms: { median: number | null; p95: number | null };
   manual_review_rate: number;
@@ -93,6 +134,9 @@ export interface BenchmarkMetrics {
     certification_accuracy: boolean;
     confident_wrong_certs: boolean;
     manual_review_rate: boolean;
+    /** Gates over the product match — vacuously true when match was not measured. */
+    product_match_accuracy: boolean;
+    confident_wrong_matches: boolean;
   };
   passed: boolean;
 }
@@ -136,6 +180,8 @@ export function aggregate(results: SampleResult[], config: BenchmarkConfig): Ben
 
   const latencies = results.map((r) => r.latency_ms).filter((v): v is number => typeof v === "number");
 
+  const product_match = productMatchReport(results);
+
   const metrics: Omit<BenchmarkMetrics, "threshold_results" | "passed"> = {
     total_samples: results.length,
     field_accuracy,
@@ -143,6 +189,7 @@ export function aggregate(results: SampleResult[], config: BenchmarkConfig): Ben
     grade_accuracy: grade.accuracy,
     certification_accuracy: cert.accuracy,
     certification,
+    product_match,
     average_field_confidence: ratio(confidences.reduce((a, b) => a + b, 0), confidences.length),
     latency_ms: { median: percentile(latencies, 50), p95: percentile(latencies, 95) },
     manual_review_rate: ratio(results.filter((r) => r.needs_manual_review).length, results.length),
@@ -159,6 +206,10 @@ export function aggregate(results: SampleResult[], config: BenchmarkConfig): Ben
     // A single confidently-incorrect certification fails, regardless of the max.
     confident_wrong_certs: certification.confidently_incorrect <= t.max_confident_wrong_certs,
     manual_review_rate: metrics.manual_review_rate <= t.manual_review_rate,
+    // Match gates are VACUOUSLY TRUE when match was not measured (no truth ids),
+    // so a benchmark that only scores OCR is never failed by an unmeasured match.
+    product_match_accuracy: product_match === null || product_match.accuracy >= t.product_match_accuracy,
+    confident_wrong_matches: product_match === null || product_match.false_confident <= t.max_confident_wrong_matches,
   };
   const passed = Object.values(threshold_results).every(Boolean);
 

@@ -15,11 +15,15 @@ export interface ManifestParseResult {
 // rarity, finish, and variation are intentionally NOT here: a real slab may
 // legitimately lack a designation, a cert, or a variation, and comparison treats
 // an absent ground truth as "not evaluable" rather than a failure.
+//
+// grader/grade are NOT required either: a RAW (ungraded) card genuinely has
+// neither, and the dataset intentionally mixes raw and slabbed items. A blank
+// grader/grade scores as not-evaluable (never wrong). The labeling guide instructs
+// that SLAB rows must still fill them — that is a labeling convention, not a
+// parser rule, because the manifest has no per-row raw/slab discriminator.
 const REQUIRED_COLUMNS = [
   "sample_id",
   "front_image_path",
-  "grader",
-  "grade",
   "card_name",
   "set_name",
   "card_number",
@@ -28,6 +32,8 @@ const REQUIRED_COLUMNS = [
 
 const OPTIONAL_STRING_COLUMNS = [
   "back_image_path",
+  "grader",
+  "grade",
   "label_color",
   "lighting_condition",
   "orientation",
@@ -35,6 +41,7 @@ const OPTIONAL_STRING_COLUMNS = [
   "glare",
   "blur",
   "crop_quality",
+  "pricecharting_product_id",
 ] as const;
 
 /** Minimal RFC-4180-ish CSV parser: quoted fields, escaped quotes, CRLF/LF. */
@@ -126,6 +133,7 @@ function toSample(record: Record<string, string>): BenchmarkSample {
     glare: optional("glare"),
     blur: optional("blur"),
     crop_quality: optional("crop_quality"),
+    pricecharting_product_id: optional("pricecharting_product_id"),
   };
 }
 

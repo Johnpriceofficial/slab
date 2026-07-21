@@ -43,10 +43,14 @@ import {
   validateImages,
   type BenchmarkConfig,
   type BenchmarkSample,
+  type MatchPrediction,
   type ResumeStore,
   type SamplePrediction,
   type SampleResult,
 } from "../../src/lib/benchmark/index.ts";
+import { PriceChartingClient } from "../../src/lib/pricecharting/client.ts";
+import { findBestProductMatch } from "../../src/lib/pricecharting/matching.ts";
+import type { CardItemInput, GradingCompany } from "../../src/lib/pricecharting/types.ts";
 
 function arg(name: string, fallback?: string): string | undefined {
   const idx = process.argv.indexOf(`--${name}`);
@@ -80,11 +84,14 @@ const config: BenchmarkConfig = {
   concurrency: Number(arg("concurrency", String(DEFAULT_CONFIG.concurrency))),
   request_delay_ms: Number(arg("delay", String(DEFAULT_CONFIG.request_delay_ms))),
   thresholds: {
+    ...DEFAULT_THRESHOLDS,
     card_identity_accuracy: Number(arg("min-identity", String(DEFAULT_THRESHOLDS.card_identity_accuracy))),
     grade_accuracy: Number(arg("min-grade", String(DEFAULT_THRESHOLDS.grade_accuracy))),
     certification_accuracy: Number(arg("min-cert", String(DEFAULT_THRESHOLDS.certification_accuracy))),
     max_confident_wrong_certs: Number(arg("max-confident-cert-errors", String(DEFAULT_THRESHOLDS.max_confident_wrong_certs))),
     manual_review_rate: Number(arg("max-manual-review", String(DEFAULT_THRESHOLDS.manual_review_rate))),
+    product_match_accuracy: Number(arg("min-match", String(DEFAULT_THRESHOLDS.product_match_accuracy))),
+    max_confident_wrong_matches: Number(arg("max-confident-match-errors", String(DEFAULT_THRESHOLDS.max_confident_wrong_matches))),
   },
   project_ref: dryRun ? projectRef || "dry-run" : projectRef,
   supabase_url: url,
@@ -177,10 +184,47 @@ if (dryRun) {
   };
 }
 
+// ── Optional PriceCharting product-match step ──────────────────────────────
+// Off by default. Enable with --match; requires a PriceCharting token. Measures
+// the END-TO-END match: it feeds the MODEL's predicted identity (not ground
+// truth) into the production matcher, so the number reflects what the deployed
+// pipeline would actually resolve. Samples whose manifest has no truth
+// `pricecharting_product_id` are still unjudgeable and excluded from accuracy.
+let matchOf: ((sample: BenchmarkSample, prediction: SamplePrediction) => Promise<MatchPrediction | null>) | undefined;
+if (flag("match")) {
+  const pcToken = process.env.PRICECHARTING_API_TOKEN ?? process.env.SLABVAULT_BENCH_PRICECHARTING_TOKEN ?? "";
+  if (!pcToken) die("--match requires PRICECHARTING_API_TOKEN (or SLABVAULT_BENCH_PRICECHARTING_TOKEN) in the environment.");
+  const pcClient = new PriceChartingClient({ tokenProvider: () => pcToken });
+  const read = (p: { value: string | null; readable: boolean } | undefined): string | undefined =>
+    p && p.readable && p.value ? p.value : undefined;
+  const graderOf = (raw: string | undefined): GradingCompany | undefined => {
+    const g = (raw ?? "").toUpperCase();
+    return g.includes("PSA") ? "PSA" : g.includes("BGS") || g.includes("BECKETT") ? "BGS" : g.includes("CGC") ? "CGC" : g.includes("SGC") ? "SGC" : g ? "OTHER" : undefined;
+  };
+  matchOf = async (_sample, prediction) => {
+    const f = prediction.fields;
+    const gradeNum = read(f.grade) ? Number((read(f.grade) as string).match(/\d{1,2}(?:\.\d)?/)?.[0]) : undefined;
+    const item: CardItemInput = {
+      category: "trading_card",
+      card_name: read(f.card_name),
+      card_number: read(f.card_number),
+      set: read(f.set_name),
+      language: read(f.language),
+      variant: read(f.variation) ?? read(f.finish),
+      grading_company: graderOf(read(f.grader)),
+      grade: Number.isFinite(gradeNum) ? gradeNum : undefined,
+    };
+    const { product, match } = await findBestProductMatch(pcClient, item);
+    const status: MatchPrediction["status"] = product ? "confirmed" : match.alternatives_considered.length > 0 || match.confidence_score > 0 ? "manual_review" : "unresolved";
+    return { pricecharting_id: product?.pricecharting_id ?? null, confidence: match.confidence_score, status };
+  };
+}
+
 // ── Run ────────────────────────────────────────────────────────────────────
-console.log(`Benchmarking ${samples.length} sample(s) against ${dryRun ? "DRY-RUN fixtures" : projectRef} (concurrency ${config.concurrency}, delay ${config.request_delay_ms}ms)…`);
+console.log(`Benchmarking ${samples.length} sample(s) against ${dryRun ? "DRY-RUN fixtures" : projectRef} (concurrency ${config.concurrency}, delay ${config.request_delay_ms}ms)${matchOf ? " + PriceCharting match" : ""}…`);
 const outcome = await runBenchmark(samples, config, {
   analyze,
+  matchOf,
   store,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   onProgress: ({ sample_id, index, total, resumed, error }) =>
