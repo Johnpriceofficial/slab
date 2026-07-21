@@ -427,9 +427,14 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       const t0 = Date.now();
       try {
         const idRes = await fetch(`${ebayApizBase(MODE)}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
-        identityOk = idRes.ok;
-        resources.identity = { status: idRes.ok ? "success" : "error", http: idRes.status || null, count: null, error_code: idRes.ok ? null : "identity_request_failed" };
-        if (idRes.ok) { const j = await idRes.json().catch(() => ({})) as Record<string, unknown>; opaqueUserId = typeof j.userId === "string" ? j.userId : null; }
+        if (idRes.ok) {
+          const j = await idRes.json().catch(() => ({})) as Record<string, unknown>;
+          opaqueUserId = typeof j.userId === "string" && j.userId ? j.userId : null;
+          identityOk = Boolean(opaqueUserId); // HTTP 200 without a usable opaque id is NOT success
+          resources.identity = { status: identityOk ? "success" : "unavailable", http: idRes.status || null, count: null, error_code: identityOk ? null : "identity_unavailable" };
+        } else {
+          resources.identity = { status: "error", http: idRes.status || null, count: null, error_code: "identity_request_failed" };
+        }
       } catch { resources.identity = { status: "error", http: null, count: null, error_code: "identity_request_failed" }; }
       await recordRun("account_identity", resources.identity.status, resources.identity.http, Date.now() - t0, resources.identity.error_code);
     }
@@ -456,23 +461,28 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
 
     let persistError: string | null = null;
 
-    // Locations: persist only if fetched; check + time the write.
+    // Locations: fetch and persistence are SEPARATE runs, each with real latency;
+    // the RPC returns the CONFIRMED post-write count (never the submitted rows).
+    await recordRun("inventory_locations_fetch", loc.ok ? "success" : "error", loc.status || null, loc.latency, loc.ok ? null : "locations_fetch_failed");
     if (loc.ok) {
       const rows = (Array.isArray(loc.data.locations) ? loc.data.locations as Record<string, unknown>[] : [])
         .map((l) => ({ merchant_location_key: String(l.merchantLocationKey ?? ""), status: typeof l.merchantLocationStatus === "string" ? l.merchantLocationStatus : null, raw_enum_value: l.locationTypes != null ? JSON.stringify(l.locationTypes) : null }))
         .filter((l) => l.merchant_location_key);
       const t0 = Date.now();
       const { data, error } = await admin.rpc("ebay_inventory_locations_replace", { p_account_id: accountId, p_locations: rows });
+      const lat = Date.now() - t0;
       if (error) { persistError = "locations_persist_failed"; resources.locations = { status: "error", http: loc.status || null, count: null, error_code: "locations_persist_failed" }; }
-      else resources.locations = { status: "success", http: loc.status || null, count: typeof data === "number" ? data : rows.length, error_code: null };
-      await recordRun("inventory_locations", resources.locations.status, resources.locations.http, loc.latency + (Date.now() - t0), resources.locations.error_code);
+      else resources.locations = { status: "success", http: loc.status || null, count: typeof data === "number" ? data : null, error_code: null };
+      await recordRun("inventory_locations_persistence", resources.locations.status, null, lat, resources.locations.error_code);
     } else {
       resources.locations = { status: "error", http: loc.status || null, count: null, error_code: "locations_fetch_failed" };
-      await recordRun("inventory_locations", "error", loc.status || null, loc.latency, "locations_fetch_failed");
     }
 
-    // Policies: replace-with-prune ONLY when all three fetched AND no earlier
-    // persistence failure. Report fetch vs persist honestly, with per-type counts.
+    // Policies: record each FETCH as its own run with its REAL latency.
+    await recordRun("fulfillment_policies_fetch", ful.ok ? "success" : "error", ful.status || null, ful.latency, ful.ok ? null : "fulfillment_policy_fetch_failed");
+    await recordRun("payment_policies_fetch", pay.ok ? "success" : "error", pay.status || null, pay.latency, pay.ok ? null : "payment_policy_fetch_failed");
+    await recordRun("return_policies_fetch", ret.ok ? "success" : "error", ret.status || null, ret.latency, ret.ok ? null : "return_policy_fetch_failed");
+
     const policyRows: Array<Record<string, unknown>> = [];
     const collect = (res: Res, key: string, idField: string, type: string): boolean => {
       if (!res.ok) return false;
@@ -485,28 +495,29 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const pOk = collect(pay, "paymentPolicies", "paymentPolicyId", "payment");
     const rOk = collect(ret, "returnPolicies", "returnPolicyId", "return");
     const groupFetched = fOk && pOk && rOk;
-    const typeCount = (t: string) => policyRows.filter((p) => p.policy_type === t).length;
-    let policyPersistError: string | null = null; let policyPersistLat = 0;
+    // Replace-with-prune only when all three fetched AND no earlier failure; the
+    // RPC returns CONFIRMED post-write per-type counts. Its own real latency.
+    let confirmed: { total: number; fulfillment: number; payment: number; return: number } | null = null;
+    let policyPersistError: string | null = null;
     if (groupFetched && !persistError) {
       const t0 = Date.now();
-      const { error } = await admin.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: policyRows.filter((p) => p.policy_id) });
-      policyPersistLat = Date.now() - t0;
+      const { data, error } = await admin.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: policyRows.filter((p) => p.policy_id) });
+      const lat = Date.now() - t0;
       if (error) { policyPersistError = "policies_persist_failed"; persistError = persistError ?? policyPersistError; }
+      else if (data && typeof data === "object") confirmed = data as { total: number; fulfillment: number; payment: number; return: number };
+      await recordRun("business_policies_persistence", error ? "error" : "success", null, lat, error ? "policies_persist_failed" : null);
     }
     // Fetched-but-not-persisted (incomplete group) → unavailable; earlier failure
-    // → dependency error; persisted → success with ITS OWN per-type count.
-    const policyView = (fetched: boolean, fetchCode: string, res: Res, type: string): ResView => {
+    // → dependency error; persisted → success with ITS OWN CONFIRMED count.
+    const policyView = (fetched: boolean, fetchCode: string, res: Res, type: "fulfillment" | "payment" | "return"): ResView => {
       if (!fetched) return { status: "error", http: res.status || null, count: null, error_code: fetchCode };
       if (!groupFetched) return { status: "unavailable", http: res.status || null, count: null, error_code: "policy_group_not_persisted_due_incomplete_fetch" };
       if (persistError) return { status: "error", http: res.status || null, count: null, error_code: policyPersistError ?? "policy_dependency_persist_failed" };
-      return { status: "success", http: res.status || null, count: typeCount(type), error_code: null };
+      return { status: "success", http: res.status || null, count: confirmed ? confirmed[type] : null, error_code: null };
     };
     resources.fulfillment_policies = policyView(fOk, "fulfillment_policy_fetch_failed", ful, "fulfillment");
     resources.payment_policies = policyView(pOk, "payment_policy_fetch_failed", pay, "payment");
     resources.return_policies = policyView(rOk, "return_policy_fetch_failed", ret, "return");
-    await recordRun("fulfillment_policies", resources.fulfillment_policies.status, resources.fulfillment_policies.http, ful.latency + (resources.fulfillment_policies.status === "success" ? policyPersistLat / 3 : 0), resources.fulfillment_policies.error_code);
-    await recordRun("payment_policies", resources.payment_policies.status, resources.payment_policies.http, pay.latency + (resources.payment_policies.status === "success" ? policyPersistLat / 3 : 0), resources.payment_policies.error_code);
-    await recordRun("return_policies", resources.return_policies.status, resources.return_policies.http, ret.latency + (resources.return_policies.status === "success" ? policyPersistLat / 3 : 0), resources.return_policies.error_code);
 
     const privilegeStatus = priv.ok ? "verified" : "unverified";
     const tAcct = Date.now();
@@ -518,22 +529,24 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       const tCur = Date.now();
       const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery", p_count: (resources.locations.count ?? 0) + (resources.fulfillment_policies.count ?? 0) + (resources.payment_policies.count ?? 0) + (resources.return_policies.count ?? 0) });
       if (curErr) persistError = "cursor_persist_failed";
-      await recordRun("account_discovery_persistence", curErr ? "error" : "success", null, Date.now() - tCur, curErr ? "cursor_persist_failed" : null);
+      await recordRun("account_discovery_cursor", curErr ? "error" : "success", null, Date.now() - tCur, curErr ? "cursor_persist_failed" : null);
     } else {
-      await recordRun("account_discovery_persistence", "error", null, 0, persistError);
+      await recordRun("account_discovery_cursor", "error", null, 0, persistError);
     }
 
     // A required-observability write failure is itself a durability failure.
     if (!persistError && observabilityFailed) persistError = "api_run_persist_failed";
 
-    // The parent account_sync run is recorded directly (never recursing on its own
-    // recorder error). Persistence failure → error(500); provider gap → partial.
+    // Persistence failure → error(500); provider gap → partial.
     if (persistError) {
       await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: "error", p_http_status: null, p_request_id: null, p_latency_ms: Math.max(0, Date.now() - startedAt), p_error_code: persistError });
       return reply({ status: "error", account_id: accountId, error_code: persistError, resources }, 500);
     }
     const overall = (identityOk && priv.ok && loc.ok && groupFetched) ? "success" : "partial";
-    await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: overall, p_http_status: null, p_request_id: null, p_latency_ms: Math.max(0, Date.now() - startedAt), p_error_code: overall === "partial" ? "partial_discovery" : null });
+    // The parent run is CHECKED: a lost parent audit row is a durability failure.
+    // Do not recurse recording that failure through the same broken recorder.
+    const { error: parentErr } = await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: overall, p_http_status: null, p_request_id: null, p_latency_ms: Math.max(0, Date.now() - startedAt), p_error_code: overall === "partial" ? "partial_discovery" : null });
+    if (parentErr) return reply({ status: "error", account_id: accountId, error_code: "parent_api_run_persist_failed", resources }, 500);
     // Counts + per-resource status only — never seller PII or raw provider bodies.
     return reply({ status: overall, account_id: accountId, opaque_user_id: opaqueUserId, privilege_status: privilegeStatus, resources });
   }
