@@ -1,7 +1,12 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Slab } from "./types";
 
+type QueryResult<T> = Promise<{ data: T; error: { message: string } | null }>;
 type AnyClient = {
+  from: (table: string) => {
+    select: (columns: string) => { eq: (column: string, value: unknown) => { maybeSingle: () => QueryResult<Record<string, unknown> | null> } };
+    update: (patch: Record<string, unknown>) => { eq: (column: string, value: unknown) => { select: (columns: string) => { single: () => QueryResult<Record<string, unknown>> } } };
+  };
   rpc: (fn: string, args?: Record<string, unknown>) => Promise<{ data: unknown; error: { message: string } | null }>;
   storage: typeof supabase.storage;
 };
@@ -13,6 +18,22 @@ export interface PurgeSlabResult {
   slab_id: string;
   front_image_path: string | null;
   back_image_path: string | null;
+}
+
+export async function fetchPermanentDeleteEnabled(): Promise<boolean> {
+  const { data, error } = await sb.from("slab_settings").select("allow_hard_delete").eq("id", true).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data?.allow_hard_delete === true;
+}
+
+export async function setPermanentDeleteEnabled(enabled: boolean): Promise<boolean> {
+  const { data, error } = await sb.from("slab_settings")
+    .update({ allow_hard_delete: enabled, updated_at: new Date().toISOString() })
+    .eq("id", true)
+    .select("allow_hard_delete")
+    .single();
+  if (error) throw new Error(error.message);
+  return data.allow_hard_delete === true;
 }
 
 export async function reassignSlabInventoryId(slabId: string, sequence: number): Promise<Slab> {
@@ -43,7 +64,7 @@ export async function purgeSlabs(ids: string[]): Promise<{ purged: number; stora
   const { data, error } = await sb.rpc("purge_slabs", { p_ids: uniqueIds });
   if (error) {
     if (/HARD_DELETE_DISABLED/i.test(error.message)) {
-      throw new Error("Permanent deletion is disabled in Supabase slab settings.");
+      throw new Error("Permanent deletion is disabled. Turn on the admin checkbox first.");
     }
     throw new Error(error.message);
   }
