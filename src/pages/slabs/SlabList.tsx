@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { useAuth } from "@/auth/AuthProvider";
-import { Plus, Download, ArrowDown, ArrowUp, ArrowUpDown, Loader2, Pencil, Trash2, Rows3 } from "lucide-react";
+import { Plus, Download, ArrowDown, ArrowUp, ArrowUpDown, Loader2, Pencil, Trash2, Rows3, RefreshCw } from "lucide-react";
 import { INVENTORY_TABLE_COLUMNS, GRADERS, LANGUAGES, VERIFICATION_STATUSES, DUPLICATE_STATUSES } from "@/lib/slabs/constants";
 import { fetchSlabs, fetchAllSlabs, fetchAllComps, type SlabQuery } from "@/lib/slabs/data";
 import {
@@ -18,6 +18,7 @@ import {
   fetchPermanentDeleteEnabled,
   purgeSlabs,
   reassignSlabInventoryId,
+  retryPendingSlabStorageCleanup,
   setPermanentDeleteEnabled,
 } from "@/lib/slabs/inventory-maintenance";
 import { formatCents, dollarsToCents } from "@/lib/slabs/format";
@@ -90,8 +91,10 @@ export default function SlabList() {
   const selectedRows = rows.filter((row) => selected.has(row.id));
   const allPageSelected = rows.length > 0 && rows.every((row) => selected.has(row.id));
 
+  const resetSelection = () => setSelected(new Set());
+
   const refreshInventory = async () => {
-    setSelected(new Set());
+    resetSelection();
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["slabs"] }),
       queryClient.invalidateQueries({ queryKey: ["dashboard-slabs"] }),
@@ -102,6 +105,7 @@ export default function SlabList() {
     if (sortKey === key) setSortDir((direction) => direction === "asc" ? "desc" : "asc");
     else { setSortKey(key); setSortDir("asc"); }
     setPage(0);
+    resetSelection();
   };
 
   const sortIcon = (key: keyof Slab) => {
@@ -134,6 +138,22 @@ export default function SlabList() {
     } finally { setMaintenanceBusy(false); }
   };
 
+  const retryStorageCleanup = async () => {
+    setMaintenanceBusy(true);
+    try {
+      const result = await retryPendingSlabStorageCleanup();
+      if (result.pending > 0) {
+        toast.warning(`${result.pending} stored image(s) remain queued for retry: ${result.errors.join("; ")}`);
+      } else if (result.removed > 0) {
+        toast.success(`${result.removed} queued stored image(s) removed.`);
+      } else {
+        toast.success("No pending stored-image cleanup.");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Stored-image cleanup could not be retried.");
+    } finally { setMaintenanceBusy(false); }
+  };
+
   const editInventoryId = async (slab: Slab) => {
     const current = slab.inventory_sequence ?? Number(String(slab.inventory_code ?? "").replace(/\D/g, ""));
     const entered = window.prompt("Enter the visible inventory number. Example: 12 becomes S0012.", String(current || ""));
@@ -160,7 +180,7 @@ export default function SlabList() {
     const warning = [
       `Permanently delete ${label}?`,
       `${targets.length} slab(s): ${archivedCount} archived; ${activeCount} active.`,
-      "This removes database records and attempts to remove stored images. This cannot be undone.",
+      "This removes database records and stored images. Failed image removals remain in a durable retry queue.",
       "External backups, provider records, or platform infrastructure logs are outside this application's purge boundary.",
     ].join("\n\n");
     if (!window.confirm(warning)) return;
@@ -173,8 +193,11 @@ export default function SlabList() {
     setMaintenanceBusy(true);
     try {
       const result = await purgeSlabs(targets.map((row) => row.id));
-      if (result.storageErrors.length) toast.warning(`${result.purged} record(s) purged, but image cleanup reported: ${result.storageErrors.join("; ")}`);
-      else toast.success(`${result.purged} slab(s) permanently purged.`);
+      if (result.storageCleanup.pending > 0) {
+        toast.warning(`${result.purged} record(s) purged. ${result.storageCleanup.pending} image(s) are safely queued for retry: ${result.storageCleanup.errors.join("; ")}`);
+      } else {
+        toast.success(`${result.purged} slab(s) and associated stored images permanently purged.`);
+      }
       await refreshInventory();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Slabs could not be purged.");
@@ -222,6 +245,7 @@ export default function SlabList() {
   };
 
   const distinctGrades = ["9", "9.5", "10", "8", "8.5", "7"];
+  const resetPageAndSelection = () => { setPage(0); resetSelection(); };
 
   return (
     <div className="container max-w-[1600px] py-8">
@@ -229,21 +253,21 @@ export default function SlabList() {
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div><h1 className="text-2xl font-bold">{isAdmin ? "Slab Inventory" : "My Slabs"}</h1><p className="text-sm text-muted-foreground">{total} slabs</p></div>
         <div className="flex flex-wrap gap-2">
-          <Button variant={includeArchived ? "secondary" : "outline"} onClick={() => { setIncludeArchived((value) => !value); setPage(0); setSelected(new Set()); }}>{includeArchived ? "Hide archived" : "Show archived"}</Button>
+          <Button variant={includeArchived ? "secondary" : "outline"} onClick={() => { setIncludeArchived((value) => !value); resetPageAndSelection(); }}>{includeArchived ? "Hide archived" : "Show archived"}</Button>
           {isAdmin && <Button variant="outline" onClick={handleExport} disabled={exporting}>{exporting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}Export Inventory</Button>}
           <Button asChild><Link to="/slabs/new"><Plus className="mr-1 h-4 w-4" /> Add Slab</Link></Button>
         </div>
       </div>
 
       <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <Input placeholder="Search name, cert, set, card #, or ID" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} />
-        <FilterSelect placeholder="Any grader" value={grader} onChange={(value) => { setGrader(value); setPage(0); }} options={GRADERS.map((value) => ({ value, label: value }))} />
-        <FilterSelect placeholder="Any grade" value={grade} onChange={(value) => { setGrade(value); setPage(0); }} options={distinctGrades.map((value) => ({ value, label: value }))} />
-        <FilterSelect placeholder="Any language" value={language} onChange={(value) => { setLanguage(value); setPage(0); }} options={LANGUAGES.map((value) => ({ value, label: value }))} />
-        <FilterSelect placeholder="Any verification" value={verification} onChange={(value) => { setVerification(value); setPage(0); }} options={VERIFICATION_STATUSES.map((value) => ({ value: value.value, label: value.label }))} />
-        <FilterSelect placeholder="Any duplicate status" value={duplicate} onChange={(value) => { setDuplicate(value); setPage(0); }} options={DUPLICATE_STATUSES.map((value) => ({ value: value.value, label: value.label }))} />
-        <Input placeholder="Min value ($)" value={minVal} onChange={(event) => { setMinVal(event.target.value); setPage(0); }} inputMode="decimal" />
-        <Input placeholder="Max value ($)" value={maxVal} onChange={(event) => { setMaxVal(event.target.value); setPage(0); }} inputMode="decimal" />
+        <Input placeholder="Search name, cert, set, card #, or ID" value={search} onChange={(event) => { setSearch(event.target.value); resetPageAndSelection(); }} />
+        <FilterSelect placeholder="Any grader" value={grader} onChange={(value) => { setGrader(value); resetPageAndSelection(); }} options={GRADERS.map((value) => ({ value, label: value }))} />
+        <FilterSelect placeholder="Any grade" value={grade} onChange={(value) => { setGrade(value); resetPageAndSelection(); }} options={distinctGrades.map((value) => ({ value, label: value }))} />
+        <FilterSelect placeholder="Any language" value={language} onChange={(value) => { setLanguage(value); resetPageAndSelection(); }} options={LANGUAGES.map((value) => ({ value, label: value }))} />
+        <FilterSelect placeholder="Any verification" value={verification} onChange={(value) => { setVerification(value); resetPageAndSelection(); }} options={VERIFICATION_STATUSES.map((value) => ({ value: value.value, label: value.label }))} />
+        <FilterSelect placeholder="Any duplicate status" value={duplicate} onChange={(value) => { setDuplicate(value); resetPageAndSelection(); }} options={DUPLICATE_STATUSES.map((value) => ({ value: value.value, label: value.label }))} />
+        <Input placeholder="Min value ($)" value={minVal} onChange={(event) => { setMinVal(event.target.value); resetPageAndSelection(); }} inputMode="decimal" />
+        <Input placeholder="Max value ($)" value={maxVal} onChange={(event) => { setMaxVal(event.target.value); resetPageAndSelection(); }} inputMode="decimal" />
       </div>
 
       {isAdmin && (
@@ -253,7 +277,8 @@ export default function SlabList() {
             Enable permanent deletion
           </label>
           <span className="mr-auto text-xs text-muted-foreground">Database safety switch. Turn it off after cleanup.</span>
-          <span className="text-sm"><strong>{selected.size}</strong> selected</span>
+          <span className="text-sm"><strong>{selectedRows.length}</strong> selected on this page</span>
+          <Button variant="outline" size="sm" onClick={() => void retryStorageCleanup()} disabled={maintenanceBusy}><RefreshCw /> Retry image cleanup</Button>
           <Button variant="outline" size="sm" onClick={() => void compactIds()} disabled={maintenanceBusy}><Rows3 /> Compact visible IDs</Button>
           <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || !permanentDeleteEnabled || selectedRows.length === 0}><Trash2 /> Delete selected</Button>
           <Button variant="destructive" size="sm" onClick={() => void purgeAll()} disabled={maintenanceBusy || !permanentDeleteEnabled || total === 0}><Trash2 /> Delete all slabs</Button>
@@ -281,7 +306,7 @@ export default function SlabList() {
         </div>
       )}
 
-      <div className="mt-4 flex items-center justify-between"><span className="text-sm text-muted-foreground">Page {page + 1} of {pageCount}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button variant="outline" size="sm" disabled={page + 1 >= pageCount} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>
+      <div className="mt-4 flex items-center justify-between"><span className="text-sm text-muted-foreground">Page {page + 1} of {pageCount}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={page === 0} onClick={() => { setPage((value) => Math.max(0, value - 1)); resetSelection(); }}>Previous</Button><Button variant="outline" size="sm" disabled={page + 1 >= pageCount} onClick={() => { setPage((value) => value + 1); resetSelection(); }}>Next</Button></div></div>
     </div>
   );
 }
