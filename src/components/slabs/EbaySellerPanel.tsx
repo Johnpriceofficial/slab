@@ -8,13 +8,23 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ebaySellerOperation, fetchEbayAccounts, startEbayOAuth } from "@/lib/slabs/data";
+import { ebaySellerOperation, fetchEbayAccounts, fetchEbaySyncCursors, startEbayOAuth } from "@/lib/slabs/data";
 import type { Slab } from "@/lib/slabs/types";
 
 export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const { data: accounts = [], refetch } = useQuery({ queryKey: ["ebay-accounts"], queryFn: fetchEbayAccounts });
   const connected = accounts.find((account) => account.connection_status === "connected");
-  const [busy, setBusy] = useState(false);
+  // Per-resource sync timestamps (authoritative "last synced", not the old shared one).
+  const { data: cursors = [], refetch: refetchCursors } = useQuery({
+    queryKey: ["ebay-sync-cursors", connected?.id],
+    queryFn: () => fetchEbaySyncCursors(connected!.id),
+    enabled: !!connected,
+  });
+  const cursorFor = (resource: string) => cursors.find((c) => c.resource_type === resource) ?? null;
+  // Exactly one operation runs at a time; drives distinct progress labels.
+  const [activeOperation, setActiveOperation] = useState<null | "account_sync" | "order_sync" | "finances_sync" | "prepare_listing" | "publish_listing">(null);
+  const [syncSummary, setSyncSummary] = useState<Record<string, { status: string; count: number | null; error_code: string | null }> | null>(null);
+  const anyBusy = activeOperation !== null;
   // Persistent inline result of the last OAuth callback (shown until dismissed).
   const [callbackResult, setCallbackResult] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -59,13 +69,17 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setConnecting(false); // restore only on a failed start
   };
   const sync = async (name: "ebay-account-sync" | "ebay-order-sync" | "ebay-finances-sync") => {
-    if (!connected) return;
-    setBusy(true);
+    if (!connected || anyBusy) return;
+    const op = name === "ebay-account-sync" ? "account_sync" : name === "ebay-order-sync" ? "order_sync" : "finances_sync";
+    setActiveOperation(op);
     const result = await ebaySellerOperation(name, { account_id: connected.id });
-    setBusy(false);
+    setActiveOperation(null);
     if (result.status === "success") toast.success("eBay synchronization completed.");
-    else toast.error(result.message ?? "eBay synchronization failed.");
-    refetch();
+    else if (result.status === "partial") toast.warning("eBay sync finished, but some resources were unavailable — see details below.");
+    else toast.error(result.message ?? result.error_code ?? "eBay synchronization failed.");
+    // Honest per-resource summary for success/partial; cleared on hard error.
+    setSyncSummary(result.status === "success" || result.status === "partial" ? ((result.resources ?? null) as typeof syncSummary) : null);
+    refetch(); refetchCursors();
   };
   const listingPayload = {
     account_id: connected?.id,
@@ -87,17 +101,19 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     image_urls: [],
   };
   const prepare = async () => {
-    setBusy(true);
+    if (anyBusy) return;
+    setActiveOperation("prepare_listing");
     const result = await ebaySellerOperation("ebay-list-item", listingPayload);
-    setBusy(false);
+    setActiveOperation(null);
     setPrepared(result);
     if (result.status === "error" || result.status === "unavailable") toast.error(result.message ?? "eBay listing requirements are unavailable.");
   };
   const publish = async () => {
+    if (anyBusy) return;
     if (!window.confirm("Publish this item to eBay with the displayed price, condition, policies, and SKU?")) return;
-    setBusy(true);
+    setActiveOperation("publish_listing");
     const result = await ebaySellerOperation("ebay-list-item", { ...listingPayload, confirmation: "PUBLISH" });
-    setBusy(false);
+    setActiveOperation(null);
     if (result.status === "success") toast.success(`Published eBay listing ${result.listing_id ?? ""}.`);
     else toast.error(result.message ?? "eBay publish failed.");
   };
@@ -117,8 +133,18 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
       </div>
     )}
     {connected ? <div className="space-y-4 text-sm">
-      <div className="flex flex-wrap items-center gap-2"><Badge>Connected</Badge><span>{connected.display_label ?? "eBay seller account"}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-account-sync")}>Verify privileges</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-order-sync")}>Sync orders</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-finances-sync")}>Sync fees</Button></div>
-      <p>Privileges: {busy ? "Checking…" : connected.privilege_status === "verified" ? "Verified" : "Not verified"}{connected.last_synced_at ? ` · Last account sync: ${connected.last_synced_at.slice(0, 16).replace("T", " ")}` : ""}</p>
+      <div className="flex flex-wrap items-center gap-2"><Badge>Connected</Badge><span>{connected.display_label ?? "eBay seller account"}</span>
+        <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-account-sync")}>{activeOperation === "account_sync" ? "Checking…" : "Verify privileges"}</Button>
+        <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-order-sync")}>{activeOperation === "order_sync" ? "Syncing orders…" : "Sync orders"}</Button>
+        <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-finances-sync")}>{activeOperation === "finances_sync" ? "Syncing fees…" : "Sync fees"}</Button></div>
+      <p>Privileges: {activeOperation === "account_sync" ? "Checking…" : connected.privilege_status === "verified" ? "Verified" : "Not verified"}{connected.connected_at ? ` · Connected ${connected.connected_at.slice(0, 16).replace("T", " ")}` : ""}{cursorFor("account_discovery")?.last_synced_at ? ` · Account discovery ${cursorFor("account_discovery")!.last_synced_at!.slice(0, 16).replace("T", " ")}${cursorFor("account_discovery")?.cursor_value ? ` (${cursorFor("account_discovery")!.cursor_value} records)` : ""}` : ""}</p>
+      <p className="text-xs text-muted-foreground">Orders last synced: {cursorFor("orders")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"} · Finances last synced: {cursorFor("finances")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"}</p>
+      {syncSummary && (
+        <div className="rounded-md border p-3 text-xs">
+          <div className="mb-1 flex items-center justify-between"><span className="font-medium">Last account-discovery result</span><button type="button" aria-label="Dismiss sync summary" className="opacity-70 hover:opacity-100" onClick={() => setSyncSummary(null)}>×</button></div>
+          <ul className="grid gap-0.5 sm:grid-cols-2">{Object.entries(syncSummary).map(([res, r]) => <li key={res}><span className={r.status === "success" ? "text-green-700" : r.status === "error" ? "text-destructive" : "text-amber-700"}>{r.status}</span> — {res.replace(/_/g, " ")}{r.count != null ? ` (${r.count})` : ""}{r.error_code ? ` · ${r.error_code}` : ""}</li>)}</ul>
+        </div>
+      )}
       <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2">
         <div className="sm:col-span-2"><Label>Listing title</Label><Input value={form.title} onChange={(e) => change("title", e.target.value)} /></div>
         <div className="sm:col-span-2"><Label>Description and grade disclosure</Label><Textarea value={form.description} onChange={(e) => change("description", e.target.value)} /></div>
@@ -129,7 +155,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         <div><Label>Fulfillment policy ID</Label><Input value={form.fulfillmentPolicyId} onChange={(e) => change("fulfillmentPolicyId", e.target.value)} /></div>
         <div><Label>Payment policy ID</Label><Input value={form.paymentPolicyId} onChange={(e) => change("paymentPolicyId", e.target.value)} /></div>
         <div><Label>Return policy ID</Label><Input value={form.returnPolicyId} onChange={(e) => change("returnPolicyId", e.target.value)} /></div>
-        <div className="flex items-end gap-2"><Button variant="outline" disabled={busy} onClick={prepare}>Load current eBay requirements</Button><Button disabled={busy || !prepared || !form.price} onClick={publish}>Publish with confirmation</Button></div>
+        <div className="flex items-end gap-2"><Button variant="outline" disabled={anyBusy} onClick={prepare}>{activeOperation === "prepare_listing" ? "Loading…" : "Load current eBay requirements"}</Button><Button disabled={anyBusy || !prepared || !form.price} onClick={publish}>{activeOperation === "publish_listing" ? "Publishing…" : "Publish with confirmation"}</Button></div>
         {prepared && <p className="sm:col-span-2 text-xs text-muted-foreground">eBay returned current privileges, locations, business policies, category aspects, and condition policies. Publishing remains blocked until the required IDs are supplied and explicitly confirmed.</p>}
       </div>
       <p className="text-muted-foreground">Seller orders and Finances records are stored server-side. Active Browse listings remain asking-price/reference evidence and are never sold comparables. Unknown external enum and CustomCode values are preserved as text.</p>
