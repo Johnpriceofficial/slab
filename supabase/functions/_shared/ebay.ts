@@ -8,6 +8,7 @@ import {
   type EbayPublicKey,
 } from "./ebay-notification-verify.ts";
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
+import { buildAuthorizeQuery, resolveEbayCallback } from "./ebay-oauth-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -264,38 +265,67 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // Single-use + unexpired: a replayed or stale callback is rejected here.
     if (!stored || stored.consumed_at || new Date(stored.expires_at) <= new Date()) return appRedirect(null, "invalid_state");
     if (!Deno.env.get("EBAY_TOKEN_ENCRYPTION_KEY")) return appRedirect(null, "config_error");
-    try {
-      const token = await oauthToken(new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: RU_NAME }));
-      const accessToken = typeof token.access_token === "string" ? token.access_token : "";
-      const refreshToken = typeof token.refresh_token === "string" ? token.refresh_token : "";
-      if (!accessToken || !refreshToken) return appRedirect(null, "config_error");
-      const identity = await ebayFetch("/commerce/identity/v1/user/", accessToken);
-      const ebayUserId = String(identity.userId ?? identity.username ?? "");
-      if (!ebayUserId) return appRedirect(null, "identity_unavailable");
-      const { data: account, error: accountError } = await admin.from("ebay_accounts").upsert({
-        ebay_user_id: ebayUserId,
-        display_label: "Connected eBay seller",
-        connection_status: "connected",
-        authorization_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
-        last_synced_at: new Date().toISOString(),
-      }, { onConflict: "ebay_user_id" }).select("id").single();
-      if (accountError || !account) return appRedirect(null, "persist_error");
-      const { error: credError } = await admin.rpc("ebay_oauth_credential_upsert", {
-        p_account_id: account.id,
-        p_refresh_token_encrypted: await encryptToken(refreshToken),
-        p_refresh_token_expires_at: token.refresh_token_expires_in ? new Date(Date.now() + Number(token.refresh_token_expires_in) * 1000).toISOString() : null,
-        p_scopes: typeof token.scope === "string" ? token.scope.split(" ") : [],
-        p_rotated_at: new Date().toISOString(),
-      });
-      // The encrypted credential MUST persist — without it the account is connected
-      // but unusable. Surface a failure instead of a false success.
-      if (credError) return appRedirect(null, "persist_error");
-      // Consume the state only after a successful exchange (single-use).
-      await admin.rpc("ebay_oauth_state_consume", { p_state_hash: stateHash });
-      return appRedirect(stored.redirect_after, "connected");
-    } catch {
-      return appRedirect(null, "error");
+    // Ordered, stage-specific resolution (see ebay-oauth-core.resolveEbayCallback):
+    // state consumption is mandatory + verified and happens ONLY after token
+    // exchange, identity, account, and credential all succeed — any earlier
+    // failure leaves the state unconsumed so a genuine retry can succeed.
+    const outcome = await resolveEbayCallback({
+      exchangeCode: async () => {
+        const res = await fetch(`${API}/identity/v1/oauth2/token`, {
+          method: "POST",
+          headers: { Authorization: `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: RU_NAME }),
+        });
+        if (!res.ok) return { ok: false, status: res.status };
+        const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+        const accessToken = typeof data.access_token === "string" ? data.access_token : "";
+        return {
+          ok: Boolean(accessToken), status: res.status, accessToken,
+          refreshToken: typeof data.refresh_token === "string" ? data.refresh_token : "",
+          scope: typeof data.scope === "string" ? data.scope.split(" ") : [],
+          refreshTokenExpiresInSec: data.refresh_token_expires_in ? Number(data.refresh_token_expires_in) : null,
+        };
+      },
+      fetchIdentity: async (accessToken) => {
+        const res = await fetch(`${API}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
+        if (!res.ok) return { ok: false, status: res.status };
+        const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+        return { ok: true, ebayUserId: String(data.userId ?? data.username ?? "") };
+      },
+      persistAccount: async (ebayUserId, expSec) => {
+        const { data, error } = await admin.from("ebay_accounts").upsert({
+          ebay_user_id: ebayUserId, display_label: "Connected eBay seller", connection_status: "connected",
+          authorization_expires_at: expSec ? new Date(Date.now() + expSec * 1000).toISOString() : null,
+          last_synced_at: new Date().toISOString(),
+        }, { onConflict: "ebay_user_id" }).select("id").single();
+        return { ok: !error && !!data, accountId: (data as { id?: string } | null)?.id };
+      },
+      persistCredential: async (accountId, refreshToken, scope, expSec) => {
+        const { error } = await admin.rpc("ebay_oauth_credential_upsert", {
+          p_account_id: accountId, p_refresh_token_encrypted: await encryptToken(refreshToken),
+          p_refresh_token_expires_at: expSec ? new Date(Date.now() + expSec * 1000).toISOString() : null,
+          p_scopes: scope, p_rotated_at: new Date().toISOString(),
+        });
+        return { ok: !error };
+      },
+      consumeState: async () => {
+        const { error } = await admin.rpc("ebay_oauth_state_consume", { p_state_hash: stateHash });
+        return { ok: !error };
+      },
+      confirmConsumed: async () => {
+        const { data } = await admin.rpc("ebay_oauth_state_get", { p_state_hash: stateHash }).maybeSingle();
+        return Boolean((data as { consumed_at?: string } | null)?.consumed_at);
+      },
+    });
+    if (outcome.stage !== "connected") {
+      // Safe diagnostic only — never tokens, code, raw state, secrets, or PII.
+      console.error(JSON.stringify({
+        operation: "ebay_oauth_callback", environment: MODE, callback_stage: outcome.stage,
+        upstream_http_status: outcome.upstreamStatus ?? null, internal_error_code: outcome.stage,
+        function_version: Deno.env.get("DENO_DEPLOYMENT_ID") ?? "unknown", at: new Date().toISOString(),
+      }));
     }
+    return appRedirect(outcome.stage === "connected" ? stored.redirect_after : null, outcome.query);
   }
 
   const auth = await requireAdmin(req);
@@ -315,13 +345,9 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // Without a persisted state the callback can never validate — fail loudly
     // instead of handing the user an authorization URL that will always reject.
     if (stateError) return reply({ status: "error", error_code: "STATE_PERSISTENCE_FAILED", message: "Could not initialize the eBay authorization request." }, 500);
-    const scopes = [
-      "https://api.ebay.com/oauth/api_scope/sell.account",
-      "https://api.ebay.com/oauth/api_scope/sell.inventory",
-      "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
-      "https://api.ebay.com/oauth/api_scope/sell.finances",
-    ].join(" ");
-    const url = `${AUTH}/oauth2/authorize?${new URLSearchParams({ client_id: CLIENT_ID, response_type: "code", redirect_uri: RU_NAME, scope: scopes, state })}`;
+    // Scopes include the BASE api_scope (required by the Identity API used in the
+    // callback) plus the four seller scopes; sandbox adds prompt=login.
+    const url = `${AUTH}/oauth2/authorize?${buildAuthorizeQuery({ clientId: CLIENT_ID, ruName: RU_NAME, state, mode: MODE })}`;
     return reply({ status: "success", authorization_url: url, expires_in_seconds: 600 });
   }
 

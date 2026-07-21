@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { ebayCallbackResultMessage } from "@/lib/slabs/ebay-callback";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +28,23 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     condition: "GRADED",
   });
   const change = (key: keyof typeof form, value: string) => setForm((old) => ({ ...old, [key]: value }));
+
+  // Surface the OAuth callback result (?ebay=<result>) once when we land back
+  // from the eBay hop: toast, refetch accounts on success, then strip the marker
+  // from the URL without reloading.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("ebay");
+    if (!result) return;
+    const { tone, message } = ebayCallbackResultMessage(result);
+    if (tone === "success") toast.success(message);
+    else if (tone === "info") toast.info(message);
+    else toast.error(message);
+    if (result === "connected") void refetch();
+    params.delete("ebay");
+    const clean = window.location.pathname + (params.toString() ? `?${params.toString()}` : "") + window.location.hash;
+    window.history.replaceState({}, "", clean);
+  }, [refetch]);
 
   const connect = async () => {
     const result = await startEbayOAuth();
