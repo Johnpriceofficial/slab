@@ -199,6 +199,22 @@ $$;
 revoke all on function public.purge_slabs(uuid[]) from public, anon;
 grant execute on function public.purge_slabs(uuid[]) to authenticated;
 
+-- Compatibility entry point used by the detail-page test-record action. Keeping
+-- the existing signature avoids a parallel implementation while ensuring every
+-- destructive path uses the same transaction, authorization, gate, and queue.
+create or replace function public.hard_delete_slab(p_id uuid)
+returns table (front_image_path text, back_image_path text)
+language sql
+security invoker
+set search_path = public
+as $$
+  select p.front_image_path, p.back_image_path
+  from public.purge_slabs(array[p_id]) p;
+$$;
+
+revoke all on function public.hard_delete_slab(uuid) from public, anon;
+grant execute on function public.hard_delete_slab(uuid) to authenticated;
+
 create or replace function public.list_pending_slab_storage_cleanup()
 returns table (storage_path text)
 language plpgsql
@@ -275,3 +291,5 @@ comment on function public.compact_slab_inventory_ids() is
   'Admin-only serialized renumbering of all remaining visible slab IDs to S0001..S00NN.';
 comment on function public.purge_slabs(uuid[]) is
   'Admin-only transactional database purge. Storage paths are queued durably for Storage API deletion and retry.';
+comment on function public.hard_delete_slab(uuid) is
+  'Compatibility wrapper around purge_slabs for the detail-page test-record action.';
