@@ -1,7 +1,6 @@
-import type { MarketIntelligence, SourceState, SourceStatus } from "@/server/market-intelligence/engine";
-import type { MarketDataPoint, MarketSource, MarketSummary } from "./types";
+import type { MarketIntelligence } from "@/server/market-intelligence/engine";
+import type { MarketDataPoint, MarketSummary } from "./types";
 import type { GradeTier } from "./grade-tier";
-import type { CompletenessNote, CompletenessStatus } from "@/lib/identity/completeness";
 import { isRecord } from "@/lib/providers/response-schema";
 
 const EMPTY_SUMMARY: MarketSummary = {
@@ -13,18 +12,6 @@ const EMPTY_SUMMARY: MarketSummary = {
   median_cents: null,
   average_cents: null,
 };
-
-const MARKET_SOURCES = new Set<MarketSource>(["pricecharting", "ebay_sold", "ebay_active", "population", "manual"]);
-const SOURCE_STATUSES = new Set<SourceStatus>([
-  "success",
-  "no_results",
-  "not_configured",
-  "unauthorized",
-  "rate_limited",
-  "provider_error",
-  "network_error",
-]);
-const COMPLETENESS_STATUSES = new Set<CompletenessStatus>(["complete", "partial", "ambiguous"]);
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -42,23 +29,11 @@ function records(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
-function marketSource(value: unknown): MarketSource {
-  return typeof value === "string" && MARKET_SOURCES.has(value as MarketSource)
-    ? (value as MarketSource)
-    : "manual";
-}
-
-function sourceStatus(value: unknown): SourceStatus {
-  return typeof value === "string" && SOURCE_STATUSES.has(value as SourceStatus)
-    ? (value as SourceStatus)
-    : "provider_error";
-}
-
 function marketPoint(value: Record<string, unknown>): MarketDataPoint | null {
   const price = nullableMoney(value.price_cents);
   if (price === null || price <= 0) return null;
   return {
-    source: marketSource(value.source),
+    source: stringValue(value.source, "manual") as MarketDataPoint["source"],
     kind: value.kind === "listing" ? "listing" : "sale",
     price_cents: price,
     currency: stringValue(value.currency, "USD"),
@@ -71,32 +46,10 @@ function marketPoint(value: Record<string, unknown>): MarketDataPoint | null {
   };
 }
 
-function sourceState(value: Record<string, unknown>): SourceState | null {
-  if (typeof value.source !== "string") return null;
-  return {
-    source: marketSource(value.source),
-    status: sourceStatus(value.status),
-    query: stringValue(value.query),
-    retrieved_at: stringValue(value.retrieved_at, new Date(0).toISOString()),
-    candidate_count: Math.max(0, Math.round(finiteNumber(value.candidate_count, 0))),
-    exact_count: Math.max(0, Math.round(finiteNumber(value.exact_count, 0))),
-    retryable: value.retryable === true,
-    message: stringValue(value.message, "Provider returned an invalid response."),
-  };
-}
-
-function completenessNotes(value: unknown): CompletenessNote[] {
-  return records(value).flatMap((note) => {
-    const effect = note.effect;
-    if (typeof note.field !== "string" || typeof note.detail !== "string") return [];
-    if (effect !== "blocks_all" && effect !== "blocks_exact" && effect !== "downgrades_exact" && effect !== "irrelevant") return [];
-    return [{ field: note.field, effect, detail: note.detail }];
-  });
-}
-
 export function normalizeMarketIntelligenceResponse(payload: unknown): MarketIntelligence {
   const body = isRecord(payload) ? payload : {};
   const summaryBody = isRecord(body.summary) ? body.summary : {};
+  const completeness = isRecord(body.identity_completeness) ? body.identity_completeness : {};
   const summary: MarketSummary = {
     count: Math.max(0, Math.round(finiteNumber(summaryBody.count, 0))),
     last_sale_cents: nullableMoney(summaryBody.last_sale_cents),
@@ -106,13 +59,8 @@ export function normalizeMarketIntelligenceResponse(payload: unknown): MarketInt
     median_cents: nullableMoney(summaryBody.median_cents),
     average_cents: nullableMoney(summaryBody.average_cents),
   };
-  const completeness = isRecord(body.identity_completeness) ? body.identity_completeness : {};
-  const completenessStatus =
-    typeof completeness.status === "string" && COMPLETENESS_STATUSES.has(completeness.status as CompletenessStatus)
-      ? (completeness.status as CompletenessStatus)
-      : "ambiguous";
 
-  return {
+  const normalized = {
     identity_hash: stringValue(body.identity_hash, "unavailable"),
     grade_tier: stringValue(body.grade_tier, "raw") as GradeTier,
     verified_sales: records(body.verified_sales).map(marketPoint).filter((value): value is MarketDataPoint => value !== null),
@@ -137,21 +85,42 @@ export function normalizeMarketIntelligenceResponse(payload: unknown): MarketInt
     liquidity: Math.max(0, Math.min(1, finiteNumber(body.liquidity, 0))),
     confidence: Math.max(0, Math.min(1, finiteNumber(body.confidence, 0))),
     provenance: records(body.provenance).map((row) => ({
-      source: marketSource(row.source),
+      source: stringValue(row.source, "manual"),
       query: stringValue(row.query),
       retrieved_at: stringValue(row.retrieved_at, new Date(0).toISOString()),
       candidate_count: Math.max(0, Math.round(finiteNumber(row.candidate_count, 0))),
       exact_count: Math.max(0, Math.round(finiteNumber(row.exact_count, 0))),
       url: typeof row.url === "string" ? row.url : null,
     })),
-    sources: records(body.sources).map(sourceState).filter((value): value is SourceState => value !== null),
+    sources: records(body.sources).flatMap((row) => {
+      if (typeof row.source !== "string") return [];
+      return [{
+        source: row.source,
+        status: stringValue(row.status, "provider_error"),
+        query: stringValue(row.query),
+        retrieved_at: stringValue(row.retrieved_at, new Date(0).toISOString()),
+        candidate_count: Math.max(0, Math.round(finiteNumber(row.candidate_count, 0))),
+        exact_count: Math.max(0, Math.round(finiteNumber(row.exact_count, 0))),
+        retryable: row.retryable === true,
+        message: stringValue(row.message, "Provider returned an invalid response."),
+      }];
+    }),
     identity_completeness: {
-      status: completenessStatus,
+      status: completeness.status === "complete" || completeness.status === "partial" || completeness.status === "ambiguous"
+        ? completeness.status
+        : "ambiguous",
       missing: Array.isArray(completeness.missing)
         ? completeness.missing.filter((value): value is string => typeof value === "string")
         : [],
-      notes: completenessNotes(completeness.notes),
+      notes: records(completeness.notes).flatMap((note) => {
+        if (typeof note.field !== "string" || typeof note.detail !== "string") return [];
+        const effect = note.effect;
+        if (effect !== "blocks_all" && effect !== "blocks_exact" && effect !== "downgrades_exact" && effect !== "irrelevant") return [];
+        return [{ field: note.field, effect, detail: note.detail }];
+      }),
     },
     generated_at: stringValue(body.generated_at, new Date().toISOString()),
   };
+
+  return normalized as MarketIntelligence;
 }
