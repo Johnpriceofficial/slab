@@ -17,9 +17,9 @@ import {
 
 export interface EbayBrowseResponse {
   itemSummaries: Array<{
-    title: string | null;
-    itemWebUrl: string | null;
-    price: { value: number | null; currency: string | null } | null;
+    title?: string | null;
+    itemWebUrl?: string | null;
+    price?: { value?: string | number | null; currency?: string | null } | null;
   }>;
 }
 
@@ -42,18 +42,21 @@ export function parseEbayBrowseResponse(value: unknown): EbayBrowseResponse {
 }
 
 export function mapEbayActive(response: EbayBrowseResponse, retrievedAt: string): RawCandidate[] {
-  return response.itemSummaries
-    .map((item) => ({
+  return response.itemSummaries.flatMap((item) => {
+    const raw = item.price?.value;
+    const value = raw === null || raw === undefined ? null : Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return [];
+    return [{
       source: "ebay_active" as const,
-      title: item.title,
-      price_cents: item.price?.value && item.price.value > 0 ? Math.round(item.price.value * 100) : null,
+      title: item.title ?? null,
+      price_cents: Math.round(value * 100),
       currency: (item.price?.currency ?? "USD").toUpperCase(),
-      url: item.itemWebUrl,
+      url: item.itemWebUrl ?? null,
       sold: false,
       sold_at: null,
       observed_at: retrievedAt,
-    }))
-    .filter((candidate) => candidate.price_cents !== null);
+    }];
+  });
 }
 
 export function fetchEbayActive(args: { url: string; query: string; token?: string }, ctx: AdapterContext): Promise<AdapterResult> {
