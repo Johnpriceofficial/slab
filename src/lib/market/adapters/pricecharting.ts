@@ -1,22 +1,25 @@
 /**
- * PriceCharting adapter. Maps a PriceCharting product response (per-tier
- * realized values) into normalized sale candidates — one per priced tier. These
- * are sold-based aggregate values, so they are treated as verified sales.
- *
- * Provider fields stay in this file: the map emits only RawCandidates.
+ * PriceCharting adapter. Maps a validated PriceCharting product response into
+ * normalized grade-tier candidates. Malformed upstream data becomes a typed
+ * parse_error in runAdapter and never reaches the market engine.
  */
 
 import type { RawCandidate } from "../types";
 import type { AdapterContext, AdapterResult } from "./types";
 import { runAdapter } from "./run";
+import {
+  optionalArray,
+  optionalNumberLike,
+  optionalRecord,
+  optionalString,
+  requireRecord,
+} from "@/lib/providers/response-schema";
 
-/** The isolated PriceCharting product response shape (only what we consume). */
 export interface PriceChartingProductResponse {
   product_id: string;
   product_name: string;
   url?: string | null;
   sales_volume?: number | null;
-  /** One entry per grade tier the product prices. */
   tiers: Array<{
     grader?: string | null;
     grade?: string | null;
@@ -25,27 +28,47 @@ export interface PriceChartingProductResponse {
   }>;
 }
 
-/** Pure: PriceCharting product → sale candidates (one per priced tier). */
+export function parsePriceChartingProductResponse(value: unknown): PriceChartingProductResponse {
+  const body = requireRecord("PriceCharting", value);
+  const tiers = optionalArray("PriceCharting", body.tiers, "$.tiers").map((tier, index) => {
+    const row = optionalRecord("PriceCharting", tier, `$.tiers[${index}]`);
+    if (!row) throw new Error("tier missing");
+    return {
+      grader: optionalString("PriceCharting", row.grader, `$.tiers[${index}].grader`),
+      grade: optionalString("PriceCharting", row.grade, `$.tiers[${index}].grade`),
+      grade_label: optionalString("PriceCharting", row.grade_label, `$.tiers[${index}].grade_label`),
+      price_cents: optionalNumberLike("PriceCharting", row.price_cents, `$.tiers[${index}].price_cents`),
+    };
+  });
+  return {
+    product_id: optionalString("PriceCharting", body.product_id, "$.product_id") ?? "",
+    product_name: optionalString("PriceCharting", body.product_name, "$.product_name") ?? "Unknown product",
+    url: optionalString("PriceCharting", body.url, "$.url"),
+    sales_volume: optionalNumberLike("PriceCharting", body.sales_volume, "$.sales_volume"),
+    tiers,
+  };
+}
+
 export function mapPriceCharting(response: PriceChartingProductResponse, retrievedAt: string): RawCandidate[] {
-  return (response.tiers ?? [])
-    .filter((t) => typeof t.price_cents === "number" && t.price_cents! > 0)
-    .map((t) => ({
+  return response.tiers
+    .filter((tier) => typeof tier.price_cents === "number" && tier.price_cents > 0)
+    .map((tier) => ({
       source: "pricecharting" as const,
       title: response.product_name,
-      price_cents: t.price_cents!,
+      price_cents: tier.price_cents!,
       currency: "USD",
       url: response.url ?? null,
-      sold: true, // PriceCharting values are realized-sale aggregates
+      sold: true,
       sold_at: retrievedAt,
       observed_at: retrievedAt,
-      grader: t.grader ?? null,
-      grade: t.grade ?? null,
-      grade_label: t.grade_label ?? null,
+      grader: tier.grader ?? null,
+      grade: tier.grade ?? null,
+      grade_label: tier.grade_label ?? null,
     }));
 }
 
 export function fetchPriceCharting(args: { url: string; query: string }, ctx: AdapterContext): Promise<AdapterResult> {
   return runAdapter("pricecharting", args.query, ctx, { url: args.url }, (body, at) =>
-    mapPriceCharting(body as PriceChartingProductResponse, at),
+    mapPriceCharting(parsePriceChartingProductResponse(body), at),
   );
 }
