@@ -9,6 +9,7 @@ import {
 } from "./ebay-notification-verify.ts";
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
+import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -104,8 +105,8 @@ function appToken(): Promise<string> {
   return getEbayAppToken();
 }
 
-async function ebayFetch(path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API}${path}`, {
+async function ebayFetchBase(base: string, path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -117,6 +118,12 @@ async function ebayFetch(path: string, token: string, init: RequestInit = {}): P
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`eBay API returned HTTP ${res.status}.`);
   return data as Record<string, unknown>;
+}
+
+// Most Sell/Browse/Taxonomy calls live on the main api.* host; the Finances and
+// Identity APIs live on the apiz gateway (see ebayApizBase / order+finance sync).
+function ebayFetch(path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+  return ebayFetchBase(API, path, token, init);
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification
@@ -140,12 +147,6 @@ async function requireAdmin(req: Request) {
   if (!auth.user) return { error: unauthorizedResponse(corsHeaders), user: null };
   if (!auth.isAdmin) return { error: reply({ status: "error", error_code: "NOT_AUTHORIZED", message: "Admin access required." }, 403), user: null };
   return { error: null, user: auth.user };
-}
-
-function moneyCents(money: unknown): number | null {
-  if (!money || typeof money !== "object") return null;
-  const value = Number((money as Record<string, unknown>).value);
-  return Number.isFinite(value) ? Math.round(value * 100) : null;
 }
 
 function confirmation(body: Record<string, unknown>, phrase: string): Response | null {
@@ -651,33 +652,44 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
   }
 
   if (operation === "order_sync") {
+    // Fetch orders, resolve which line-item SKUs are ours (one batched query),
+    // and shape everything with the pure core. Nothing is written yet.
     const data = await ebayFetch("/sell/fulfillment/v1/order?limit=200", accessToken);
-    let synced = 0;
-    for (const raw of (Array.isArray(data.orders) ? data.orders : []) as Array<Record<string, any>>) {
-      const orderId = String(raw.orderId ?? ""); if (!orderId) continue;
-      const { data: order } = await admin.schema("private").from("ebay_orders").upsert({
-        ebay_account_id: accountId, order_id: orderId, order_status: String(raw.orderFulfillmentStatus ?? raw.orderPaymentStatus ?? "UNKNOWN"),
-        buyer_data: { buyer: raw.buyer ?? null, fulfillmentStartInstructions: raw.fulfillmentStartInstructions ?? null },
-        pricing_summary: raw.pricingSummary ?? {}, raw_response: raw, updated_at: new Date().toISOString(),
-      }, { onConflict: "ebay_account_id,order_id" }).select("id").single();
-      for (const line of (Array.isArray(raw.lineItems) ? raw.lineItems : []) as Array<Record<string, any>>) {
-        const sku = String(line.sku ?? "");
-        const { data: mapping } = await admin.from("ebay_listing_mappings").select("slab_id").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
-        const lineId = String(line.lineItemId ?? "");
-        await admin.schema("private").from("ebay_order_line_items").upsert({
-          order_id: order.id, line_item_id: lineId, slab_id: mapping?.slab_id ?? null, sku,
-          listing_id: line.legacyItemId ?? null, quantity: Number(line.quantity ?? 1), line_total: line.lineItemCost ?? null, raw_response: line,
-        }, { onConflict: "order_id,line_item_id" });
-        const soldCents = moneyCents(line.lineItemCost);
-        if (mapping?.slab_id && soldCents !== null) {
-          await admin.from("sold_comps").upsert({ slab_id: mapping.slab_id, source: "EBAY_SELLER_ORDER", external_sale_id: `${orderId}:${lineId}`, sold_price_cents: soldCents, currency: String(line.lineItemCost?.currency ?? "USD"), sold_at: raw.creationDate ?? new Date().toISOString(), raw_response: { order_id: orderId, line_item_id: lineId, sku } }, { onConflict: "source,external_sale_id" });
-          await admin.from("slabs").update({ inventory_status: "Sold", sold_at: raw.creationDate ?? new Date().toISOString(), sold_price_cents: soldCents }).eq("id", mapping.slab_id);
-        }
+    const skus = skusFromOrders(data.orders);
+    const mappingBySku = new Map<string, string>();
+    if (skus.length) {
+      const { data: rows } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
+      for (const m of (rows ?? []) as Array<{ sku: string; slab_id: string | null }>) {
+        if (m.sku && m.slab_id) mappingBySku.set(m.sku, m.slab_id);
       }
-      synced += 1;
     }
-    await admin.from("ebay_accounts").update({ last_synced_at: new Date().toISOString() }).eq("id", accountId);
-    return reply({ status: "success", orders_synced: synced, source_label: "Seller’s Completed Sale" });
+    const { shaped, proposed_sales, order_count, line_item_count } = shapeEbayOrders(data.orders, mappingBySku);
+
+    // DEFAULT: non-mutating audit. Report exactly what an APPLY_SALES run WOULD
+    // persist (orders, line items) and WOULD mark sold (mapped + priced lines),
+    // without touching the private order ledger, sold_comps, or slab inventory.
+    if (body.confirmation !== "APPLY_SALES") {
+      return reply({
+        status: "audit",
+        mode: "audit",
+        order_count,
+        line_item_count,
+        proposed_sales,
+        proposed_sale_count: proposed_sales.length,
+        message: proposed_sales.length
+          ? `${order_count} order(s) fetched. Re-run with confirmation "APPLY_SALES" to record them and mark ${proposed_sales.length} mapped slab(s) sold.`
+          : `${order_count} order(s) fetched; none map to inventory, so nothing would be marked sold.`,
+        source_label: "Seller’s Completed Sale",
+      });
+    }
+
+    // APPLY_SALES: one transactional RPC records the orders + line items and, for
+    // mapped+priced lines, writes sold_comps and moves the slab to 'sold'.
+    const { data: result, error } = await admin.rpc("ebay_orders_apply", { p_account_id: accountId, p_orders: shaped });
+    if (error) return reply({ status: "error", error_code: "orders_apply_failed", message: error.message }, 500);
+    const applied = (result && typeof result === "object" ? result : {}) as { orders?: number; line_items?: number; sales_applied?: number };
+    await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "orders", p_count: applied.orders ?? order_count });
+    return reply({ status: "success", mode: "applied", orders_synced: applied.orders ?? 0, line_items_synced: applied.line_items ?? 0, sales_applied: applied.sales_applied ?? 0, source_label: "Seller’s Completed Sale" });
   }
 
   if (operation === "fulfillment") {
@@ -695,18 +707,15 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
   }
 
   if (operation === "finances_sync") {
-    const data = await ebayFetch("/sell/finances/v1/transaction?limit=200", accessToken);
-    let synced = 0;
-    for (const raw of (Array.isArray(data.transactions) ? data.transactions : []) as Array<Record<string, any>>) {
-      const transactionId = String(raw.transactionId ?? ""); if (!transactionId) continue;
-      await admin.schema("private").from("ebay_financial_transactions").upsert({
-        ebay_account_id: accountId, transaction_id: transactionId, order_id: raw.orderId ?? null,
-        transaction_type: String(raw.transactionType ?? "UNKNOWN"), transaction_status: String(raw.transactionStatus ?? "UNKNOWN"),
-        amount: raw.amount ?? null, fee_basis_amount: raw.totalFeeBasisAmount ?? null, raw_response: raw,
-        occurred_at: raw.transactionDate ?? raw.bookingEntry ?? null,
-      }, { onConflict: "ebay_account_id,transaction_id" });
-      synced += 1;
-    }
+    // The Finances API is on the apiz gateway, NOT api.* (which returns 404).
+    const data = await ebayFetchBase(ebayApizBase(MODE), "/sell/finances/v1/transaction?limit=200", accessToken);
+    const shaped = shapeEbayFinanceTransactions(data.transactions);
+    // Recording fees/payouts is non-destructive, so it applies directly through a
+    // service_role-only idempotent RPC (private schema is not on the Data API).
+    const { data: result, error } = await admin.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: shaped });
+    if (error) return reply({ status: "error", error_code: "finances_apply_failed", message: error.message }, 500);
+    const synced = ((result && typeof result === "object" ? result : {}) as { transactions?: number }).transactions ?? 0;
+    await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "finances", p_count: synced });
     return reply({ status: "success", financial_transactions_synced: synced, note: "Actual fees and payouts are stored privately; unknown enum and CustomCode values are preserved in raw_response." });
   }
 

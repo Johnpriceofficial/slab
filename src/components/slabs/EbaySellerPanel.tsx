@@ -24,6 +24,9 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   // Exactly one operation runs at a time; drives distinct progress labels.
   const [activeOperation, setActiveOperation] = useState<null | "account_sync" | "order_sync" | "finances_sync" | "prepare_listing" | "publish_listing">(null);
   const [syncSummary, setSyncSummary] = useState<Record<string, { status: string; count: number | null; error_code: string | null }> | null>(null);
+  // order-sync's default response is a non-mutating audit; this holds that preview
+  // until the operator either applies the sales or dismisses it.
+  const [orderAudit, setOrderAudit] = useState<null | { order_count: number; message: string; proposed_sales: Array<{ order_id: string; line_item_id: string; slab_id: string; sku: string; sold_price_cents: number; currency: string }> }>(null);
   const anyBusy = activeOperation !== null;
   // Persistent inline result of the last OAuth callback (shown until dismissed).
   const [callbackResult, setCallbackResult] = useState<string | null>(null);
@@ -74,11 +77,33 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setActiveOperation(op);
     const result = await ebaySellerOperation(name, { account_id: connected.id });
     setActiveOperation(null);
+    // order-sync default: a non-mutating audit. Nothing was written; show the
+    // preview and let the operator explicitly apply the sales.
+    if (result.status === "audit") {
+      setOrderAudit({ order_count: result.order_count ?? 0, message: result.message ?? "", proposed_sales: result.proposed_sales ?? [] });
+      toast.info(result.message ?? "eBay orders fetched (audit — nothing changed).");
+      refetchCursors();
+      return;
+    }
     if (result.status === "success") toast.success("eBay synchronization completed.");
     else if (result.status === "partial") toast.warning("eBay sync finished, but some resources were unavailable — see details below.");
     else toast.error(result.message ?? result.error_code ?? "eBay synchronization failed.");
     // Honest per-resource summary for success/partial; cleared on hard error.
     setSyncSummary(result.status === "success" || result.status === "partial" ? ((result.resources ?? null) as typeof syncSummary) : null);
+    refetch(); refetchCursors();
+  };
+  // The consequential path: record orders privately AND mark mapped slabs sold.
+  const applyOrderSales = async () => {
+    if (!connected || anyBusy || !orderAudit) return;
+    const n = orderAudit.proposed_sales.length;
+    if (!window.confirm(`Record ${orderAudit.order_count} eBay order(s) and mark ${n} mapped slab(s) SOLD? This writes sold comps and updates inventory.`)) return;
+    setActiveOperation("order_sync");
+    const result = await ebaySellerOperation("ebay-order-sync", { account_id: connected.id, confirmation: "APPLY_SALES" });
+    setActiveOperation(null);
+    if (result.status === "success") {
+      toast.success(`Recorded ${result.orders_synced ?? 0} order(s); marked ${result.sales_applied ?? 0} slab(s) sold.`);
+      setOrderAudit(null);
+    } else toast.error(result.message ?? result.error_code ?? "Applying eBay sales failed.");
     refetch(); refetchCursors();
   };
   const listingPayload = {
@@ -143,6 +168,18 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         <div className="rounded-md border p-3 text-xs">
           <div className="mb-1 flex items-center justify-between"><span className="font-medium">Last account-discovery result</span><button type="button" aria-label="Dismiss sync summary" className="opacity-70 hover:opacity-100" onClick={() => setSyncSummary(null)}>×</button></div>
           <ul className="grid gap-0.5 sm:grid-cols-2">{Object.entries(syncSummary).map(([res, r]) => <li key={res}><span className={r.status === "success" ? "text-green-700" : r.status === "error" ? "text-destructive" : "text-amber-700"}>{r.status}</span> — {res.replace(/_/g, " ")}{r.count != null ? ` (${r.count})` : ""}{r.error_code ? ` · ${r.error_code}` : ""}</li>)}</ul>
+        </div>
+      )}
+      {orderAudit && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-50 p-3 text-xs text-amber-900">
+          <div className="mb-1 flex items-center justify-between"><span className="font-medium">Order sync — audit (nothing written yet)</span><button type="button" aria-label="Dismiss order audit" className="opacity-70 hover:opacity-100" onClick={() => setOrderAudit(null)}>×</button></div>
+          <p className="mb-2">{orderAudit.message}</p>
+          {orderAudit.proposed_sales.length > 0 && (
+            <ul className="mb-2 grid gap-0.5">{orderAudit.proposed_sales.map((s) => <li key={`${s.order_id}:${s.line_item_id}`}>SKU {s.sku} → mark slab sold @ {s.currency} {(s.sold_price_cents / 100).toFixed(2)} <span className="text-amber-700">(order {s.order_id})</span></li>)}</ul>
+          )}
+          {orderAudit.proposed_sales.length > 0 && (
+            <Button size="sm" variant="destructive" disabled={anyBusy} onClick={applyOrderSales}>{activeOperation === "order_sync" ? "Applying…" : `Apply ${orderAudit.proposed_sales.length} sale(s)`}</Button>
+          )}
         </div>
       )}
       <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2">
