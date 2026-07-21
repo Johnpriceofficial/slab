@@ -55,6 +55,25 @@ export function isManualProvenance(provenance: ValuationProvenance): boolean {
 }
 
 /**
+ * A short source marker for a DISPLAYED guide value, so a figure that is NOT a
+ * direct exact-tier PriceCharting price is never shown as if it were one. The
+ * stored value column (`pricecharting_value_cents`) is source-neutral — an
+ * operator-entered guide and a real PriceCharting tier price share it — and
+ * `valuation_provenance` is the authoritative source signal. Returns `null` for a
+ * genuine exact-tier value (and for absent/`tier_unavailable`), where no qualifier
+ * is needed; otherwise the qualifier a UI should show next to the number.
+ */
+export function guideValueSourceMarker(
+  provenance: ValuationProvenance | null | undefined,
+): "manual" | "compatible" | "estimate" | null {
+  if (!provenance) return null;
+  if (isManualProvenance(provenance)) return "manual";
+  if (provenance === "pricecharting_compatible_tier") return "compatible";
+  if (provenance === "pricecharting_estimate") return "estimate";
+  return null; // pricecharting_exact_tier, tier_unavailable
+}
+
+/**
  * On a MATERIAL identity change: auto-derived (source/formula) valuation is cleared
  * because it may no longer describe the card; a MANUAL valuation is preserved but
  * flagged as possibly stale. Returns what the caller should do.

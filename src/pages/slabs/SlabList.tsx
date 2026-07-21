@@ -14,6 +14,7 @@ import { Plus, Download, ArrowUpDown, Loader2 } from "lucide-react";
 import { INVENTORY_TABLE_COLUMNS, GRADERS, LANGUAGES, VERIFICATION_STATUSES, DUPLICATE_STATUSES } from "@/lib/slabs/constants";
 import { fetchSlabs, fetchAllSlabs, fetchAllComps, type SlabQuery } from "@/lib/slabs/data";
 import { formatCents, dollarsToCents } from "@/lib/slabs/format";
+import { guideValueSourceMarker } from "@/lib/slabs/valuation-provenance";
 import type { Slab } from "@/lib/slabs/types";
 
 const PAGE_SIZE = 50;
@@ -21,7 +22,23 @@ const ANY = "__any__";
 
 function renderCell(slab: Slab, col: (typeof INVENTORY_TABLE_COLUMNS)[number]): React.ReactNode {
   const raw = slab[col.key];
-  if (col.type === "currency") return formatCents(raw as number | null);
+  if (col.type === "currency") {
+    const formatted = formatCents(raw as number | null);
+    // The guide-value column is source-neutral: it may hold an operator-entered
+    // guide or a compatible/estimated tier, not just a direct PriceCharting price.
+    // Mark those so a non-exact figure is never shown as a bare PriceCharting value.
+    if (col.key === "pricecharting_value_cents" && raw != null) {
+      const marker = guideValueSourceMarker(slab.valuation_provenance);
+      if (marker) {
+        return (
+          <span>
+            {formatted} <span className="text-xs text-muted-foreground">({marker})</span>
+          </span>
+        );
+      }
+    }
+    return formatted;
+  }
   if (col.type === "date") return raw ? String(raw).slice(0, 10) : "—";
   if (raw === null || raw === undefined || raw === "") return "—";
   return String(raw);
