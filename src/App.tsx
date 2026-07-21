@@ -4,6 +4,7 @@ import { BrowserRouter, Link, Navigate, Outlet, Route, Routes } from "react-rout
 import { Toaster } from "sonner";
 import { Camera, Images, LayoutDashboard, LogOut, PackageSearch } from "lucide-react";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { AuthProvider, useAuth } from "@/auth/AuthProvider";
 import { ProtectedAdminRoute } from "@/components/auth/ProtectedAdminRoute";
@@ -74,41 +75,43 @@ function ProtectedUserLayout() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <Toaster richColors position="top-right" />
-          <Suspense fallback={<div className="container py-12"><LoadingState message="Loading…" /></div>}>
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/signup" element={<Signup />} />
-              <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route path="/reset-password" element={<ResetPassword />} />
-              <Route path="/" element={<Navigate to="/scan-card" replace />} />
-              {/* Verified customers own a private slab inventory: they scan, complete
-                  intake, and manage their own slabs. Row-level security — not this
-                  route table — is what confines them to their own rows. */}
-              {/* Verified customers own two private inventories: raw cards (R codes,
-                  /cards) and graded slabs (S codes, /slabs). Row-level security —
-                  not this route table — confines each customer to their own rows. */}
-              <Route element={<ProtectedUserLayout />}>
-                <Route path="/scan-card" element={<ScanCard />} />
-                <Route path="/cards" element={<CardList />} />
-                <Route path="/cards/:id" element={<CardDetail />} />
-                <Route path="/slabs" element={<SlabList />} />
-                <Route path="/slabs/new" element={<NewSlab />} />
-                <Route path="/slabs/:id" element={<SlabDetail />} />
-              </Route>
-              {/* Administrative tools stay admin-only: dashboard, marketplace, eBay,
-                  exports, bulk actions, and system settings. */}
-              <Route element={<ProtectedAdminLayout />}>
-                <Route path="/dashboard" element={<SlabDashboard />} />
-              </Route>
-              <Route path="*" element={<Navigate to="/scan-card" replace />} />
-            </Routes>
-          </Suspense>
-        </BrowserRouter>
-      </AuthProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <Toaster richColors position="top-right" />
+            <Suspense fallback={<div className="container py-12"><LoadingState message="Loading…" /></div>}>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/signup" element={<Signup />} />
+                <Route path="/forgot-password" element={<ForgotPassword />} />
+                <Route path="/reset-password" element={<ResetPassword />} />
+                <Route path="/" element={<Navigate to="/scan-card" replace />} />
+                {/* Verified customers own a private slab inventory: they scan, complete
+                    intake, and manage their own slabs. Row-level security — not this
+                    route table — is what confines them to their own rows. */}
+                {/* Verified customers own two private inventories: raw cards (R codes,
+                    /cards) and graded slabs (S codes, /slabs). Row-level security —
+                    not this route table — confines each customer to their own rows. */}
+                <Route element={<ProtectedUserLayout />}>
+                  <Route path="/scan-card" element={<ScanCard />} />
+                  <Route path="/cards" element={<CardList />} />
+                  <Route path="/cards/:id" element={<CardDetail />} />
+                  <Route path="/slabs" element={<SlabList />} />
+                  <Route path="/slabs/new" element={<NewSlab />} />
+                  <Route path="/slabs/:id" element={<SlabDetail />} />
+                </Route>
+                {/* Administrative tools stay admin-only: dashboard, marketplace, eBay,
+                    exports, bulk actions, and system settings. */}
+                <Route element={<ProtectedAdminLayout />}>
+                  <Route path="/dashboard" element={<SlabDashboard />} />
+                </Route>
+                <Route path="*" element={<Navigate to="/scan-card" replace />} />
+              </Routes>
+            </Suspense>
+          </BrowserRouter>
+        </AuthProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
