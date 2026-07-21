@@ -1,21 +1,12 @@
 /**
  * Normalization from raw PriceCharting product JSON to the typed `Product`
- * model. Missing prices stay `null` — never coerced to 0.
+ * model. Missing prices stay `null`; malformed records are rejected safely.
  */
 
 import type { Pennies } from "./money";
 import type { Product, RawProduct } from "./types";
+import { isRecord, ProviderSchemaError } from "@/lib/providers/response-schema";
 
-/**
- * All price-bearing fields we recognize (integer pennies).
- *
- * PriceCharting keeps adding graded "condition-NN" columns beyond what its docs
- * list. Anything NOT in this allowlist is silently dropped by `normalizeProduct`,
- * which is exactly why CGC 10 Pristine (condition-19-price) never reached the
- * valuation before — the list stopped at condition-18. The documented+observed
- * numbering is: 17 = CGC 10, 18 = SGC 10, 19 = CGC 10 Pristine, 20 = BGS 10 Black
- * Label, 21 = TAG 10, 22 = ACE 10. See grade-mapping.ts for the field→tier map.
- */
 export const KNOWN_PRICE_FIELDS = [
   "loose-price",
   "cib-price",
@@ -38,63 +29,56 @@ export const KNOWN_PRICE_FIELDS = [
   "retail-new-sell",
 ] as const;
 
-function toPennies(v: unknown): Pennies | null {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return null;
-  // Prices are integers; guard against unexpected fractional/string junk.
-  return Math.round(n);
+function toPennies(value: unknown): Pennies | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
 }
 
-function toStr(v: unknown): string | null {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  return s === "" ? null : s;
+function toStringValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text === "" ? null : text;
 }
 
-/** Matches any graded condition column, including future ones not yet mapped. */
 export const CONDITION_FIELD_RE = /^condition-\d+-price$/;
 
-/** Convert a raw API product into the normalized `Product`. */
-export function normalizeProduct(raw: RawProduct): Product {
+export function normalizeProduct(value: RawProduct | unknown): Product {
+  if (!isRecord(value)) throw new ProviderSchemaError("PriceCharting", "$product", "expected an object");
+  const raw = value as RawProduct & Record<string, unknown>;
   const raw_prices: Record<string, Pennies | null> = {};
+
   for (const field of KNOWN_PRICE_FIELDS) {
     if (field in raw) raw_prices[field] = toPennies(raw[field]);
   }
-  // Preserve ANY graded condition-NN-price column, including future ones not yet
-  // in KNOWN_PRICE_FIELDS, so a newly-added tier is never silently dropped again
-  // (as condition-19 = CGC 10 Pristine once was). Unknown condition IDs are kept
-  // as raw values only — the authoritative grade map (grade-mapping.ts) maps just
-  // the known IDs (17–22) to tiers, so an unmapped condition field is preserved
-  // but NEVER treated as a known/exact tier.
   for (const key of Object.keys(raw)) {
-    if (CONDITION_FIELD_RE.test(key) && !(key in raw_prices)) {
-      raw_prices[key] = toPennies(raw[key]);
-    }
+    if (CONDITION_FIELD_RE.test(key) && !(key in raw_prices)) raw_prices[key] = toPennies(raw[key]);
   }
 
-  const id = toStr(raw.id);
   return {
-    pricecharting_id: id ?? "",
-    name: toStr(raw["product-name"]) ?? "",
-    console_or_category: toStr(raw["console-name"]),
-    release_date: toStr(raw["release-date"]),
-    upc: toStr(raw.upc),
-    asin: toStr(raw.asin),
-    epid: toStr(raw.epid),
-    genre: toStr(raw.genre),
+    pricecharting_id: toStringValue(raw.id) ?? "",
+    name: toStringValue(raw["product-name"]) ?? "",
+    console_or_category: toStringValue(raw["console-name"]),
+    release_date: toStringValue(raw["release-date"]),
+    upc: toStringValue(raw.upc),
+    asin: toStringValue(raw.asin),
+    epid: toStringValue(raw.epid),
+    genre: toStringValue(raw.genre),
     raw_prices,
   };
 }
 
-/**
- * PriceCharting's /api/products returns a `products` array. Normalize each.
- * Tolerates either an array payload or a wrapper object.
- */
 export function normalizeProductList(payload: Record<string, unknown>): Product[] {
-  const list =
-    (payload.products as RawProduct[] | undefined) ??
-    (Array.isArray(payload) ? (payload as unknown as RawProduct[]) : undefined) ??
-    [];
-  return list.map((r) => normalizeProduct(r)).filter((p) => p.pricecharting_id !== "");
+  const rawList = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload.products)
+      ? payload.products
+      : payload.products === null || payload.products === undefined
+        ? []
+        : (() => { throw new ProviderSchemaError("PriceCharting", "$.products", "expected an array"); })();
+
+  return rawList
+    .filter(isRecord)
+    .map((raw) => normalizeProduct(raw))
+    .filter((product) => product.pricecharting_id !== "");
 }

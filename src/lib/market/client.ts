@@ -7,6 +7,7 @@
 
 import { supabase } from "@/integrations/supabase/client";
 import type { MarketIntelligence } from "@/server/market-intelligence/engine";
+import { normalizeMarketIntelligenceResponse } from "./response-schema";
 
 export type { MarketIntelligence };
 
@@ -15,7 +16,14 @@ export type MarketIntelligenceRequest = { slab_id: string } | { card_id: string 
 export async function fetchMarketIntelligence(request: MarketIntelligenceRequest): Promise<MarketIntelligence> {
   const { data, error } = await supabase.functions.invoke("market-intelligence", { body: request });
   if (error) throw new Error(error.message);
-  const body = data as MarketIntelligence | { error?: string };
-  if (body && "error" in body && body.error) throw new Error(body.error);
-  return body as MarketIntelligence;
+
+  if (data && typeof data === "object" && !Array.isArray(data) && "error" in data) {
+    const message = (data as { error?: unknown }).error;
+    if (typeof message === "string" && message) throw new Error(message);
+  }
+
+  // Runtime validation is deliberately tolerant: malformed fields are dropped or
+  // defaulted to explicit empty/degraded states. The UI never receives unchecked
+  // network data and therefore cannot crash on a missing array or nested object.
+  return normalizeMarketIntelligenceResponse(data);
 }
