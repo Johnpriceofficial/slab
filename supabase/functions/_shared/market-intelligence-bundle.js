@@ -335,58 +335,57 @@ function marketCacheKey(d) {
 
 // src/lib/market/adapters/pricecharting.ts
 function mapPriceCharting(response, retrievedAt) {
-  return (response.tiers ?? []).filter((t) => typeof t.price_cents === "number" && t.price_cents > 0).map((t) => ({
-    source: "pricecharting",
-    title: response.product_name,
-    price_cents: t.price_cents,
-    currency: "USD",
-    url: response.url ?? null,
-    sold: true,
-    // PriceCharting values are realized-sale aggregates
-    sold_at: retrievedAt,
-    observed_at: retrievedAt,
-    grader: t.grader ?? null,
-    grade: t.grade ?? null,
-    grade_label: t.grade_label ?? null
-  }));
+  return response.tiers.flatMap((tier) => {
+    const value = tier.price_cents === null || tier.price_cents === void 0 ? null : Number(tier.price_cents);
+    if (!Number.isFinite(value) || value <= 0) return [];
+    return [{
+      source: "pricecharting",
+      title: response.product_name,
+      price_cents: Math.round(value),
+      currency: "USD",
+      url: response.url ?? null,
+      sold: true,
+      sold_at: retrievedAt,
+      observed_at: retrievedAt,
+      grader: tier.grader ?? null,
+      grade: tier.grade ?? null,
+      grade_label: tier.grade_label ?? null
+    }];
+  });
 }
 
 // src/lib/market/adapters/ebay-active.ts
-function toCents(value) {
-  if (value === null || value === void 0) return null;
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
-}
 function mapEbayActive(response, retrievedAt) {
-  return (response.itemSummaries ?? []).map((item) => ({
-    source: "ebay_active",
-    title: item.title ?? null,
-    price_cents: toCents(item.price?.value),
-    currency: (item.price?.currency ?? "USD").toUpperCase(),
-    url: item.itemWebUrl ?? null,
-    sold: false,
-    sold_at: null,
-    observed_at: retrievedAt
-  })).filter((c) => c.price_cents !== null);
+  return response.itemSummaries.flatMap((item) => {
+    const raw = item.price?.value;
+    const value = raw === null || raw === void 0 ? null : Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return [];
+    return [{
+      source: "ebay_active",
+      title: item.title ?? null,
+      price_cents: Math.round(value * 100),
+      currency: (item.price?.currency ?? "USD").toUpperCase(),
+      url: item.itemWebUrl ?? null,
+      sold: false,
+      sold_at: null,
+      observed_at: retrievedAt
+    }];
+  });
 }
 
 // src/lib/market/adapters/ebay-sold.ts
-function toCents2(value) {
-  if (value === null || value === void 0) return null;
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
-}
 function mapEbaySold(response, retrievedAt) {
-  const out = [];
-  for (const order of response.orders ?? []) {
+  const output = [];
+  for (const order of response.orders) {
     if (order.orderFulfillmentStatus && !/fulfilled|paid|complete/i.test(order.orderFulfillmentStatus)) continue;
     for (const item of order.lineItems ?? []) {
-      const cents = toCents2(item.lineItemCost?.value);
-      if (cents === null) continue;
-      out.push({
+      const raw = item.lineItemCost?.value;
+      const value = raw === null || raw === void 0 ? null : Number(raw);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      output.push({
         source: "ebay_sold",
         title: item.title ?? null,
-        price_cents: cents,
+        price_cents: Math.round(value * 100),
         currency: (item.lineItemCost?.currency ?? "USD").toUpperCase(),
         url: null,
         sold: true,
@@ -395,7 +394,7 @@ function mapEbaySold(response, retrievedAt) {
       });
     }
   }
-  return out;
+  return output;
 }
 
 // src/lib/market/adapters/manual.ts
