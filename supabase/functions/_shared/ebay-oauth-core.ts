@@ -18,6 +18,12 @@ export const EBAY_OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.finances",
 ] as const;
 
+// eBay's Commerce Identity API (getUser) and Finances API are served by the
+// `apiz` gateway, NOT the main `api` host. Calling api.* for getUser returns 404.
+export function ebayApizBase(mode: "sandbox" | "production"): string {
+  return mode === "sandbox" ? "https://apiz.sandbox.ebay.com" : "https://apiz.ebay.com";
+}
+
 export function buildAuthorizeQuery(args: {
   clientId: string;
   ruName: string;

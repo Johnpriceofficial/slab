@@ -534,7 +534,10 @@ export async function fetchIntegrationHealth(): Promise<{ failed_sync_jobs: numb
 }
 
 export async function startEbayOAuth(): Promise<{ status: string; authorization_url?: string; message?: string }> {
-  const { data, error } = await sb.functions.invoke("ebay-oauth-start", { body: { redirect_after: window.location.href } });
+  // Send a RELATIVE path: the callback's open-redirect guard only honors a
+  // same-app relative path, so an absolute href would be dropped and the user
+  // would land on the generic /slabs list (without the eBay panel/banner).
+  const { data, error } = await sb.functions.invoke("ebay-oauth-start", { body: { redirect_after: window.location.pathname + window.location.search } });
   if (error) return { status: "unavailable", message: "eBay OAuth is not configured for this deployment." };
   return data as { status: string; authorization_url?: string; message?: string };
 }
