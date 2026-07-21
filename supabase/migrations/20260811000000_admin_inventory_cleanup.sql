@@ -111,8 +111,13 @@ begin
   perform set_config('app.inventory_maintenance', 'on', true);
   select coalesce(max(inventory_sequence), 0) + 1 into v_offset from public.slabs;
 
+  -- Shift every existing sequence up first so the renumber below can assign
+  -- 1..N without transiently colliding with a not-yet-renumbered row. The
+  -- WHERE clause is required: this environment rejects WHERE-less UPDATEs, and
+  -- every slab carries a non-null inventory_sequence, so this still covers all.
   update public.slabs
-     set inventory_sequence = inventory_sequence + v_offset;
+     set inventory_sequence = inventory_sequence + v_offset
+   where inventory_sequence is not null;
 
   with ordered as (
     select id, row_number() over (
@@ -168,13 +173,13 @@ begin
   end if;
 
   insert into private.slab_storage_cleanup_queue (storage_path, slab_id)
-  select path, slab_id
+  select queued.path, queued.slab_id
   from (
     select s.id as slab_id, s.front_image_path as path from public.slabs s where s.id = any(p_ids)
     union all
     select s.id as slab_id, s.back_image_path as path from public.slabs s where s.id = any(p_ids)
   ) queued
-  where path is not null and btrim(path) <> ''
+  where queued.path is not null and btrim(queued.path) <> ''
   on conflict (storage_path) do update
     set slab_id = excluded.slab_id,
         updated_at = now();
