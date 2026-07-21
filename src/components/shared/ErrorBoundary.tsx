@@ -27,6 +27,15 @@ interface ErrorBoundaryState {
 
 interface ErrorBoundaryProps {
   children: ReactNode;
+  /**
+   * "panel" renders a COMPACT inline fallback with an in-place retry (no full
+   * page reload), so one failing section — e.g. a payment-adjacent Marketplace
+   * or eBay panel — doesn't blank an entire page that still has other usable
+   * panels. Defaults to "page" (the full-page boundary).
+   */
+  variant?: "page" | "panel";
+  /** Names the failing section in the panel fallback (e.g. "eBay listing"). */
+  label?: string;
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -59,12 +68,34 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     window.location.reload();
   };
 
+  // Panel mode: retry re-renders the failing subtree in place. If the error is
+  // deterministic it simply falls back again — no worse than before, and it
+  // recovers a transient failure without discarding the rest of the page.
+  handleRetry = (): void => {
+    this.setState({ hasError: false, error: null });
+  };
+
   render(): ReactNode {
     if (this.state.hasError) {
       if (this.state.autoReloading) {
         // Reload is already in flight; avoid flashing an error the user can't
         // act on in the brief window before the page actually reloads.
         return null;
+      }
+      if (this.props.variant === "panel") {
+        return (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm">
+            <p className="font-medium">{this.props.label ?? "This section"} couldn’t load.</p>
+            <p className="mt-1 text-muted-foreground">The rest of the page is unaffected — you can try again.</p>
+            <button
+              type="button"
+              onClick={this.handleRetry}
+              className="mt-2 rounded-md border px-3 py-1 text-sm font-medium hover:bg-muted"
+            >
+              Try again
+            </button>
+          </div>
+        );
       }
       return (
         <div className="container flex min-h-[60vh] flex-col items-center justify-center gap-4 py-12 text-center">

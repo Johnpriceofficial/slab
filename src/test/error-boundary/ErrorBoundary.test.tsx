@@ -84,4 +84,53 @@ describe("ErrorBoundary", () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_GUARD_KEY)).toBeNull();
     expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
+
+  describe("panel variant (narrower boundary)", () => {
+    it("renders a COMPACT labeled fallback with in-place retry, not the full-page reload UI", () => {
+      render(
+        <ErrorBoundary variant="panel" label="eBay listing">
+          <Bomb message="panel blew up" />
+        </ErrorBoundary>,
+      );
+      expect(screen.getByText(/eBay listing.*couldn.t load/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+      // NOT the full-page fallback and no page reload.
+      expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /reload page/i })).not.toBeInTheDocument();
+      expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it("isolates a failing panel so a sibling panel stays rendered", () => {
+      render(
+        <div>
+          <ErrorBoundary variant="panel" label="Marketplace listing">
+            <Bomb message="one panel down" />
+          </ErrorBoundary>
+          <ErrorBoundary variant="panel" label="eBay listing">
+            <Safe />
+          </ErrorBoundary>
+        </div>,
+      );
+      // The failing panel shows its fallback; the sibling still renders.
+      expect(screen.getByText(/Marketplace listing.*couldn.t load/i)).toBeInTheDocument();
+      expect(screen.getByText("All good")).toBeInTheDocument();
+    });
+
+    it("in-place retry re-renders the subtree and recovers a transient failure", () => {
+      let shouldThrow = true;
+      function Flaky() {
+        if (shouldThrow) throw new Error("transient");
+        return <div>recovered</div>;
+      }
+      render(
+        <ErrorBoundary variant="panel" label="Marketplace listing">
+          <Flaky />
+        </ErrorBoundary>,
+      );
+      expect(screen.getByText(/Marketplace listing.*couldn.t load/i)).toBeInTheDocument();
+      shouldThrow = false; // the underlying condition clears
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      expect(screen.getByText("recovered")).toBeInTheDocument();
+    });
+  });
 });

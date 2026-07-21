@@ -14,6 +14,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
 import { verifiedBlockers } from "@/lib/slabs/save-slab";
 import { useAuth } from "@/auth/AuthProvider";
@@ -256,9 +257,17 @@ export default function SlabDetail() {
       {/* Marketplace + eBay selling are administrative tools, not part of a
           customer's private inventory. RLS keeps the underlying tables
           admin-only; this hides the UI that would only ever error for them. */}
-      {isAdmin && <PriceChartingMarketplacePanel slab={slab} />}
+      {isAdmin && (
+        <ErrorBoundary variant="panel" label="Marketplace listing">
+          <PriceChartingMarketplacePanel slab={slab} />
+        </ErrorBoundary>
+      )}
 
-      {isAdmin && <EbaySellerPanel slab={slab} />}
+      {isAdmin && (
+        <ErrorBoundary variant="panel" label="eBay listing">
+          <EbaySellerPanel slab={slab} />
+        </ErrorBoundary>
+      )}
 
       {/* Notes */}
       <Card className="mt-6">
