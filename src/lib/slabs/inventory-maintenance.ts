@@ -13,11 +13,87 @@ type AnyClient = {
 
 const sb = supabase as unknown as AnyClient;
 const BUCKET = "slab-images";
+const STORAGE_DELETE_BATCH_SIZE = 1000;
 
 export interface PurgeSlabResult {
   slab_id: string;
   front_image_path: string | null;
   back_image_path: string | null;
+}
+
+export interface StorageCleanupResult {
+  removed: number;
+  pending: number;
+  errors: string[];
+}
+
+function uniquePaths(paths: Array<string | null | undefined>): string[] {
+  return [...new Set(paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0))];
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const output: T[][] = [];
+  for (let index = 0; index < items.length; index += size) output.push(items.slice(index, index + size));
+  return output;
+}
+
+async function acknowledgeStoragePaths(paths: string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const { error } = await sb.rpc("acknowledge_slab_storage_cleanup", { p_paths: paths });
+  if (error) throw new Error(`Storage cleanup acknowledgement failed: ${error.message}`);
+}
+
+async function recordStorageFailure(paths: string[], message: string): Promise<void> {
+  if (paths.length === 0) return;
+  const { error } = await sb.rpc("record_slab_storage_cleanup_failure", {
+    p_paths: paths,
+    p_error: message,
+  });
+  if (error) throw new Error(`Storage cleanup failure could not be recorded: ${error.message}`);
+}
+
+async function removeQueuedStoragePaths(paths: string[]): Promise<StorageCleanupResult> {
+  const targets = uniquePaths(paths);
+  const errors: string[] = [];
+  let removed = 0;
+  let pending = 0;
+
+  for (const batch of chunks(targets, STORAGE_DELETE_BATCH_SIZE)) {
+    const { error } = await sb.storage.from(BUCKET).remove(batch);
+    if (error) {
+      pending += batch.length;
+      errors.push(error.message);
+      try {
+        await recordStorageFailure(batch, error.message);
+      } catch (recordError) {
+        errors.push(recordError instanceof Error ? recordError.message : "Storage cleanup failure could not be recorded.");
+      }
+      continue;
+    }
+
+    try {
+      await acknowledgeStoragePaths(batch);
+      removed += batch.length;
+    } catch (ackError) {
+      // The objects are already gone, but the durable queue entry remains. A later
+      // retry safely removes the now-missing paths and acknowledges them.
+      pending += batch.length;
+      errors.push(ackError instanceof Error ? ackError.message : "Storage cleanup acknowledgement failed.");
+    }
+  }
+
+  return { removed, pending, errors };
+}
+
+export async function retryPendingSlabStorageCleanup(): Promise<StorageCleanupResult> {
+  const { data, error } = await sb.rpc("list_pending_slab_storage_cleanup");
+  if (error) throw new Error(error.message);
+  const rows = Array.isArray(data) ? data : [];
+  const paths = rows.map((row) => {
+    if (!row || typeof row !== "object") return null;
+    return (row as Record<string, unknown>).storage_path;
+  });
+  return removeQueuedStoragePaths(paths.filter((path): path is string => typeof path === "string"));
 }
 
 export async function fetchPermanentDeleteEnabled(): Promise<boolean> {
@@ -57,7 +133,7 @@ export async function compactSlabInventoryIds(): Promise<number> {
   return Number(data ?? 0);
 }
 
-export async function purgeSlabs(ids: string[]): Promise<{ purged: number; storageErrors: string[] }> {
+export async function purgeSlabs(ids: string[]): Promise<{ purged: number; storageCleanup: StorageCleanupResult }> {
   const uniqueIds = [...new Set(ids.filter(Boolean))];
   if (uniqueIds.length === 0) throw new Error("Select at least one slab.");
 
@@ -66,15 +142,18 @@ export async function purgeSlabs(ids: string[]): Promise<{ purged: number; stora
     if (/HARD_DELETE_DISABLED/i.test(error.message)) {
       throw new Error("Permanent deletion is disabled. Turn on the admin checkbox first.");
     }
+    if (/SLAB_NOT_FOUND_OR_DUPLICATE_INPUT/i.test(error.message)) {
+      throw new Error("The selected inventory changed before deletion. Refresh and try again; no records were deleted.");
+    }
     throw new Error(error.message);
   }
 
   const rows = (Array.isArray(data) ? data : []) as PurgeSlabResult[];
-  const paths = rows.flatMap((row) => [row.front_image_path, row.back_image_path]).filter((path): path is string => !!path);
-  const storageErrors: string[] = [];
-  if (paths.length > 0) {
-    const { error: storageError } = await sb.storage.from(BUCKET).remove(paths);
-    if (storageError) storageErrors.push(storageError.message);
+  if (rows.length !== uniqueIds.length) {
+    throw new Error("The database returned an incomplete purge result. Storage cleanup was not attempted.");
   }
-  return { purged: rows.length, storageErrors };
+
+  const paths = uniquePaths(rows.flatMap((row) => [row.front_image_path, row.back_image_path]));
+  const storageCleanup = await removeQueuedStoragePaths(paths);
+  return { purged: rows.length, storageCleanup };
 }
