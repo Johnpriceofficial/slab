@@ -31,7 +31,7 @@
 create or replace function public.normalize_slab_enum_inputs()
 returns trigger
 language plpgsql
-set search_path = public
+set search_path = public, pg_temp
 as $$
 begin
   if new.inventory_status is not null then
@@ -46,9 +46,11 @@ $$;
 -- Trigger-only helper: never callable directly by clients.
 revoke all on function public.normalize_slab_enum_inputs() from public, anon, authenticated;
 
+-- Scoped to the two normalized columns exactly as production does — the trigger
+-- must NOT fire on unrelated valuation/pricing/image-path/ownership/audit updates.
 drop trigger if exists slabs_normalize_enum_inputs on public.slabs;
 create trigger slabs_normalize_enum_inputs
-  before insert or update on public.slabs
+  before insert or update of inventory_status, candidate_image_type on public.slabs
   for each row execute function public.normalize_slab_enum_inputs();
 
 -- 2. search_path hardening on the functions the production migration pinned but
@@ -59,7 +61,7 @@ create trigger slabs_normalize_enum_inputs
 create or replace function public.assign_raw_card_inventory()
 returns trigger
 language plpgsql
-set search_path = public
+set search_path = public, pg_temp
 as $$
 begin
   if new.inventory_sequence is null then
@@ -75,7 +77,7 @@ create or replace function public.parse_inventory_code(p_query text)
 returns table (prefix text, sequence integer)
 language plpgsql
 immutable
-set search_path = public
+set search_path = public, pg_temp
 as $$
 declare
   v text := upper(btrim(coalesce(p_query, '')));
@@ -97,8 +99,11 @@ revoke all on function public.parse_inventory_code(text) from public, anon;
 grant execute on function public.parse_inventory_code(text) to authenticated, service_role;
 
 -- 3. Index reconciliation -----------------------------------------------------
--- Production dropped slab_comps_slab_idx and uses idx_slab_comps_slab_id. The
--- repo still creates the old name (20260710) and never the new one, so a fresh
--- reset ends up with the wrong/duplicate index. Converge on production's index.
+-- 20260710 creates `slab_comps_slab_idx` and 20260807 (security_hardening) also
+-- builds the equivalent `idx_slab_comps_slab_id` (dynamically, from its
+-- (schema,table,column) list), so a fresh reset ends up with BOTH duplicate
+-- indexes on slab_comps(slab_id). Production kept only `idx_slab_comps_slab_id`.
+-- Drop the obsolete one; the create-if-not-exists is an idempotent ASSERTION of
+-- the index 20260807 already builds (not a claim the repo lacks it).
 drop index if exists public.slab_comps_slab_idx;
 create index if not exists idx_slab_comps_slab_id on public.slab_comps (slab_id);
