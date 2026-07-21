@@ -95,7 +95,21 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Start disposable Supabase stack
-        run: supabase start
+        run: |
+          set -o pipefail
+          for attempt in 1 2; do
+            echo "Starting disposable Supabase stack (attempt $attempt of 2)"
+            if supabase start; then
+              exit 0
+            fi
+            echo "::warning::Disposable Supabase startup attempt $attempt failed"
+            docker ps -a || true
+            docker system df || true
+            supabase stop --no-backup || true
+            if [ "$attempt" = "1" ]; then sleep 10; fi
+          done
+          echo "::error::Disposable Supabase stack failed to start after a clean retry"
+          exit 1
 
       - name: Reset database from migrations
         run: supabase db reset --local --no-seed
