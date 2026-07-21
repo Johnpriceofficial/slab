@@ -58,7 +58,11 @@ export function MarketIntelligencePanel({
   const sources = data?.sources ?? [];
   const provenance = data?.provenance ?? [];
   const summaryCount = data?.summary?.count ?? 0;
-  const completeness = data?.identity_completeness ?? { status: "complete" as const, missing: [] as string[], notes: [] as string[] };
+  // Guard the NESTED arrays, not just the object: a present-but-partial
+  // identity_completeness (status set, `missing` absent) would still throw on
+  // `.missing.length`/`.join()` below if we only defaulted the object.
+  const completenessStatus = data?.identity_completeness?.status ?? "complete";
+  const completenessMissing = data?.identity_completeness?.missing ?? [];
   return (
     <Card className="mt-6">
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -131,10 +135,10 @@ export function MarketIntelligencePanel({
                   );
                 })}
               </div>
-              {completeness.status !== "complete" && (
+              {completenessStatus !== "complete" && (
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Identity {completeness.status}
-                  {completeness.missing.length > 0 && <> · missing: {completeness.missing.join(", ")}</>}
+                  Identity {completenessStatus}
+                  {completenessMissing.length > 0 && <> · missing: {completenessMissing.join(", ")}</>}
                   {" "}— match quality may be reduced, but market data is still shown.
                 </p>
               )}
