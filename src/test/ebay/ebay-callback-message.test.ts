@@ -8,7 +8,7 @@ describe("ebayCallbackResultMessage", () => {
   });
 
   it("surfaces every failure marker as an error with a distinct message", () => {
-    const markers = ["invalid_state", "invalid_callback", "config_error", "identity_scope_missing", "identity_unavailable", "persist_error", "error"];
+    const markers = ["invalid_state", "invalid_callback", "config_error", "identity_scope_missing", "identity_unavailable", "scope_persist_failed", "persist_error", "error"];
     const messages = new Set<string>();
     for (const m of markers) {
       const r = ebayCallbackResultMessage(m);
@@ -16,6 +16,12 @@ describe("ebayCallbackResultMessage", () => {
       messages.add(r.message);
     }
     expect(messages.size).toBe(markers.length); // each marker has a distinct message
+  });
+
+  it("gives scope_persist_failed a distinct, actionable message (not finalized)", () => {
+    const r = ebayCallbackResultMessage("scope_persist_failed");
+    expect(r.tone).toBe("error");
+    expect(r.message).toMatch(/not finalized|scope metadata|could not be saved/i);
   });
 
   it("gives the identity-scope error an actionable reconnect hint", () => {

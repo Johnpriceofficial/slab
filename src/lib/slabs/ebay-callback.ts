@@ -23,6 +23,8 @@ export function ebayCallbackResultMessage(result: string): EbayCallbackMessage {
       return { tone: "error", message: "eBay did not grant the required Identity permission — reconnect and approve every requested permission." };
     case "identity_unavailable":
       return { tone: "error", message: "eBay did not return an account identifier — please try again." };
+    case "scope_persist_failed":
+      return { tone: "error", message: "eBay authorized the account, but the granted-scope metadata could not be saved. The connection was not finalized — please try connecting again." };
     case "persist_error":
       return { tone: "error", message: "The eBay connection could not be saved — please try again." };
     default:

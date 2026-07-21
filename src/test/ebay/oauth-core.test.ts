@@ -141,11 +141,11 @@ describe("resolveEbayCallback", () => {
     expect(d.consumeState).not.toHaveBeenCalled();
   });
 
-  it("scope-metadata persist failure → scope_persist_failed, state not consumed", async () => {
+  it("scope-metadata persist failure → scope_persist_failed (distinct marker), state not consumed", async () => {
     const d = deps({ persistCredential: vi.fn(async () => ({ ok: false, stage: "scope_persist_failed" as const })) });
     const res = await resolveEbayCallback(d);
     expect(res.stage).toBe("scope_persist_failed");
-    expect(res.query).toBe("persist_error");
+    expect(res.query).toBe("scope_persist_failed"); // distinct browser marker, not generic persist_error
     expect(d.consumeState).not.toHaveBeenCalled();
   });
 
