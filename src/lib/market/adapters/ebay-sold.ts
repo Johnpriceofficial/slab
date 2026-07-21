@@ -16,11 +16,11 @@ import {
 
 export interface EbaySellerOrdersResponse {
   orders: Array<{
-    orderFulfillmentStatus: string | null;
-    lineItems: Array<{
-      title: string | null;
-      soldAt: string | null;
-      lineItemCost: { value: number | null; currency: string | null } | null;
+    orderFulfillmentStatus?: string | null;
+    lineItems?: Array<{
+      title?: string | null;
+      soldAt?: string | null;
+      lineItemCost?: { value?: string | number | null; currency?: string | null } | null;
     }>;
   }>;
 }
@@ -55,12 +55,13 @@ export function mapEbaySold(response: EbaySellerOrdersResponse, retrievedAt: str
   const output: RawCandidate[] = [];
   for (const order of response.orders) {
     if (order.orderFulfillmentStatus && !/fulfilled|paid|complete/i.test(order.orderFulfillmentStatus)) continue;
-    for (const item of order.lineItems) {
-      const value = item.lineItemCost?.value;
-      if (value === null || value === undefined || value <= 0) continue;
+    for (const item of order.lineItems ?? []) {
+      const raw = item.lineItemCost?.value;
+      const value = raw === null || raw === undefined ? null : Number(raw);
+      if (!Number.isFinite(value) || value <= 0) continue;
       output.push({
         source: "ebay_sold",
-        title: item.title,
+        title: item.title ?? null,
         price_cents: Math.round(value * 100),
         currency: (item.lineItemCost?.currency ?? "USD").toUpperCase(),
         url: null,
