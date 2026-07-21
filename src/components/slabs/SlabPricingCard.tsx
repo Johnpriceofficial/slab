@@ -72,7 +72,7 @@ export function SlabPricingCard({ model }: { model: PricingModel }) {
         <p className="mt-1 text-sm font-medium">{basis_label}</p>
 
         <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
-          <Metric label="PriceCharting Guide Value" value={formatCents(guide_cents)} />
+          <Metric label="Guide Value" value={formatCents(guide_cents)} />
           <Metric label="Quick-Sale Value" value={formatCents(quick_cents)} />
           <Metric label="Replacement Value" value={formatCents(replacement_cents)} />
           <Metric label="Valuation Confidence" value={confidence_label} />

@@ -128,9 +128,14 @@ export const INVENTORY_TABLE_COLUMNS: ColumnDef[] = [
   { key: "variation", label: "Variation", type: "text" },
   { key: "verification_status", label: "Verification Status", type: "text" },
   { key: "valuation_confidence", label: "Valuation Confidence", type: "text" },
+  // Exported next to Valuation Confidence, matching EXCEL_MASTER_COLUMNS below, so
+  // the raw source discriminator is directly auditable on-screen (in addition to
+  // the inline (manual)/(compatible)/(estimate) marker on the Guide Value cell
+  // itself, from guideValueSourceMarker()).
+  { key: "valuation_provenance", label: "Valuation Provenance", type: "text" },
   { key: "quick_sale_value_cents", label: "Quick-Sale Value", type: "currency" },
   { key: "replacement_value_cents", label: "Replacement Value", type: "currency" },
-  { key: "pricecharting_value_cents", label: "PriceCharting Value", type: "currency" },
+  { key: "pricecharting_value_cents", label: "Guide Value", type: "currency" },
   { key: "pricecharting_match_status", label: "PriceCharting Match", type: "text" },
   { key: "date_valued", label: "Date Valued", type: "date" },
 ];
@@ -167,7 +172,7 @@ export const EXCEL_MASTER_COLUMNS: ColumnDef[] = [
   { key: "pricecharting_product_id", label: "PriceCharting Product ID", type: "text" },
   { key: "pricecharting_product_name", label: "PriceCharting Product Name", type: "text" },
   { key: "pricecharting_grade_field", label: "PriceCharting Grade Field", type: "text" },
-  { key: "pricecharting_value_cents", label: "PriceCharting Value", type: "currency" },
+  { key: "pricecharting_value_cents", label: "Guide Value", type: "currency" },
   { key: "pricecharting_sales_volume", label: "PriceCharting Sales Volume", type: "number" },
   { key: "pricecharting_match_status", label: "PriceCharting Match Status", type: "text" },
   { key: "price_variance_percent", label: "Price Variance %", type: "percent" },
