@@ -8,7 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ebaySellerOperation, fetchEbayAccounts, fetchEbaySyncCursors, signedImageUrl, startEbayOAuth } from "@/lib/slabs/data";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ebaySellerOperation, fetchEbayAccounts, fetchEbayBusinessPolicies, fetchEbayLocations, fetchEbaySyncCursors, signedImageUrl, startEbayOAuth } from "@/lib/slabs/data";
 import { ebayListingTitle, ebaySkuForSlab, slabImagePaths } from "@/lib/slabs/ebay-listing";
 import type { Slab } from "@/lib/slabs/types";
 
@@ -22,6 +23,10 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     enabled: !!connected,
   });
   const cursorFor = (resource: string) => cursors.find((c) => c.resource_type === resource) ?? null;
+  // Discovery-populated options for the listing selectors (empty until an account-sync runs).
+  const { data: locations = [] } = useQuery({ queryKey: ["ebay-locations", connected?.id], queryFn: () => fetchEbayLocations(connected!.id), enabled: !!connected });
+  const { data: policies = [] } = useQuery({ queryKey: ["ebay-policies", connected?.id], queryFn: () => fetchEbayBusinessPolicies(connected!.id), enabled: !!connected });
+  const policiesOfType = (type: string) => policies.filter((p) => p.policy_type === type);
   // Exactly one operation runs at a time; drives distinct progress labels.
   const [activeOperation, setActiveOperation] = useState<null | "account_sync" | "order_sync" | "finances_sync" | "prepare_listing" | "publish_listing">(null);
   const [syncSummary, setSyncSummary] = useState<Record<string, { status: string; count: number | null; error_code: string | null }> | null>(null);
@@ -193,14 +198,41 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         <div><Label>Price (USD)</Label><Input type="number" min="0" step="0.01" value={form.price} onChange={(e) => change("price", e.target.value)} /></div>
         <div><Label>Condition policy value</Label><Input value={form.condition} onChange={(e) => change("condition", e.target.value)} /></div>
         <div><Label>Category ID</Label><Input value={form.categoryId} onChange={(e) => change("categoryId", e.target.value)} /></div>
-        <div><Label>Inventory location key</Label><Input value={form.locationKey} onChange={(e) => change("locationKey", e.target.value)} /></div>
-        <div><Label>Fulfillment policy ID</Label><Input value={form.fulfillmentPolicyId} onChange={(e) => change("fulfillmentPolicyId", e.target.value)} /></div>
-        <div><Label>Payment policy ID</Label><Input value={form.paymentPolicyId} onChange={(e) => change("paymentPolicyId", e.target.value)} /></div>
-        <div><Label>Return policy ID</Label><Input value={form.returnPolicyId} onChange={(e) => change("returnPolicyId", e.target.value)} /></div>
+        <DiscoverySelect label="Inventory location" value={form.locationKey} onChange={(v) => change("locationKey", v)} options={locations.map((l) => ({ value: l.merchant_location_key, label: l.status ? `${l.merchant_location_key} (${l.status})` : l.merchant_location_key }))} emptyHint="No locations yet — run account sync" />
+        <DiscoverySelect label="Fulfillment policy" value={form.fulfillmentPolicyId} onChange={(v) => change("fulfillmentPolicyId", v)} options={policiesOfType("fulfillment").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
+        <DiscoverySelect label="Payment policy" value={form.paymentPolicyId} onChange={(v) => change("paymentPolicyId", v)} options={policiesOfType("payment").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
+        <DiscoverySelect label="Return policy" value={form.returnPolicyId} onChange={(v) => change("returnPolicyId", v)} options={policiesOfType("return").map((p) => ({ value: p.policy_id, label: p.name ?? p.policy_id }))} emptyHint="No policies yet — run account sync" />
         <div className="flex items-end gap-2"><Button variant="outline" disabled={anyBusy} onClick={prepare}>{activeOperation === "prepare_listing" ? "Loading…" : "Load current eBay requirements"}</Button><Button disabled={anyBusy || !prepared || !form.price} onClick={publish}>{activeOperation === "publish_listing" ? "Publishing…" : "Publish with confirmation"}</Button></div>
         {prepared && <p className="sm:col-span-2 text-xs text-muted-foreground">eBay returned current privileges, locations, business policies, category aspects, and condition policies. Publishing remains blocked until the required IDs are supplied and explicitly confirmed.</p>}
       </div>
       <p className="text-muted-foreground">Seller orders and Finances records are stored server-side. Active Browse listings remain asking-price/reference evidence and are never sold comparables. Unknown external enum and CustomCode values are preserved as text.</p>
     </div> : <div className="space-y-3 text-sm"><p className="text-muted-foreground">Not connected. Active eBay Browse references can still be used when application credentials exist, but they are never labeled as sold comps.</p><Button variant="outline" onClick={connect} disabled={connecting}>{connecting ? "Starting eBay sign-in…" : "Connect eBay seller account"}</Button><p className="text-xs text-muted-foreground">Restricted capabilities remain unavailable until eBay grants the application/account access.</p></div>}
   </CardContent></Card>;
+}
+
+// A listing selector backed by account-discovery data. Falls back to a hint (not
+// a free-text field) when discovery hasn't populated options yet, so an operator
+// can never hand-type an invalid location key or policy ID.
+function DiscoverySelect({ label, value, onChange, options, emptyHint }: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+  emptyHint: string;
+}) {
+  return (
+    <div>
+      <Label>{label}</Label>
+      {options.length === 0 ? (
+        <p className="mt-1 text-xs text-muted-foreground">{emptyHint}</p>
+      ) : (
+        <Select value={value || undefined} onValueChange={onChange}>
+          <SelectTrigger><SelectValue placeholder={`Select ${label.toLowerCase()}`} /></SelectTrigger>
+          <SelectContent>
+            {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      )}
+    </div>
+  );
 }
