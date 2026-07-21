@@ -60,6 +60,18 @@ describe("MarketIntelligencePanel", () => {
     expect(screen.getAllByText("$310.00").length).toBeGreaterThanOrEqual(1);
   });
 
+  it("does not crash when identity_completeness is present but its 'missing' array is absent", () => {
+    // A partial NESTED object: status set (so the identity note renders), but no
+    // `missing` array. Object-level defaulting alone would still throw on
+    // completeness.missing.length.
+    const partialNested = {
+      ...data,
+      identity_completeness: { status: "incomplete" } as unknown as MarketIntelligence["identity_completeness"],
+    };
+    expect(() => render(<MarketIntelligencePanel data={partialNested} isLoading={false} error={null} />)).not.toThrow();
+    expect(screen.getByText(/Identity incomplete/i)).toBeInTheDocument();
+  });
+
   it("shows loading and error states", () => {
     const { rerender } = render(<MarketIntelligencePanel data={undefined} isLoading error={null} />);
     expect(screen.getByText(/Gathering market data/i)).toBeInTheDocument();
