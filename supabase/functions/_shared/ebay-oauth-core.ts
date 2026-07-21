@@ -102,7 +102,7 @@ const QUERY: Record<CallbackStage, string> = {
   identity_unavailable: "identity_unavailable",
   account_persist_failed: "persist_error",
   credential_persist_failed: "persist_error",
-  scope_persist_failed: "persist_error",
+  scope_persist_failed: "scope_persist_failed",
   state_consume_failed: "persist_error",
 };
 
