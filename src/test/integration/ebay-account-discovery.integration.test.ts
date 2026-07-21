@@ -49,13 +49,22 @@ suite("eBay account-discovery RPCs", () => {
     expect(count).toBe(1);
   });
 
-  it("business policies replace persists all three types", async () => {
+  it("business policies replace persists all three types and returns CONFIRMED per-type counts, then prunes", async () => {
     const res = await service.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: [
       { policy_id: "F1", policy_type: "fulfillment", name: "Ship", marketplace_id: "EBAY_US" },
       { policy_id: "P1", policy_type: "payment", name: "Pay", marketplace_id: "EBAY_US" },
       { policy_id: "R1", policy_type: "return", name: "Return", marketplace_id: "EBAY_US" },
     ] });
-    expect(res.data).toBe(3);
+    // Counts are read back from the table AFTER the write, not from the submitted rows.
+    expect(res.data).toEqual({ total: 3, fulfillment: 1, payment: 1, return: 1 });
+    // Replacing with only a fulfillment policy prunes the payment + return rows,
+    // and the confirmed counts reflect the durable post-prune state.
+    const pruned = await service.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: [
+      { policy_id: "F1", policy_type: "fulfillment", name: "Ship", marketplace_id: "EBAY_US" },
+    ] });
+    expect(pruned.data).toEqual({ total: 1, fulfillment: 1, payment: 0, return: 0 });
+    const { count } = await service.from("ebay_business_policies").select("*", { count: "exact", head: true }).eq("ebay_account_id", accountId);
+    expect(count).toBe(1);
   });
 
   it("scope provenance set/get round-trips (requested vs token-reported)", async () => {
