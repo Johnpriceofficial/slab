@@ -17,6 +17,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   const [busy, setBusy] = useState(false);
   // Persistent inline result of the last OAuth callback (shown until dismissed).
   const [callbackResult, setCallbackResult] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [prepared, setPrepared] = useState<Record<string, any> | null>(null);
   const [form, setForm] = useState({
     title: `${slab.card_name ?? "Graded card"} ${slab.grader ?? ""} ${slab.grade ?? ""}`.trim(),
@@ -50,9 +51,12 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
   }, [refetch]);
 
   const connect = async () => {
+    if (connecting) return; // single-flight: never mint parallel OAuth states
+    setConnecting(true);
     const result = await startEbayOAuth();
-    if (result.status === "success" && result.authorization_url) window.location.assign(result.authorization_url);
-    else toast.info(result.message ?? "eBay seller integration is not configured.");
+    if (result.status === "success" && result.authorization_url) { window.location.assign(result.authorization_url); return; } // navigating away — stay disabled
+    toast.info(result.message ?? "eBay seller integration is not configured.");
+    setConnecting(false); // restore only on a failed start
   };
   const sync = async (name: "ebay-account-sync" | "ebay-order-sync" | "ebay-finances-sync") => {
     if (!connected) return;
@@ -114,7 +118,7 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     )}
     {connected ? <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-center gap-2"><Badge>Connected</Badge><span>{connected.display_label ?? "eBay seller account"}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-account-sync")}>Verify privileges</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-order-sync")}>Sync orders</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => sync("ebay-finances-sync")}>Sync fees</Button></div>
-      <p>Privileges: {connected.privilege_status ?? "Checking"} · Last sync: {connected.last_synced_at?.slice(0, 16).replace("T", " ") ?? "Never"}</p>
+      <p>Privileges: {busy ? "Checking…" : connected.privilege_status === "verified" ? "Verified" : "Not verified"}{connected.last_synced_at ? ` · Last account sync: ${connected.last_synced_at.slice(0, 16).replace("T", " ")}` : ""}</p>
       <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2">
         <div className="sm:col-span-2"><Label>Listing title</Label><Input value={form.title} onChange={(e) => change("title", e.target.value)} /></div>
         <div className="sm:col-span-2"><Label>Description and grade disclosure</Label><Textarea value={form.description} onChange={(e) => change("description", e.target.value)} /></div>
@@ -129,6 +133,6 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         {prepared && <p className="sm:col-span-2 text-xs text-muted-foreground">eBay returned current privileges, locations, business policies, category aspects, and condition policies. Publishing remains blocked until the required IDs are supplied and explicitly confirmed.</p>}
       </div>
       <p className="text-muted-foreground">Seller orders and Finances records are stored server-side. Active Browse listings remain asking-price/reference evidence and are never sold comparables. Unknown external enum and CustomCode values are preserved as text.</p>
-    </div> : <div className="space-y-3 text-sm"><p className="text-muted-foreground">Not connected. Active eBay Browse references can still be used when application credentials exist, but they are never labeled as sold comps.</p><Button variant="outline" onClick={connect}>Connect eBay seller account</Button><p className="text-xs text-muted-foreground">Restricted capabilities remain unavailable until eBay grants the application/account access.</p></div>}
+    </div> : <div className="space-y-3 text-sm"><p className="text-muted-foreground">Not connected. Active eBay Browse references can still be used when application credentials exist, but they are never labeled as sold comps.</p><Button variant="outline" onClick={connect} disabled={connecting}>{connecting ? "Starting eBay sign-in…" : "Connect eBay seller account"}</Button><p className="text-xs text-muted-foreground">Restricted capabilities remain unavailable until eBay grants the application/account access.</p></div>}
   </CardContent></Card>;
 }

@@ -43,6 +43,28 @@ export function buildAuthorizeQuery(args: {
   return q;
 }
 
+// Honest scope provenance: what we REQUESTED vs what eBay actually REPORTED as
+// granted (eBay may omit `scope` on the token response). Never label the
+// requested set as provider-reported.
+export function resolveScopePersistence(
+  requested: readonly string[],
+  tokenReported: readonly string[] | null | undefined,
+): { requested_scopes: string[]; token_reported_scopes: string[] | null; scope_source: "provider_reported" | "requested_fallback" } {
+  const reported = tokenReported && tokenReported.length ? [...tokenReported] : null;
+  return {
+    requested_scopes: [...requested],
+    token_reported_scopes: reported,
+    scope_source: reported ? "provider_reported" : "requested_fallback",
+  };
+}
+
+// The scope string to send on a refresh-token exchange: the persisted requested
+// scopes, or the canonical set — NEVER empty (an empty scope must not silently
+// drop the granted scopes on refresh).
+export function refreshScopeParam(requested: readonly string[] | null | undefined, canonical: readonly string[]): string {
+  return (requested && requested.length ? [...requested] : [...canonical]).join(" ");
+}
+
 export type CallbackStage =
   | "connected"
   | "token_exchange_failed"

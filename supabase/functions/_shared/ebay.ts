@@ -8,7 +8,7 @@ import {
   type EbayPublicKey,
 } from "./ebay-notification-verify.ts";
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
-import { buildAuthorizeQuery, ebayApizBase, resolveEbayCallback } from "./ebay-oauth-core.ts";
+import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
@@ -168,7 +168,8 @@ async function userAccessToken(admin: ReturnType<typeof createClient>, accountId
     grant_type: "refresh_token",
     refresh_token: await decryptToken(priorEncrypted),
   });
-  if (Array.isArray(credential.scopes) && credential.scopes.length) params.set("scope", credential.scopes.join(" "));
+  // Always refresh with the canonical scope set — never drop granted scopes.
+  params.set("scope", refreshScopeParam(credential.requested_scopes as string[] | undefined, EBAY_OAUTH_SCOPES));
   const refreshed = await oauthToken(params);
   if (typeof refreshed.access_token !== "string") throw new Error("OAUTH_REFRESH_FAILED");
   // eBay MAY return a rotated refresh token. Persist it with optimistic
@@ -294,10 +295,11 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
         return { ok: true, ebayUserId: String(data.userId ?? data.username ?? "") };
       },
       persistAccount: async (ebayUserId, expSec) => {
+        // connected_at marks the connection — NOT a completed sync (see account-sync).
         const { data, error } = await admin.from("ebay_accounts").upsert({
           ebay_user_id: ebayUserId, display_label: "Connected eBay seller", connection_status: "connected",
           authorization_expires_at: expSec ? new Date(Date.now() + expSec * 1000).toISOString() : null,
-          last_synced_at: new Date().toISOString(),
+          connected_at: new Date().toISOString(),
         }, { onConflict: "ebay_user_id" }).select("id").single();
         return { ok: !error && !!data, accountId: (data as { id?: string } | null)?.id };
       },
@@ -307,7 +309,14 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
           p_refresh_token_expires_at: expSec ? new Date(Date.now() + expSec * 1000).toISOString() : null,
           p_scopes: scope, p_rotated_at: new Date().toISOString(),
         });
-        return { ok: !error };
+        if (error) return { ok: false };
+        // Honest provenance: store what eBay reported vs the requested fallback.
+        const prov = resolveScopePersistence(EBAY_OAUTH_SCOPES, scope);
+        await admin.rpc("ebay_credential_scopes_set", {
+          p_account_id: accountId, p_requested_scopes: prov.requested_scopes,
+          p_token_reported_scopes: prov.token_reported_scopes, p_scope_source: prov.scope_source,
+        });
+        return { ok: true };
       },
       consumeState: async () => {
         const { error } = await admin.rpc("ebay_oauth_state_consume", { p_state_hash: stateHash });
@@ -337,7 +346,9 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (!RU_NAME || !REDIRECT_URI) return unavailable(operation, "OAuth authorization-code flow");
     const state = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { error: stateError } = await admin.rpc("ebay_oauth_state_create", {
+    // Single-flight: atomically expire this admin's prior unconsumed states and
+    // create exactly one, under an advisory lock scoped to the requester.
+    const { error: stateError } = await admin.rpc("ebay_oauth_state_create_single_flight", {
       p_state_hash: await sha256(state),
       p_requested_by: auth.user!.id,
       p_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
@@ -384,18 +395,77 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
   if (operation === "account_sync") {
     const accountId = String(body.account_id ?? "");
     if (!accountId) return reply({ status: "error", error_code: "MISSING_ACCOUNT", message: "account_id is required." }, 400);
+    const marketplaceId = String(body.marketplace_id ?? "EBAY_US");
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const startedAt = Date.now();
     let accessToken: string;
-    try { accessToken = await userAccessToken(admin, accountId); } catch { return unavailable(operation, "Connected eBay account"); }
-    const identity = await ebayFetch("/commerce/identity/v1/user/", accessToken);
-    let privileges: Record<string, unknown> | null = null;
-    try { privileges = await ebayFetch("/sell/account/v1/privilege", accessToken); } catch { privileges = null; }
-    await admin.from("ebay_accounts").update({
-      connection_status: "connected",
-      privilege_status: privileges ? "available" : "unavailable",
-      last_synced_at: new Date().toISOString(),
-    }).eq("id", accountId);
-    return reply({ status: "success", account_id: accountId, opaque_user_id: identity.userId ?? null, username_display: "Connected eBay seller", privileges });
+    try {
+      accessToken = await userAccessToken(admin, accountId);
+    } catch {
+      await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: "error", p_http_status: null, p_request_id: null, p_latency_ms: Date.now() - startedAt, p_error_code: "reauthorization_required" });
+      return unavailable(operation, "Connected eBay account");
+    }
+
+    // getUser is on the apiz gateway (see callback); a failure must not 500 the sync.
+    let opaqueUserId: string | null = null;
+    let identityStatus = 0;
+    try {
+      const idRes = await fetch(`${ebayApizBase(MODE)}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
+      identityStatus = idRes.status;
+      if (idRes.ok) { const idJson = await idRes.json().catch(() => ({})) as Record<string, unknown>; opaqueUserId = typeof idJson.userId === "string" ? idJson.userId : null; }
+    } catch { /* identity is best-effort; the opaque id was already captured at connect */ }
+
+    // Read-only discovery on the api.* gateway. Persist a resource ONLY when its
+    // own fetch succeeded — a failed/partial call never prunes existing rows.
+    type Res = { ok: boolean; status: number; data: Record<string, unknown> };
+    const getJson = async (path: string): Promise<Res> => {
+      try {
+        const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Content-Language": "en-US" } });
+        return { ok: r.ok, status: r.status, data: (await r.json().catch(() => ({}))) as Record<string, unknown> };
+      } catch { return { ok: false, status: 0, data: {} }; }
+    };
+    const [priv, loc, ful, pay, ret] = await Promise.all([
+      getJson("/sell/account/v1/privilege"),
+      getJson("/sell/inventory/v1/location?limit=100"),
+      getJson(`/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+      getJson(`/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+      getJson(`/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+    ]);
+
+    let locationCount: number | null = null;
+    if (loc.ok) {
+      const rows = (Array.isArray(loc.data.locations) ? loc.data.locations as Record<string, unknown>[] : [])
+        .map((l) => ({ merchant_location_key: String(l.merchantLocationKey ?? ""), status: typeof l.merchantLocationStatus === "string" ? l.merchantLocationStatus : null, raw_enum_value: l.locationTypes != null ? JSON.stringify(l.locationTypes) : null }))
+        .filter((l) => l.merchant_location_key);
+      const { data } = await admin.rpc("ebay_inventory_locations_replace", { p_account_id: accountId, p_locations: rows });
+      locationCount = typeof data === "number" ? data : rows.length;
+    }
+
+    let policyCount: number | null = null;
+    const policyRows: Array<Record<string, unknown>> = [];
+    const collect = (res: Res, key: string, idField: string, type: string): boolean => {
+      if (!res.ok) return false;
+      for (const p of (Array.isArray(res.data[key]) ? res.data[key] as Record<string, unknown>[] : [])) {
+        policyRows.push({ policy_id: String(p[idField] ?? ""), policy_type: type, name: typeof p.name === "string" ? p.name : null, marketplace_id: typeof p.marketplaceId === "string" ? p.marketplaceId : marketplaceId });
+      }
+      return true;
+    };
+    const fOk = collect(ful, "fulfillmentPolicies", "fulfillmentPolicyId", "fulfillment");
+    const pOk = collect(pay, "paymentPolicies", "paymentPolicyId", "payment");
+    const rOk = collect(ret, "returnPolicies", "returnPolicyId", "return");
+    if (fOk && pOk && rOk) {
+      const { data } = await admin.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: policyRows.filter((p) => p.policy_id) });
+      policyCount = typeof data === "number" ? data : policyRows.length;
+    }
+
+    const privilegeStatus = priv.ok ? "verified" : "unverified";
+    await admin.from("ebay_accounts").update({ connection_status: "connected", privilege_status: privilegeStatus }).eq("id", accountId);
+    await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery", p_count: (locationCount ?? 0) + (policyCount ?? 0) });
+    const overall = (priv.ok && loc.ok && fOk && pOk && rOk) ? "success" : "partial";
+    await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: overall, p_http_status: identityStatus || null, p_request_id: null, p_latency_ms: Date.now() - startedAt, p_error_code: overall === "partial" ? "partial_discovery" : null });
+
+    // Counts only — never seller PII or raw provider bodies.
+    return reply({ status: "success", account_id: accountId, opaque_user_id: opaqueUserId, privilege_status: privilegeStatus, locations: locationCount, policies: policyCount, discovery: overall });
   }
 
   const accountId = String(body.account_id ?? "");
