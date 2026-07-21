@@ -14,6 +14,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { backImageStatus } from "@/lib/slabs/back-image-status";
 import { ChevronLeft, ChevronRight, Pencil, ImageOff, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
 import { verifiedBlockers } from "@/lib/slabs/save-slab";
 import { useAuth } from "@/auth/AuthProvider";
@@ -173,6 +174,12 @@ export default function SlabDetail() {
           <CardContent className="grid grid-cols-2 gap-3">
             <SlabPhoto label="Front" url={images?.front ?? null} />
             <SlabPhoto label="Back" url={images?.back ?? null} />
+            {!slab.back_image_path && (
+              <p className="col-span-2 flex items-start gap-1.5 rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-700">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                {backImageStatus(slab.back_image_path).note}
+              </p>
+            )}
           </CardContent>
         </Card>
 
