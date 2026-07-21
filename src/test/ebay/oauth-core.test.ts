@@ -4,8 +4,30 @@ import {
   buildAuthorizeQuery,
   ebayApizBase,
   resolveEbayCallback,
+  resolveScopePersistence,
+  refreshScopeParam,
   type CallbackDeps,
 } from "../../../supabase/functions/_shared/ebay-oauth-core";
+
+describe("scope provenance", () => {
+  it("labels provider-reported scopes when eBay returns them", () => {
+    const r = resolveScopePersistence(EBAY_OAUTH_SCOPES, ["https://api.ebay.com/oauth/api_scope", "https://api.ebay.com/oauth/api_scope/sell.account"]);
+    expect(r.scope_source).toBe("provider_reported");
+    expect(r.token_reported_scopes).toHaveLength(2);
+    expect(r.requested_scopes).toEqual([...EBAY_OAUTH_SCOPES]);
+  });
+  it("falls back to the requested set (never empty) when eBay omits scope", () => {
+    const r = resolveScopePersistence(EBAY_OAUTH_SCOPES, []);
+    expect(r.scope_source).toBe("requested_fallback");
+    expect(r.token_reported_scopes).toBeNull();
+    expect(r.requested_scopes).toEqual([...EBAY_OAUTH_SCOPES]);
+  });
+  it("refresh always sends the canonical scopes and never an empty string", () => {
+    expect(refreshScopeParam([], EBAY_OAUTH_SCOPES).split(" ")).toHaveLength(6);
+    expect(refreshScopeParam(null, EBAY_OAUTH_SCOPES)).toContain("commerce.identity.readonly");
+    expect(refreshScopeParam(["a", "b"], EBAY_OAUTH_SCOPES)).toBe("a b");
+  });
+});
 
 describe("ebayApizBase", () => {
   it("targets the apiz gateway (the Identity API getUser is NOT on api.*)", () => {
