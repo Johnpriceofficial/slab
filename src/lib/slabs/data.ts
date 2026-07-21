@@ -519,9 +519,17 @@ export async function fetchFieldEvidence(slabId: string): Promise<FieldEvidenceR
   return (data ?? []) as FieldEvidenceRow[];
 }
 
-export async function fetchEbayAccounts(): Promise<Array<{ id: string; display_label: string | null; connection_status: string; privilege_status: string | null; last_synced_at: string | null }>> {
-  const { data, error } = await sb.from("ebay_accounts").select("id,display_label,connection_status,privilege_status,last_synced_at").order("created_at", { ascending: true });
+export async function fetchEbayAccounts(): Promise<Array<{ id: string; display_label: string | null; connection_status: string; privilege_status: string | null; connected_at: string | null }>> {
+  const { data, error } = await sb.from("ebay_accounts").select("id,display_label,connection_status,privilege_status,connected_at").order("created_at", { ascending: true });
   if (error) throw error;
+  return data ?? [];
+}
+
+/** Per-resource sync cursors (account_discovery / orders / finances) — the
+ *  authoritative "last synced" per operation, replacing the ambiguous shared one. */
+export async function fetchEbaySyncCursors(accountId: string): Promise<Array<{ resource_type: string; cursor_value: string | null; last_synced_at: string | null }>> {
+  const { data, error } = await sb.from("ebay_sync_cursors").select("resource_type,cursor_value,last_synced_at").eq("ebay_account_id", accountId);
+  if (error) return [];
   return data ?? [];
 }
 

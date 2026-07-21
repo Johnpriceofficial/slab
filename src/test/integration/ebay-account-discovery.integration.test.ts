@@ -64,6 +64,10 @@ suite("eBay account-discovery RPCs", () => {
     expect((got.data as { requested_scopes: string[] }).requested_scopes).toEqual(["a", "b", "c"]);
     expect((got.data as { token_reported_scopes: string[] | null }).token_reported_scopes).toBeNull();
     expect((got.data as { scope_source: string }).scope_source).toBe("requested_fallback");
+    // credential_get now returns the scope provenance too (so refresh uses it).
+    const cred = await service.rpc("ebay_oauth_credential_get", { p_account_id: accountId }).maybeSingle();
+    expect((cred.data as { requested_scopes: string[] }).requested_scopes).toEqual(["a", "b", "c"]);
+    expect((cred.data as { scope_source: string }).scope_source).toBe("requested_fallback");
   });
 
   it("single-flight expires the prior unconsumed state so only one stays active", async () => {

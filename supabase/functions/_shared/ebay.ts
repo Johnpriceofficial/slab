@@ -304,18 +304,22 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
         return { ok: !error && !!data, accountId: (data as { id?: string } | null)?.id };
       },
       persistCredential: async (accountId, refreshToken, scope, expSec) => {
-        const { error } = await admin.rpc("ebay_oauth_credential_upsert", {
+        const up = await admin.rpc("ebay_oauth_credential_upsert", {
           p_account_id: accountId, p_refresh_token_encrypted: await encryptToken(refreshToken),
           p_refresh_token_expires_at: expSec ? new Date(Date.now() + expSec * 1000).toISOString() : null,
           p_scopes: scope, p_rotated_at: new Date().toISOString(),
         });
-        if (error) return { ok: false };
-        // Honest provenance: store what eBay reported vs the requested fallback.
+        if (up.error) return { ok: false, stage: "credential_persist_failed" };
+        // Honest provenance — and its persistence is REQUIRED, not best-effort.
         const prov = resolveScopePersistence(EBAY_OAUTH_SCOPES, scope);
-        await admin.rpc("ebay_credential_scopes_set", {
+        const set = await admin.rpc("ebay_credential_scopes_set", {
           p_account_id: accountId, p_requested_scopes: prov.requested_scopes,
           p_token_reported_scopes: prov.token_reported_scopes, p_scope_source: prov.scope_source,
         });
+        if (set.error) return { ok: false, stage: "scope_persist_failed" };
+        // Read-after-write: confirm the provenance landed before we ack the connect.
+        const { data: check } = await admin.rpc("ebay_credential_scopes_get", { p_account_id: accountId }).maybeSingle();
+        if ((check as { scope_source?: string } | null)?.scope_source !== prov.scope_source) return { ok: false, stage: "scope_persist_failed" };
         return { ok: true };
       },
       consumeState: async () => {
@@ -406,17 +410,24 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       return unavailable(operation, "Connected eBay account");
     }
 
-    // getUser is on the apiz gateway (see callback); a failure must not 500 the sync.
+    // Per-resource api-run recorder (safe fields only — never bodies/PII/tokens).
+    const runRow = (op: string, status: string, http: number | null, errorCode: string | null) =>
+      admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: op, p_status: status, p_http_status: http, p_request_id: null, p_latency_ms: Date.now() - startedAt, p_error_code: errorCode });
+    type ResView = { status: "success" | "unavailable" | "error"; http: number | null; count: number | null; error_code: string | null };
+    const resources: Record<string, ResView> = {};
+
+    // Identity on the apiz gateway (records its own status; best-effort for the id).
     let opaqueUserId: string | null = null;
-    let identityStatus = 0;
+    let identityOk = false;
     try {
       const idRes = await fetch(`${ebayApizBase(MODE)}/commerce/identity/v1/user/`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
-      identityStatus = idRes.status;
-      if (idRes.ok) { const idJson = await idRes.json().catch(() => ({})) as Record<string, unknown>; opaqueUserId = typeof idJson.userId === "string" ? idJson.userId : null; }
-    } catch { /* identity is best-effort; the opaque id was already captured at connect */ }
+      identityOk = idRes.ok;
+      resources.identity = { status: idRes.ok ? "success" : "error", http: idRes.status || null, count: null, error_code: idRes.ok ? null : "identity_request_failed" };
+      if (idRes.ok) { const j = await idRes.json().catch(() => ({})) as Record<string, unknown>; opaqueUserId = typeof j.userId === "string" ? j.userId : null; }
+    } catch { resources.identity = { status: "error", http: null, count: null, error_code: "identity_request_failed" }; }
+    await runRow("account_identity", resources.identity.status, resources.identity.http, resources.identity.error_code);
 
-    // Read-only discovery on the api.* gateway. Persist a resource ONLY when its
-    // own fetch succeeded — a failed/partial call never prunes existing rows.
+    // Read-only discovery on api.*.
     type Res = { ok: boolean; status: number; data: Record<string, unknown> };
     const getJson = async (path: string): Promise<Res> => {
       try {
@@ -432,16 +443,24 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       getJson(`/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
     ]);
 
-    let locationCount: number | null = null;
+    resources.privileges = { status: priv.ok ? "success" : "error", http: priv.status || null, count: null, error_code: priv.ok ? null : "privilege_fetch_failed" };
+    await runRow("account_privileges", resources.privileges.status, resources.privileges.http, resources.privileges.error_code);
+
+    // A DB persistence failure is NEVER success — capture it and stop pruning further.
+    let persistError: string | null = null;
+
+    // Locations: persist only if the fetch succeeded; check the write error.
     if (loc.ok) {
       const rows = (Array.isArray(loc.data.locations) ? loc.data.locations as Record<string, unknown>[] : [])
         .map((l) => ({ merchant_location_key: String(l.merchantLocationKey ?? ""), status: typeof l.merchantLocationStatus === "string" ? l.merchantLocationStatus : null, raw_enum_value: l.locationTypes != null ? JSON.stringify(l.locationTypes) : null }))
         .filter((l) => l.merchant_location_key);
-      const { data } = await admin.rpc("ebay_inventory_locations_replace", { p_account_id: accountId, p_locations: rows });
-      locationCount = typeof data === "number" ? data : rows.length;
-    }
+      const { data, error } = await admin.rpc("ebay_inventory_locations_replace", { p_account_id: accountId, p_locations: rows });
+      if (error) { persistError = "locations_persist_failed"; resources.locations = { status: "error", http: loc.status || null, count: null, error_code: "locations_persist_failed" }; }
+      else resources.locations = { status: "success", http: loc.status || null, count: typeof data === "number" ? data : rows.length, error_code: null };
+    } else resources.locations = { status: "error", http: loc.status || null, count: null, error_code: "locations_fetch_failed" };
+    await runRow("inventory_locations", resources.locations.status, resources.locations.http, resources.locations.error_code);
 
-    let policyCount: number | null = null;
+    // Policies: replace-with-prune only when ALL THREE fetched (else no prune).
     const policyRows: Array<Record<string, unknown>> = [];
     const collect = (res: Res, key: string, idField: string, type: string): boolean => {
       if (!res.ok) return false;
@@ -453,19 +472,38 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const fOk = collect(ful, "fulfillmentPolicies", "fulfillmentPolicyId", "fulfillment");
     const pOk = collect(pay, "paymentPolicies", "paymentPolicyId", "payment");
     const rOk = collect(ret, "returnPolicies", "returnPolicyId", "return");
-    if (fOk && pOk && rOk) {
-      const { data } = await admin.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: policyRows.filter((p) => p.policy_id) });
-      policyCount = typeof data === "number" ? data : policyRows.length;
+    let policyPersistError: string | null = null; let policyCount: number | null = null;
+    if (fOk && pOk && rOk && !persistError) {
+      const { data, error } = await admin.rpc("ebay_business_policies_replace", { p_account_id: accountId, p_policies: policyRows.filter((p) => p.policy_id) });
+      if (error) { policyPersistError = "policies_persist_failed"; persistError = persistError ?? policyPersistError; }
+      else policyCount = typeof data === "number" ? data : policyRows.length;
     }
+    resources.fulfillment_policies = { status: !fOk ? "error" : policyPersistError ? "error" : "success", http: ful.status || null, count: policyCount, error_code: !fOk ? "fulfillment_policy_fetch_failed" : policyPersistError };
+    resources.payment_policies = { status: !pOk ? "error" : policyPersistError ? "error" : "success", http: pay.status || null, count: policyCount, error_code: !pOk ? "payment_policy_fetch_failed" : policyPersistError };
+    resources.return_policies = { status: !rOk ? "error" : policyPersistError ? "error" : "success", http: ret.status || null, count: policyCount, error_code: !rOk ? "return_policy_fetch_failed" : policyPersistError };
+    for (const k of ["fulfillment_policies", "payment_policies", "return_policies"] as const) await runRow(k, resources[k].status, resources[k].http, resources[k].error_code);
 
     const privilegeStatus = priv.ok ? "verified" : "unverified";
-    await admin.from("ebay_accounts").update({ connection_status: "connected", privilege_status: privilegeStatus }).eq("id", accountId);
-    await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery", p_count: (locationCount ?? 0) + (policyCount ?? 0) });
-    const overall = (priv.ok && loc.ok && fOk && pOk && rOk) ? "success" : "partial";
-    await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "account_sync", p_status: overall, p_http_status: identityStatus || null, p_request_id: null, p_latency_ms: Date.now() - startedAt, p_error_code: overall === "partial" ? "partial_discovery" : null });
+    const { error: acctErr } = await admin.from("ebay_accounts").update({ connection_status: "connected", privilege_status: privilegeStatus }).eq("id", accountId);
+    if (acctErr) persistError = persistError ?? "account_update_failed";
 
-    // Counts only — never seller PII or raw provider bodies.
-    return reply({ status: "success", account_id: accountId, opaque_user_id: opaqueUserId, privilege_status: privilegeStatus, locations: locationCount, policies: policyCount, discovery: overall });
+    if (!persistError) {
+      const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery", p_count: (resources.locations.count ?? 0) + (policyCount ?? 0) });
+      if (curErr) persistError = "cursor_persist_failed";
+    }
+    await runRow("account_discovery_persistence", persistError ? "error" : "success", null, persistError);
+
+    // Honest classification: a persistence failure is an error (500); provider
+    // gaps without a persistence failure are partial; all-green is success.
+    if (persistError) {
+      await runRow("account_sync", "error", null, persistError);
+      return reply({ status: "error", account_id: accountId, error_code: persistError, resources }, 500);
+    }
+    const allFetched = identityOk && priv.ok && loc.ok && fOk && pOk && rOk;
+    const overall = allFetched ? "success" : "partial";
+    await runRow("account_sync", overall, null, overall === "partial" ? "partial_discovery" : null);
+    // Counts + per-resource status only — never seller PII or raw provider bodies.
+    return reply({ status: overall, account_id: accountId, opaque_user_id: opaqueUserId, privilege_status: privilegeStatus, resources });
   }
 
   const accountId = String(body.account_id ?? "");

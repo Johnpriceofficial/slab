@@ -74,6 +74,7 @@ export type CallbackStage =
   | "identity_unavailable"
   | "account_persist_failed"
   | "credential_persist_failed"
+  | "scope_persist_failed"
   | "state_consume_failed";
 
 export interface StageOutcome {
@@ -86,7 +87,7 @@ export interface CallbackDeps {
   exchangeCode: () => Promise<{ ok: boolean; status?: number; accessToken?: string; refreshToken?: string; scope?: string[]; refreshTokenExpiresInSec?: number | null }>;
   fetchIdentity: (accessToken: string) => Promise<{ ok: boolean; status?: number; ebayUserId?: string }>;
   persistAccount: (ebayUserId: string, refreshTokenExpiresInSec: number | null) => Promise<{ ok: boolean; accountId?: string }>;
-  persistCredential: (accountId: string, refreshToken: string, scope: string[], refreshTokenExpiresInSec: number | null) => Promise<{ ok: boolean }>;
+  persistCredential: (accountId: string, refreshToken: string, scope: string[], refreshTokenExpiresInSec: number | null) => Promise<{ ok: boolean; stage?: CallbackStage }>;
   consumeState: () => Promise<{ ok: boolean }>;
   confirmConsumed: () => Promise<boolean>;
 }
@@ -101,6 +102,7 @@ const QUERY: Record<CallbackStage, string> = {
   identity_unavailable: "identity_unavailable",
   account_persist_failed: "persist_error",
   credential_persist_failed: "persist_error",
+  scope_persist_failed: "persist_error",
   state_consume_failed: "persist_error",
 };
 
@@ -125,7 +127,7 @@ export async function resolveEbayCallback(deps: CallbackDeps): Promise<StageOutc
   if (!acc.ok || !acc.accountId) return at("account_persist_failed");
 
   const cred = await deps.persistCredential(acc.accountId, ex.refreshToken, ex.scope ?? [], ex.refreshTokenExpiresInSec ?? null);
-  if (!cred.ok) return at("credential_persist_failed");
+  if (!cred.ok) return at(cred.stage ?? "credential_persist_failed");
 
   const consumed = await deps.consumeState();
   if (!consumed.ok) return at("state_consume_failed");
