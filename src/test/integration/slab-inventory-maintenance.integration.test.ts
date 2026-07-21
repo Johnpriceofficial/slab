@@ -55,7 +55,7 @@ suite("slab inventory maintenance", () => {
       p_back_ext: null,
     });
     expect(error).toBeNull();
-    const row = (Array.isArray(data) ? data[0] : data) as { id: string; inventory_sequence: number };
+    const row = (Array.isArray(data) ? data[0] : data) as { id: string; inventory_sequence: number; front_image_path: string | null };
     slabIds.push(row.id);
     return row;
   }
@@ -69,13 +69,16 @@ suite("slab inventory maintenance", () => {
   afterAll(async () => {
     await service.from("slab_settings").update({ allow_hard_delete: false }).eq("id", true);
     if (slabIds.length) await service.from("slabs").delete().in("id", slabIds);
+    await service.schema("private").from("slab_storage_cleanup_queue").delete().like("storage_path", `%${stamp}%`);
     for (const id of userIds) await service.auth.admin.deleteUser(id).catch(() => {});
   });
 
-  it("rejects inventory-ID changes from a non-admin", async () => {
+  it("rejects inventory maintenance and cleanup queue access from a non-admin", async () => {
     const slab = await createSlab(`MAINT-U-${stamp}`);
-    const { error } = await userClient.rpc("reassign_slab_inventory_id", { p_slab_id: slab.id, p_sequence: slab.inventory_sequence + 1000 });
-    expect(error?.message ?? "").toMatch(/NOT_AUTHORIZED/i);
+    const reassigned = await userClient.rpc("reassign_slab_inventory_id", { p_slab_id: slab.id, p_sequence: slab.inventory_sequence + 1000 });
+    expect(reassigned.error?.message ?? "").toMatch(/NOT_AUTHORIZED/i);
+    const queued = await userClient.rpc("list_pending_slab_storage_cleanup");
+    expect(queued.error?.message ?? "").toMatch(/NOT_AUTHORIZED/i);
   });
 
   it("lets an admin correct a visible inventory ID and rejects duplicates", async () => {
@@ -98,7 +101,16 @@ suite("slab inventory maintenance", () => {
     expect(sequences).toEqual(sequences.map((_, index) => index + 1));
   });
 
-  it("requires the delete switch and then purges the selected slab", async () => {
+  it("keeps mixed valid and missing purge requests atomic", async () => {
+    const slab = await createSlab(`MAINT-ATOMIC-${stamp}`);
+    await service.from("slab_settings").update({ allow_hard_delete: true }).eq("id", true);
+    const result = await adminClient.rpc("purge_slabs", { p_ids: [slab.id, crypto.randomUUID()] });
+    expect(result.error?.message ?? "").toMatch(/SLAB_NOT_FOUND_OR_DUPLICATE_INPUT/i);
+    const { data } = await service.from("slabs").select("id").eq("id", slab.id).maybeSingle();
+    expect(data?.id).toBe(slab.id);
+  });
+
+  it("requires the delete switch, purges atomically, and queues storage cleanup", async () => {
     const slab = await createSlab(`MAINT-D-${stamp}`);
     await service.from("slab_settings").update({ allow_hard_delete: false }).eq("id", true);
     const blocked = await adminClient.rpc("purge_slabs", { p_ids: [slab.id] });
@@ -109,6 +121,15 @@ suite("slab inventory maintenance", () => {
     expect(purged.error).toBeNull();
     const { data } = await service.from("slabs").select("id").eq("id", slab.id).maybeSingle();
     expect(data).toBeNull();
+
+    const paths = ((purged.data ?? []) as Array<{ front_image_path: string | null }>).map((row) => row.front_image_path).filter(Boolean) as string[];
+    expect(paths).toContain(slab.front_image_path);
+    const pending = await adminClient.rpc("list_pending_slab_storage_cleanup");
+    expect(pending.error).toBeNull();
+    expect((pending.data as Array<{ storage_path: string }>).map((row) => row.storage_path)).toEqual(expect.arrayContaining(paths));
+    const acknowledged = await adminClient.rpc("acknowledge_slab_storage_cleanup", { p_paths: paths });
+    expect(acknowledged.error).toBeNull();
+
     const index = slabIds.indexOf(slab.id);
     if (index >= 0) slabIds.splice(index, 1);
   });
