@@ -18,7 +18,6 @@ suite("eBay orders/finances apply RPCs", () => {
   let service: SupabaseClient;
   let adminClient: SupabaseClient;
   const stamp = `${Math.floor(performance.now())}`;
-  const inv = 900_000_000 + (Math.floor(performance.now()) % 90_000_000);
   const userIds: string[] = [];
   const accountIds: string[] = [];
   let accountId = "";
@@ -42,9 +41,15 @@ suite("eBay orders/finances apply RPCs", () => {
     accountId = acct!.id;
     accountIds.push(accountId);
 
-    const { data: slab, error: sErr } = await service.from("slabs").insert({ inventory_number: inv, card_name: "PR B Test", certification_number: `PRB-${stamp}`, inventory_status: "active" }).select("id").single();
+    // create_slab (SECURITY DEFINER) sets the NOT NULL columns + allocates the
+    // inventory number; it must run as the signed-in admin and needs a front image.
+    const { data: slab, error: sErr } = await adminClient.rpc("create_slab", {
+      p: { card_name: "PR B Test", grader: "PSA", grade: "9", certification_number: `PRB-${stamp}`, verification_status: "verified", valuation_confidence: "manual" },
+      p_front_ext: "jpg",
+      p_back_ext: null,
+    });
     if (sErr) throw sErr;
-    slabId = slab!.id;
+    slabId = (slab as { id: string }).id;
     await service.from("ebay_listing_mappings").insert({ slab_id: slabId, ebay_account_id: accountId, sku: mappedSku, listing_status: "published" });
   });
 
