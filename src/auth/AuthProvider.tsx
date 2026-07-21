@@ -45,21 +45,35 @@ export function AuthProvider({ children, client = supabase as unknown as AuthCli
   const [user, setUser] = useState<AuthUser | null>(null);
   const generation = useRef(0);
 
+  // Tracks the user id we last fully resolved to admin/customer, so a
+  // background re-verification for the SAME user (Supabase fires
+  // onAuthStateChange on token refresh, and often on tab focus too) never
+  // flashes the loading spinner over whatever page is already on screen.
+  // Only a genuinely new session (sign-in, or a different user id) should
+  // show "Checking your account…" while we resolve it.
+  const resolvedAdminUserId = useRef<string | null>(null);
+
   const resolveSession = useCallback(async (session: AuthSession) => {
     const gen = ++generation.current;
     if (!session?.user) {
+      resolvedAdminUserId.current = null;
       setUser(null);
       setStatus("signed_out");
       return;
     }
     setUser({ id: session.user.id, email: session.user.email ?? null });
     if (session.user.email_confirmed_at === null) {
+      resolvedAdminUserId.current = null;
       setStatus("unverified");
       return;
     }
-    setStatus("loading");
+    const isBackgroundRefreshForSameUser = resolvedAdminUserId.current === session.user.id;
+    if (!isBackgroundRefreshForSameUser) setStatus("loading");
     const isAdmin = await checkAdmin(client, session.user.id);
-    if (gen === generation.current) setStatus(isAdmin ? "admin" : "customer");
+    if (gen === generation.current) {
+      resolvedAdminUserId.current = session.user.id;
+      setStatus(isAdmin ? "admin" : "customer");
+    }
   }, [client]);
 
   useEffect(() => {
