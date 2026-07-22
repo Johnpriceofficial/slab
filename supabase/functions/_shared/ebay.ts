@@ -10,11 +10,11 @@ import {
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
-import { canonicalSkuFromInventoryNumber, hasFrontImage, orderedImagePaths } from "./ebay-listing-core.ts";
 import { fetchAllOffersForSku, OFFER_MAX_PAGES, type OffersDiscovery } from "./ebay-offers.ts";
 import { fetchInventoryItemForSku, type InventoryItemResult } from "./ebay-inventory-item.ts";
-import { buildImageManifest, buildIntendedState, canonicalListingFingerprint, LISTING_FINGERPRINT_VERSION, type ImageRole } from "./ebay-intended-state.ts";
-import { type ExecResult, executePublish, executeReconcile, type PublishExecutorOps, type ReconcileOps, type StoredIntent } from "./ebay-publish-executor.ts";
+import { type PersistenceResult, type PublishExecutorOps, type ReconcileLocalArgs, type ReconcileOps, type StoredIntent } from "./ebay-publish-executor.ts";
+import type { VerificationMethod } from "./ebay-provider-state-engine.ts";
+import { handlePublish, handleReconcile, type ListingDeps } from "./ebay-listing-handler.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -200,27 +200,18 @@ async function hashStorageObject(admin: AdminClient, path: string): Promise<stri
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Map an executor result to a response body (snake_case fields the UI expects).
-function execBody(r: ExecResult): Record<string, unknown> {
-  const b: Record<string, unknown> = { status: r.status };
-  if (r.errorCode) b.error_code = r.errorCode;
-  if (r.offerId) b.offer_id = r.offerId;
-  if (r.listingId !== undefined && r.listingId !== null) b.listing_id = r.listingId;
-  if (r.offerIds) b.offer_ids = r.offerIds;
-  if (r.imageEvidence) b.image_evidence = r.imageEvidence;
-  if (r.reconciled) b.reconciled = r.reconciled;
-  if (r.context) b.context = r.context;
-  if (r.message) b.message = r.message;
-  if (r.status === "success") b.listing_status = "published";
-  return b;
-}
 
-// Update a listing intent and PROVE persistence: no Supabase error AND exactly
-// one affected row (a concurrent delete/zero-row update must not look successful).
-async function recordIntentStatus(admin: AdminClient, intentId: string, status: string, lastError: string): Promise<boolean> {
-  const { data, error } = await admin.from("ebay_listing_intents").update({ status, last_error: lastError, updated_at: new Date().toISOString() }).eq("id", intentId).select("id");
-  return !error && Array.isArray(data) && data.length === 1;
+// Checked single-row intent update → structured PersistenceResult (no Supabase
+// error AND exactly one affected row; a concurrent delete/zero-row update never
+// looks successful, and the failure MODE is distinguishable).
+async function checkedIntentUpdate(admin: AdminClient, intentId: string, patch: Record<string, unknown>): Promise<PersistenceResult> {
+  const { data, error } = await admin.from("ebay_listing_intents").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", intentId).select("id");
+  if (error) return { ok: false, errorCode: "intent_update_failed" };
+  if (!Array.isArray(data) || data.length !== 1) return { ok: false, errorCode: "intent_row_count_mismatch" };
+  return { ok: true };
 }
+const recordStatusP = (admin: AdminClient, intentId: string, status: string, lastError: string): Promise<PersistenceResult> =>
+  checkedIntentUpdate(admin, intentId, { status, last_error: lastError });
 
 // Fence a long publish: prove THIS caller still holds its lease and extend it.
 // A false return means the lease was lost/superseded — abort before any mutation.
@@ -230,22 +221,37 @@ async function assertLeaseHeld(admin: AdminClient, accountId: string, sku: strin
   return (data as { held?: boolean } | null)?.held === true;
 }
 
-// Load the durable listing intent (with its snapshot columns) for the executor.
+// Load the durable listing intent (with its snapshot + honest image-evidence
+// columns) for the executor.
 async function loadStoredIntent(admin: AdminClient, accountId: string, sku: string): Promise<{ ok: true; intent: StoredIntent | null } | { ok: false }> {
-  const { data, error } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint, fingerprint_version, intended_state, image_manifest, provider_verified_at").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+  const { data, error } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint, fingerprint_version, intended_state, image_manifest, images_submitted_at, image_verification_method").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
   if (error) return { ok: false };
   const row = data as Record<string, unknown> | null;
   const intent: StoredIntent | null = row
-    ? { id: String(row.id), status: String(row.status), fingerprint: (row.fingerprint as string | null) ?? null, fingerprintVersion: (row.fingerprint_version as number | null) ?? null, offerId: (row.offer_id as string | null) ?? null, listingId: (row.listing_id as string | null) ?? null, intendedState: row.intended_state, imageManifest: row.image_manifest, providerVerified: row.provider_verified_at != null }
+    ? {
+        id: String(row.id), status: String(row.status),
+        fingerprint: (row.fingerprint as string | null) ?? null, fingerprintVersion: (row.fingerprint_version as number | null) ?? null,
+        offerId: (row.offer_id as string | null) ?? null, listingId: (row.listing_id as string | null) ?? null,
+        intendedState: row.intended_state, imageManifest: row.image_manifest,
+        imagesSubmittedAt: (row.images_submitted_at as string | null) ?? null,
+        verificationMethod: (row.image_verification_method as VerificationMethod | null) ?? null,
+      }
     : null;
   return { ok: true, intent };
 }
 
-// Checked single-row update stamping the exact provider identity + verification
-// time onto the intent (drives "verified" image evidence on later reconciles).
-async function setProviderVerified(admin: AdminClient, intentId: string, offerId: string, listingId: string | null): Promise<boolean> {
-  const { data, error } = await admin.from("ebay_listing_intents").update({ status: "published", offer_id: offerId, listing_id: listingId, provider_verified_at: new Date().toISOString(), last_error: null, updated_at: new Date().toISOString() }).eq("id", intentId).select("id");
-  return !error && Array.isArray(data) && data.length === 1;
+// ATOMIC local reconciliation via the transactional RPC → PersistenceResult. The
+// RPC proves identity + fingerprint under a row lock, then writes the mapping AND
+// the intent in ONE transaction (both or neither).
+async function reconcileLocalRpc(admin: AdminClient, ctx: { accountId: string; slabId: string; sku: string; currency: string }, args: ReconcileLocalArgs): Promise<PersistenceResult> {
+  const { data, error } = await admin.rpc("ebay_listing_reconcile_local", {
+    p_account_id: ctx.accountId, p_slab_id: ctx.slabId, p_sku: ctx.sku, p_intent_id: args.intentId,
+    p_offer_id: args.offerId, p_listing_id: args.listingId ?? "", p_listing_status: args.listingStatus,
+    p_asking_price_cents: args.askingPriceCents, p_currency: ctx.currency,
+    p_expected_fingerprint: args.fingerprint, p_expected_fingerprint_version: args.fingerprintVersion,
+  });
+  if (error) return { ok: false, errorCode: "reconcile_rpc_failed" };
+  return (data as { ok?: boolean } | null)?.ok === true ? { ok: true } : { ok: false, errorCode: "reconcile_rpc_failed" };
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification
@@ -262,13 +268,6 @@ async function fetchEbayPublicKey(kid: string): Promise<EbayPublicKey> {
 
 async function parseBody(req: Request): Promise<Record<string, unknown>> {
   try { return await req.json(); } catch { return {}; }
-}
-
-async function requireAdmin(req: Request) {
-  const auth = await isCallerAdmin(req);
-  if (!auth.user) return { error: unauthorizedResponse(corsHeaders), user: null };
-  if (!auth.isAdmin) return { error: reply({ status: "error", error_code: "NOT_AUTHORIZED", message: "Admin access required." }, 403), user: null };
-  return { error: null, user: auth.user };
 }
 
 function confirmation(body: Record<string, unknown>, phrase: string): Response | null {
@@ -340,7 +339,99 @@ function unavailable(operation: Operation, capability: string): Response {
   }, 409);
 }
 
-export async function handleEbay(req: Request, operation: Operation): Promise<Response> {
+// ── Injected adapter dependencies ───────────────────────────────────────────
+// handleEbay routes ALL listing-critical auth/I/O through this interface, so the
+// SAME exported handler the Edge entrypoints call is executable in tests with
+// mocked dependencies (src/test/ebay/handler-adapter.test.ts). realDeps() binds the
+// production implementations. Each dependency is a DOMAIN operation, so tests do
+// NOT fragilely stub the Supabase client or global modules.
+// The listing-critical domain operations live in `ListingDeps` (ebay-listing-handler);
+// the full EbayDeps adds the shared auth/admin/token/clock the rest of handleEbay uses.
+export interface EbayDeps extends ListingDeps {
+  verifyAdmin: (req: Request) => Promise<{ ok: boolean; userId: string | null }>;
+  makeAdmin: () => AdminClient;
+  loadAccessToken: (accountId: string) => Promise<{ ok: true; token: string } | { ok: false }>;
+  now: () => number;
+}
+
+function realDeps(): EbayDeps {
+  let cached: AdminClient | null = null;
+  const admin = () => (cached ??= makeAdmin());
+  return {
+    verifyAdmin: async (req) => { const a = await isCallerAdmin(req); return { ok: !!a.user && !!a.isAdmin, userId: a.user?.id ?? null }; },
+    flagEnabled,
+    makeAdmin,
+    loadAccessToken: async (accountId) => { try { return { ok: true, token: await userAccessToken(admin(), accountId) }; } catch { return { ok: false }; } },
+    loadSlabForListing: async (slabId) => {
+      const { data, error } = await admin().from("slabs").select("inventory_number, front_image_path, back_image_path").eq("id", slabId).maybeSingle();
+      if (error) return { ok: false };
+      const row = data as Record<string, unknown> | null;
+      return { ok: true, slab: row ? { inventoryNumber: Number(row.inventory_number), frontImagePath: (row.front_image_path as string | null) ?? null, backImagePath: (row.back_image_path as string | null) ?? null } : null };
+    },
+    verifyListingOwnership: async (a) => {
+      const [locOwn, fulOwn, payOwn, retOwn] = await Promise.all([
+        admin().from("ebay_inventory_locations").select("merchant_location_key, status").eq("ebay_account_id", a.accountId).eq("merchant_location_key", a.merchantLocationKey).maybeSingle(),
+        admin().from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", a.accountId).eq("policy_id", a.fulfillmentPolicyId).eq("policy_type", "fulfillment").maybeSingle(),
+        admin().from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", a.accountId).eq("policy_id", a.paymentPolicyId).eq("policy_type", "payment").maybeSingle(),
+        admin().from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", a.accountId).eq("policy_id", a.returnPolicyId).eq("policy_type", "return").maybeSingle(),
+      ]);
+      if (locOwn.error || fulOwn.error || payOwn.error || retOwn.error) return { ok: false, errorCode: "ownership_check_failed", httpStatus: 500 };
+      if (!locOwn.data) return { ok: false, errorCode: "unknown_location", httpStatus: 400 };
+      const locStatus = String((locOwn.data as Record<string, unknown>).status ?? "").toUpperCase();
+      if (locStatus && locStatus !== "ENABLED") return { ok: false, errorCode: "location_not_enabled", httpStatus: 400 };
+      if (!fulOwn.data) return { ok: false, errorCode: "unknown_fulfillment_policy", httpStatus: 400 };
+      if (!payOwn.data) return { ok: false, errorCode: "unknown_payment_policy", httpStatus: 400 };
+      if (!retOwn.data) return { ok: false, errorCode: "unknown_return_policy", httpStatus: 400 };
+      const mismatch = [fulOwn, payOwn, retOwn].some((p) => { const m = String((p.data as Record<string, unknown>).marketplace_id ?? ""); return m && m !== a.marketplaceId; });
+      if (mismatch) return { ok: false, errorCode: "policy_marketplace_mismatch", httpStatus: 400 };
+      return { ok: true };
+    },
+    signImageUrl: async (path) => { const { data, error } = await admin().storage.from("slab-images").createSignedUrl(path, 3600); return error || !data?.signedUrl ? null : data.signedUrl; },
+    hashImage: (path) => hashStorageObject(admin(), path),
+    leaseAcquire: async (accountId, sku, token) => {
+      const acq = await admin().rpc("ebay_publish_lease_acquire", { p_account_id: accountId, p_sku: sku, p_token: token, p_ttl_seconds: 120 });
+      if (acq.error) return { acquired: false, error: true };
+      return { acquired: (acq.data as { acquired?: boolean } | null)?.acquired === true, error: false };
+    },
+    makePublishOps: (b) => {
+      const a = admin();
+      return {
+        loadIntent: () => loadStoredIntent(a, b.accountId, b.sku),
+        writePreparing: async (snap) => {
+          const { data, error } = await a.from("ebay_listing_intents").upsert({ ebay_account_id: b.accountId, slab_id: b.slabId, sku: b.sku, fingerprint: snap.fingerprint, fingerprint_version: snap.fingerprintVersion, intended_state: snap.intendedState, image_manifest: snap.imageManifest, status: "preparing", last_error: null, images_submitted_at: null, image_verification_method: null, provider_image_evidence: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+          if (error || !Array.isArray(data) || data.length !== 1) return { ok: false };
+          return { ok: true, intentId: String((data[0] as { id: string }).id) };
+        },
+        recordStatus: (id, status, err) => recordStatusP(a, id, status, err),
+        recordOfferCreated: (id, offerId) => checkedIntentUpdate(a, id, { status: "offer_created", offer_id: offerId, images_submitted_at: new Date().toISOString(), image_verification_method: "submitted_only", provider_image_evidence: { method: "submitted_only", offer_id: offerId }, last_error: `offer:${offerId}` }),
+        reconcileLocal: (args) => reconcileLocalRpc(a, { accountId: b.accountId, slabId: b.slabId, sku: b.sku, currency: b.currency }, args),
+        discoverOffers: (s) => discoverOffers(b.accessToken, s),
+        fetchInventoryItem: (s) => discoverInventoryItem(b.accessToken, s),
+        assertLease: () => assertLeaseHeld(a, b.accountId, b.sku, b.leaseToken),
+        putInventoryItem: async () => { try { await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(b.sku)}`, b.accessToken, { method: "PUT", body: JSON.stringify(b.inventoryPayload) }); return { ok: true }; } catch { return { ok: false }; } },
+        createOffer: async () => { try { const offer = await ebayFetch("/sell/inventory/v1/offer", b.accessToken, { method: "POST", body: JSON.stringify(b.offerPayload) }); return { ok: true, offerId: offer.offerId ? String(offer.offerId) : null }; } catch { return { ok: false, offerId: null }; } },
+        publishOffer: async (offerId) => { try { const p = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, b.accessToken, { method: "POST", body: "{}" }); return { ok: true, listingId: p.listingId ? String(p.listingId) : null }; } catch { return { ok: false, listingId: null }; } },
+        recordApiRun: async (op, status, code) => (await recordApiRun(a, b.accountId, op, status, 0, code)) ? { ok: true } : { ok: false, errorCode: "api_run_persist_failed" },
+        releaseLease: async () => { const rel = await a.rpc("ebay_publish_lease_release", { p_account_id: b.accountId, p_sku: b.sku, p_token: b.leaseToken }); if (rel.error) return { released: false }; return { released: (rel.data as { released?: boolean } | null)?.released === true }; },
+      };
+    },
+    makeReconcileOps: (b) => {
+      const a = admin();
+      return {
+        loadIntent: () => loadStoredIntent(a, b.accountId, b.sku),
+        recordStatus: (id, status, err) => recordStatusP(a, id, status, err),
+        reconcileLocal: (args) => reconcileLocalRpc(a, { accountId: b.accountId, slabId: b.slabId, sku: b.sku, currency: b.currency }, args),
+        recordApiRun: async (op, status, code) => (await recordApiRun(a, b.accountId, op, status, 0, code)) ? { ok: true } : { ok: false, errorCode: "api_run_persist_failed" },
+        discoverOffers: (s) => discoverOffers(b.accessToken, s),
+        fetchInventoryItem: (s) => discoverInventoryItem(b.accessToken, s),
+      };
+    },
+    now: () => Date.now(),
+    uuid: () => crypto.randomUUID(),
+  };
+}
+
+export async function handleEbay(req: Request, operation: Operation, deps: EbayDeps = realDeps()): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (!configured()) return unavailable(operation, operation === "reference_search" ? "Browse API" : "Seller API");
 
@@ -465,8 +556,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     return appRedirect(outcome.stage === "connected" ? stored.redirect_after : null, outcome.query);
   }
 
-  const auth = await requireAdmin(req);
-  if (auth.error) return auth.error;
+  const authv = await deps.verifyAdmin(req);
+  if (!authv.ok) return unauthorizedResponse(corsHeaders);
   const body = await parseBody(req);
 
   if (operation === "oauth_start") {
@@ -477,7 +568,7 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // create exactly one, under an advisory lock scoped to the requester.
     const { error: stateError } = await admin.rpc("ebay_oauth_state_create_single_flight", {
       p_state_hash: await sha256(state),
-      p_requested_by: auth.user!.id,
+      p_requested_by: authv.userId!,
       p_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
       p_redirect_after: body.redirect_after ?? null,
     });
@@ -684,9 +775,12 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
 
   const accountId = String(body.account_id ?? "");
   if (!accountId) return reply({ status: "error", error_code: "MISSING_ACCOUNT", message: "account_id is required." }, 400);
-  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  let accessToken: string;
-  try { accessToken = await userAccessToken(admin, accountId); } catch { return unavailable(operation, "Connected eBay account"); }
+  // The service-role admin client is used by the non-listing seller ops; the
+  // listing ops (list_item / reconcile) reach the DB only through injected deps.
+  const admin = deps.makeAdmin();
+  const tok = await deps.loadAccessToken(accountId);
+  if (!tok.ok) return unavailable(operation, "Connected eBay account");
+  const accessToken = tok.token;
 
   if (operation === "list_item") {
     const marketplaceId = String(body.marketplace_id ?? "EBAY_US");
@@ -739,185 +833,22 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
           : "Some listing requirements could not be loaded — Publish stays blocked. See per-resource status.",
       });
     }
-    // Publishing is a listing mutation: server flag gates it, and a confirmation
-    // phrase cannot bypass a disabled flag.
-    if (!flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("list_item", "listing");
-    const slabId = String(body.slab_id ?? "");
-    const clientSku = String(body.sku ?? "");
-    const merchantLocationKey = String(body.merchant_location_key ?? "");
-    const fulfillmentPolicyId = String(body.fulfillment_policy_id ?? "");
-    const paymentPolicyId = String(body.payment_policy_id ?? "");
-    const returnPolicyId = String(body.return_policy_id ?? "");
-    const priceValue = Number(body.price_value);
-    const currency = String(body.currency ?? "USD");
-    const condition = String(body.condition ?? "").trim();
-    const title = String(body.title ?? "").trim();
-    const description = String(body.description ?? "").trim();
-    // Quantity is validated ONCE and reused everywhere (fingerprint, inventory,
-    // offer, provider comparison): finite integer, 1..MAX.
-    const MAX_QUANTITY = 999;
-    const quantityRaw = body.quantity === undefined ? 1 : Number(body.quantity);
-    const quantity = quantityRaw;
-    if (!slabId || !categoryId || !merchantLocationKey || !fulfillmentPolicyId || !paymentPolicyId || !returnPolicyId || !condition || !title || title.length > 80 || !description || currency !== "USD" || !Number.isFinite(priceValue) || priceValue <= 0) {
-      return reply({ status: "error", error_code: "INCOMPLETE_LISTING", message: "Slab, category, location, all three policies, a non-empty condition, a 1–80 char title, a description, USD currency, and a positive price are all required." }, 400);
-    }
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) {
-      return reply({ status: "error", error_code: "invalid_quantity", message: `Quantity must be an integer between 1 and ${MAX_QUANTITY}.` }, 400);
-    }
-
-    // Fetch the slab and DERIVE the canonical SKU server-side — never trust body.sku.
-    const { data: slabRow, error: slabErr } = await admin.from("slabs").select("inventory_number, front_image_path, back_image_path").eq("id", slabId).maybeSingle();
-    if (slabErr) return reply({ status: "error", error_code: "slab_lookup_failed" }, 500);
-    if (!slabRow) return reply({ status: "error", error_code: "slab_not_found" }, 404);
-    const inventoryNumber = Number((slabRow as Record<string, unknown>).inventory_number);
-    if (!Number.isFinite(inventoryNumber)) return reply({ status: "error", error_code: "slab_missing_inventory_number" }, 500);
-    const sku = canonicalSkuFromInventoryNumber(inventoryNumber);
-    if (clientSku && clientSku !== sku) return reply({ status: "error", error_code: "canonical_sku_mismatch", message: "The submitted SKU does not match the slab's canonical SKU." }, 400);
-    if (!hasFrontImage((slabRow as Record<string, unknown>).front_image_path)) {
-      return reply({ status: "error", error_code: "front_image_required", message: "A front image is required before publishing to eBay." }, 400);
-    }
-
-    // The location + all three policies MUST belong to THIS account (persisted
-    // discovery), the location must be usable, and each policy's marketplace must
-    // match — each with a DISTINCT error. A client-supplied foreign id is rejected.
-    const [locOwn, fulOwn, payOwn, retOwn] = await Promise.all([
-      admin.from("ebay_inventory_locations").select("merchant_location_key, status").eq("ebay_account_id", accountId).eq("merchant_location_key", merchantLocationKey).maybeSingle(),
-      admin.from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", accountId).eq("policy_id", fulfillmentPolicyId).eq("policy_type", "fulfillment").maybeSingle(),
-      admin.from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", accountId).eq("policy_id", paymentPolicyId).eq("policy_type", "payment").maybeSingle(),
-      admin.from("ebay_business_policies").select("policy_id, marketplace_id").eq("ebay_account_id", accountId).eq("policy_id", returnPolicyId).eq("policy_type", "return").maybeSingle(),
-    ]);
-    if (locOwn.error || fulOwn.error || payOwn.error || retOwn.error) return reply({ status: "error", error_code: "ownership_check_failed" }, 500);
-    if (!locOwn.data) return reply({ status: "error", error_code: "unknown_location", message: "The inventory location is not one of this account's discovered locations." }, 400);
-    const locStatus = String((locOwn.data as Record<string, unknown>).status ?? "").toUpperCase();
-    if (locStatus && locStatus !== "ENABLED") return reply({ status: "error", error_code: "location_not_enabled", message: "The selected inventory location is not enabled." }, 400);
-    if (!fulOwn.data) return reply({ status: "error", error_code: "unknown_fulfillment_policy" }, 400);
-    if (!payOwn.data) return reply({ status: "error", error_code: "unknown_payment_policy" }, 400);
-    if (!retOwn.data) return reply({ status: "error", error_code: "unknown_return_policy" }, 400);
-    const policyMarketplaceMismatch = [fulOwn, payOwn, retOwn].some((p) => {
-      const m = String((p.data as Record<string, unknown>).marketplace_id ?? "");
-      return m && m !== marketplaceId;
-    });
-    if (policyMarketplaceMismatch) return reply({ status: "error", error_code: "policy_marketplace_mismatch", message: "A selected business policy belongs to a different marketplace." }, 400);
-
-    // Signed image URLs for the eBay PUT (fresh, short-lived) AND stable byte
-    // hashes for the DURABLE image manifest (role + storage path + SHA-256, never
-    // signed URLs, which change on every request and must not enter the fingerprint).
-    const orderedPaths = orderedImagePaths((slabRow as Record<string, unknown>).front_image_path, (slabRow as Record<string, unknown>).back_image_path);
-    const imageUrls: string[] = [];
-    const manifestImages: Array<{ role: ImageRole; path: string; sha256: string }> = [];
-    const imageRoles: ImageRole[] = ["front", "back"];
-    for (let i = 0; i < orderedPaths.length; i++) {
-      const path = orderedPaths[i];
-      const { data: signed, error: signErr } = await admin.storage.from("slab-images").createSignedUrl(path, 3600);
-      if (signErr || !signed?.signedUrl) return reply({ status: "error", error_code: "image_url_generation_failed", message: "Could not generate a signed image URL for the listing." }, 502);
-      imageUrls.push(signed.signedUrl);
-      const sha256 = await hashStorageObject(admin, path);
-      if (!sha256) return reply({ status: "error", error_code: "image_manifest_failed", message: "Could not read a listing image to build its durable manifest." }, 502);
-      manifestImages.push({ role: imageRoles[i] ?? "back", path, sha256 });
-    }
-    if (imageUrls.length === 0) return reply({ status: "error", error_code: "front_image_required" }, 400);
-    const manifest = buildImageManifest(manifestImages);
-    if (!manifest) return reply({ status: "error", error_code: "image_manifest_failed" }, 500);
-
-    // Build the DURABLE canonical intended state + SHA-256 fingerprint (v3).
-    const conditionDescription = String(body.condition_description ?? "");
-    const aspects = (body.aspects && typeof body.aspects === "object" ? body.aspects : {}) as Record<string, unknown>;
-    const intendedState = buildIntendedState({
-      sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId,
-      price: priceValue, currency, availableQuantity: quantity, listingDescription: description,
-      title, description, condition, conditionDescription, conditionDescriptors: [], aspects,
-    });
-    if (!intendedState) return reply({ status: "error", error_code: "INCOMPLETE_LISTING", message: "The listing inputs are not complete/canonical." }, 400);
-    const fingerprint = await canonicalListingFingerprint(intendedState, manifest);
-
-    // RACE-SAFE single-flight lease (acquired here; the executor releases it on
-    // every path). A second concurrent publish for the SKU gets publish_in_progress.
-    const leaseToken = crypto.randomUUID();
-    const acq = await admin.rpc("ebay_publish_lease_acquire", { p_account_id: accountId, p_sku: sku, p_token: leaseToken, p_ttl_seconds: 120 });
-    if (acq.error) return reply({ status: "error", error_code: "lease_acquire_failed" }, 500);
-    if (!(acq.data as { acquired?: boolean } | null)?.acquired) return reply({ status: "publish_in_progress", message: "Another publish for this SKU is already in progress." }, 409);
-
-    // The REAL orchestration lives in the injected-ops executor (same code path the
-    // handler-side-effect tests drive): read-all-then-decide via the shared state
-    // engine, every provider step lease-fenced, every single-row write checked.
-    const inventoryPayload = { availability: { shipToLocationAvailability: { quantity } }, condition, conditionDescription: conditionDescription || undefined, product: { title, description, aspects, imageUrls } };
-    const offerPayload = { sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: quantity, categoryId, merchantLocationKey, listingDescription: description, pricingSummary: { price: { currency, value: priceValue.toFixed(2) } }, listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId } };
-    const ops: PublishExecutorOps = {
-      loadIntent: () => loadStoredIntent(admin, accountId, sku),
-      writePreparing: async (snap) => {
-        const { data, error } = await admin.from("ebay_listing_intents").upsert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint: snap.fingerprint, fingerprint_version: snap.fingerprintVersion, intended_state: snap.intendedState, image_manifest: snap.imageManifest, status: "preparing", last_error: null, provider_verified_at: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
-        if (error || !Array.isArray(data) || data.length !== 1) return { ok: false };
-        return { ok: true, intentId: String((data[0] as { id: string }).id) };
-      },
-      recordStatus: (id, status, err) => recordIntentStatus(admin, id, status, err),
-      recordOfferCreated: async (id, offerId) => {
-        const { data, error } = await admin.from("ebay_listing_intents").update({ status: "offer_created", offer_id: offerId, provider_verified_at: new Date().toISOString(), last_error: `offer:${offerId}`, updated_at: new Date().toISOString() }).eq("id", id).select("id");
-        return !error && Array.isArray(data) && data.length === 1;
-      },
-      setProviderVerified: (id, offerId, listingId) => setProviderVerified(admin, id, offerId, listingId),
-      upsertMapping: async (m) => {
-        const { data, error } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: m.offerId, listing_id: m.listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
-        return !error && Array.isArray(data) && data.length === 1;
-      },
-      discoverOffers: (s) => discoverOffers(accessToken, s),
-      fetchInventoryItem: (s) => discoverInventoryItem(accessToken, s),
-      assertLease: () => assertLeaseHeld(admin, accountId, sku, leaseToken),
-      putInventoryItem: async () => {
-        try { await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) }); return { ok: true }; }
-        catch { return { ok: false }; }
-      },
-      createOffer: async () => {
-        try { const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify(offerPayload) }); return { ok: true, offerId: offer.offerId ? String(offer.offerId) : null }; }
-        catch { return { ok: false, offerId: null }; }
-      },
-      publishOffer: async (offerId) => {
-        try { const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" }); return { ok: true, listingId: published.listingId ? String(published.listingId) : null }; }
-        catch { return { ok: false, listingId: null }; }
-      },
-      recordApiRun: (op, status, code) => recordApiRun(admin, accountId, op, status, 0, code),
-      releaseLease: async () => {
-        const rel = await admin.rpc("ebay_publish_lease_release", { p_account_id: accountId, p_sku: sku, p_token: leaseToken });
-        if (rel.error) return { released: false };
-        return { released: (rel.data as { released?: boolean } | null)?.released === true };
-      },
-    };
-    const result = await executePublish(ops, { intended: intendedState, manifest, fingerprint, fingerprintVersion: LISTING_FINGERPRINT_VERSION });
-    return reply(execBody(result), result.httpStatus);
+    // list_item PUBLISH is handled by the injected-deps listing handler (the SAME
+    // routing/binding the handler-adapter tests drive). The listing-flag gate,
+    // input validation, server-side SKU derivation, ownership, durable manifest +
+    // fingerprint, single-flight lease, and executor binding all live there — a
+    // confirmation phrase can never bypass the disabled flag.
+    const pub = await handlePublish({ body, accountId, accessToken, marketplaceId, categoryId, deps });
+    return reply(pub.body, pub.httpStatus);
   }
 
   if (operation === "revise_item" && body.action === "reconcile") {
-    // Reconcile through the SAME state engine as publish, using the DURABLE
-    // intended-state snapshot (never request-body values) as the source of truth,
-    // and the server-derived canonical SKU. A mapping is written ONLY for an exact
-    // already-published match — never merely because getOffers returned one offer.
-    const slabId = String(body.slab_id ?? "");
-    const clientSku = String(body.sku ?? "");
-    if (!slabId) return reply({ status: "error", error_code: "MISSING_SLAB", message: "slab_id is required to reconcile." }, 400);
-    const { data: slabRow, error: slabErr } = await admin.from("slabs").select("inventory_number").eq("id", slabId).maybeSingle();
-    if (slabErr) return reply({ status: "error", error_code: "slab_lookup_failed" }, 500);
-    if (!slabRow) return reply({ status: "error", error_code: "slab_not_found" }, 404);
-    const invNum = Number((slabRow as Record<string, unknown>).inventory_number);
-    if (!Number.isFinite(invNum)) return reply({ status: "error", error_code: "slab_missing_inventory_number" }, 500);
-    const sku = canonicalSkuFromInventoryNumber(invNum);
-    if (clientSku && clientSku !== sku) return reply({ status: "error", error_code: "canonical_sku_mismatch" }, 400);
-
-    const reconcileOps: ReconcileOps = {
-      loadIntent: () => loadStoredIntent(admin, accountId, sku),
-      recordStatus: (id, status, err) => recordIntentStatus(admin, id, status, err),
-      setProviderVerified: (id, offerId, listingId) => setProviderVerified(admin, id, offerId, listingId),
-      upsertMapping: async (m) => {
-        const { data, error } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: m.offerId, listing_id: m.listingId, listing_status: "published", last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
-        return !error && Array.isArray(data) && data.length === 1;
-      },
-      discoverOffers: (s) => discoverOffers(accessToken, s),
-      fetchInventoryItem: (s) => discoverInventoryItem(accessToken, s),
-    };
-    const result = await executeReconcile(reconcileOps);
-    return reply(execBody(result), result.httpStatus);
+    const rec = await handleReconcile({ body, accountId, accessToken, marketplaceId: "", categoryId: "", deps });
+    return reply(rec.body, rec.httpStatus);
   }
 
   if (operation === "revise_item") {
-    if (!flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("revise_item", "listing");
+    if (!deps.flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("revise_item", "listing");
     const needs = confirmation(body, "REVISE"); if (needs) return needs;
     const offerId = String(body.offer_id ?? "");
     if (!offerId) return reply({ status: "error", error_code: "MISSING_OFFER", message: "offer_id is required." }, 400);
@@ -931,7 +862,7 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
   }
 
   if (operation === "end_item") {
-    if (!flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("end_item", "listing");
+    if (!deps.flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("end_item", "listing");
     const needs = confirmation(body, "END"); if (needs) return needs;
     const offerId = String(body.offer_id ?? "");
     await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, accessToken, { method: "POST", body: "{}" });
@@ -945,7 +876,7 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // ONLY over already-persisted lines. It never re-fetches or re-persists
     // provider orders, and it is gated by its own server flag + typed phrase.
     if (body.confirmation === "APPLY_SALES") {
-      if (!flagEnabled(MUTATION_FLAGS.applySales)) return mutationDisabled("order_sync", "apply-sales");
+      if (!deps.flagEnabled(MUTATION_FLAGS.applySales)) return mutationDisabled("order_sync", "apply-sales");
       const sales = Array.isArray(body.sales) ? body.sales : [];
       if (sales.length === 0) return reply({ status: "error", error_code: "no_sales_selected", message: "No persisted sale lines were selected to apply." }, 400);
       const ta = Date.now();
@@ -1007,8 +938,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
   if (operation === "fulfillment") {
     const action = String(body.action ?? "ship");
     // Ship is a fulfillment mutation; refund moves money (financial mutation).
-    if (action === "refund" && !flagEnabled(MUTATION_FLAGS.financial)) return mutationDisabled("fulfillment", "financial");
-    if (action !== "refund" && !flagEnabled(MUTATION_FLAGS.fulfillment)) return mutationDisabled("fulfillment", "fulfillment");
+    if (action === "refund" && !deps.flagEnabled(MUTATION_FLAGS.financial)) return mutationDisabled("fulfillment", "financial");
+    if (action !== "refund" && !deps.flagEnabled(MUTATION_FLAGS.fulfillment)) return mutationDisabled("fulfillment", "fulfillment");
     const phrase = action === "refund" ? "REFUND" : "SHIP";
     const needs = confirmation(body, phrase); if (needs) return needs;
     const orderId = String(body.order_id ?? "");

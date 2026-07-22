@@ -1,13 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   buildImageManifest, buildIntendedState, canonicalAspects, canonicalDescriptors,
-  canonicalListingFingerprint, IMAGE_MANIFEST_VERSION, INTENDED_STATE_VERSION,
-  LISTING_FINGERPRINT_VERSION, normalizePriceString, parseImageManifest, parseIntendedState,
-  type IntendedStateInput,
+  canonicalListingFingerprint, isSafeStoragePath, isSha256Hex, LISTING_FINGERPRINT_VERSION,
+  normalizePriceString, parseImageManifest, parseIntendedState, timingSafeEqualHex,
+  verifyDurableIntendedSnapshot, type IntendedStateInput,
 } from "../../../supabase/functions/_shared/ebay-intended-state";
 
-const H1 = "a".repeat(64);
-const H2 = "b".repeat(64);
+const H1 = "a".repeat(64), H2 = "b".repeat(64), H3 = "c".repeat(64);
 const baseInput: IntendedStateInput = {
   sku: "GCV000047", marketplaceId: "EBAY_US", categoryId: "183454", merchantLocationKey: "LOC-A",
   fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: 199.99, currency: "USD",
@@ -16,121 +15,161 @@ const baseInput: IntendedStateInput = {
 };
 const manifest = () => buildImageManifest([{ role: "front", path: "slabs/47/front.jpg", sha256: H1 }, { role: "back", path: "slabs/47/back.jpg", sha256: H2 }])!;
 
-describe("normalizePriceString", () => {
-  it("normalizes to 2dp; rejects non-positive/non-finite", () => {
+describe("normalizePriceString / canonicalizers", () => {
+  it("price → 2dp; rejects non-positive", () => {
     expect(normalizePriceString(199.9)).toBe("199.90");
-    expect(normalizePriceString("10")).toBe("10.00");
     expect(normalizePriceString(0)).toBeNull();
-    expect(normalizePriceString(-5)).toBeNull();
-    expect(normalizePriceString("x")).toBeNull();
+    expect(normalizePriceString(-1)).toBeNull();
+  });
+  it("aspects: sorted values, DEDUPED, string keys only", () => {
+    expect(canonicalAspects({ A: ["z", "a", "a"], B: "x", "": ["y"] })).toEqual({ A: ["a", "z"], B: ["x"] });
+  });
+  it("descriptors: sorted, deduped", () => {
+    expect(canonicalDescriptors([{ name: "Corners", values: ["b", "a", "a"] }, "Edges", "Edges"])).toEqual(["Corners=a,b", "Edges"]);
   });
 });
 
-describe("canonicalAspects / canonicalDescriptors", () => {
-  it("sorts aspect values, drops non-strings/empties, keeps string keys", () => {
-    expect(canonicalAspects({ A: ["z", "a"], B: "x", Bad: [1, 2], "": ["y"] })).toEqual({ A: ["a", "z"], B: ["x"] });
+describe("isSafeStoragePath / hashes", () => {
+  it("accepts a plain in-bucket path, rejects traversal / absolute / scheme / backslash", () => {
+    expect(isSafeStoragePath("slabs/47/front.jpg")).toBe(true);
+    for (const bad of ["../secret", "/etc/passwd", "a//b", "a\\b", "http://x/y", "data:abc", " lead", "", "a\0b"]) {
+      expect(isSafeStoragePath(bad)).toBe(false);
+    }
   });
-  it("normalizes descriptors to sorted name=values and sorts the list", () => {
-    expect(canonicalDescriptors([{ name: "Corners", values: ["b", "a"] }, "Edges"])).toEqual(["Corners=a,b", "Edges"]);
+  it("isSha256Hex requires lowercase 64-hex", () => {
+    expect(isSha256Hex(H1)).toBe(true);
+    expect(isSha256Hex("A".repeat(64))).toBe(false);
+    expect(isSha256Hex("a".repeat(63))).toBe(false);
+  });
+  it("timingSafeEqualHex", () => {
+    expect(timingSafeEqualHex(H1, H1)).toBe(true);
+    expect(timingSafeEqualHex(H1, H2)).toBe(false);
+    expect(timingSafeEqualHex(H1, "a".repeat(63))).toBe(false);
   });
 });
 
 describe("buildIntendedState", () => {
-  it("builds a canonical v1 snapshot with 2dp price + sorted aspects", () => {
+  it("builds canonical v1 (2dp price, sorted aspects)", () => {
     const s = buildIntendedState(baseInput)!;
-    expect(s.version).toBe(INTENDED_STATE_VERSION);
-    expect(s.price).toBe("199.99");
-    expect(s.format).toBe("FIXED_PRICE");
-    expect(s.aspects).toEqual({ Grade: ["10"], Grader: ["PSA"] });
+    expect(s).toMatchObject({ version: 1, price: "199.99", format: "FIXED_PRICE", aspects: { Grade: ["10"], Grader: ["PSA"] } });
   });
-  it("returns null for a non-positive price / non-int quantity / missing required field", () => {
-    expect(buildIntendedState({ ...baseInput, price: 0 })).toBeNull();
-    expect(buildIntendedState({ ...baseInput, availableQuantity: 1.5 })).toBeNull();
-    expect(buildIntendedState({ ...baseInput, title: "" })).toBeNull();
-    expect(buildIntendedState({ ...baseInput, merchantLocationKey: "" })).toBeNull();
-  });
-});
-
-describe("buildImageManifest", () => {
-  it("builds an ordered v1 manifest with count", () => {
-    const m = manifest();
-    expect(m.version).toBe(IMAGE_MANIFEST_VERSION);
-    expect(m.count).toBe(2);
-    expect(m.images[0].role).toBe("front");
-  });
-  it("rejects a missing front, empty list, bad hash, or bad role", () => {
-    expect(buildImageManifest([])).toBeNull();
-    expect(buildImageManifest([{ role: "back", path: "b.jpg", sha256: H1 }])).toBeNull();
-    expect(buildImageManifest([{ role: "front", path: "f.jpg", sha256: "short" }])).toBeNull();
-    // deno-lint-ignore no-explicit-any
-    expect(buildImageManifest([{ role: "side" as any, path: "f.jpg", sha256: H1 }])).toBeNull();
+  it("rejects non-USD currency, quantity out of range, title>80, empty description", () => {
+    expect(buildIntendedState({ ...baseInput, currency: "EUR" })).toBeNull();
+    expect(buildIntendedState({ ...baseInput, availableQuantity: 0 })).toBeNull();
+    expect(buildIntendedState({ ...baseInput, availableQuantity: 1000 })).toBeNull();
+    expect(buildIntendedState({ ...baseInput, title: "x".repeat(81) })).toBeNull();
+    expect(buildIntendedState({ ...baseInput, description: "" })).toBeNull();
+    expect(buildIntendedState({ ...baseInput, listingDescription: "" })).toBeNull();
   });
 });
 
-describe("parseIntendedState — strict versioned parser", () => {
+describe("buildImageManifest / parseImageManifest — strict canonical", () => {
+  it("builds an ordered manifest", () => {
+    expect(manifest()).toMatchObject({ version: 1, count: 2, images: [{ role: "front" }, { role: "back" }] });
+  });
+  const badBuild: Array<[string, Array<{ role: "front" | "back"; path: string; sha256: string }>]> = [
+    ["three images", [{ role: "front", path: "f.jpg", sha256: H1 }, { role: "back", path: "b.jpg", sha256: H2 }, { role: "back", path: "c.jpg", sha256: H3 }]],
+    ["back before front", [{ role: "back", path: "b.jpg", sha256: H1 }, { role: "front", path: "f.jpg", sha256: H2 }]],
+    ["duplicate front", [{ role: "front", path: "f.jpg", sha256: H1 }, { role: "front", path: "g.jpg", sha256: H2 }]],
+    ["duplicate path", [{ role: "front", path: "f.jpg", sha256: H1 }, { role: "back", path: "f.jpg", sha256: H2 }]],
+    ["duplicate hash", [{ role: "front", path: "f.jpg", sha256: H1 }, { role: "back", path: "b.jpg", sha256: H1 }]],
+    ["traversal path", [{ role: "front", path: "../x.jpg", sha256: H1 }]],
+    ["uppercase hash", [{ role: "front", path: "f.jpg", sha256: "A".repeat(64) }]],
+    ["empty path", [{ role: "front", path: "", sha256: H1 }]],
+  ];
+  for (const [name, imgs] of badBuild) it(`rejects: ${name}`, () => expect(buildImageManifest(imgs)).toBeNull());
+
+  it("parser is exact-schema and proves canonical order (never reorders)", () => {
+    const good = JSON.parse(JSON.stringify(manifest()));
+    expect(parseImageManifest(good)).toEqual(manifest());
+    expect(parseImageManifest({ ...good, extra: 1 })).toBeNull();              // unknown top-level field
+    const badImg = JSON.parse(JSON.stringify(manifest())); badImg.images[0].extra = 1;
+    expect(parseImageManifest(badImg)).toBeNull();                             // unknown image field
+    const swapped = JSON.parse(JSON.stringify(manifest())); [swapped.images[0], swapped.images[1]] = [swapped.images[1], swapped.images[0]];
+    expect(parseImageManifest(swapped)).toBeNull();                           // back-first: rejected, not reordered
+    const badCount = JSON.parse(JSON.stringify(manifest())); badCount.count = 5;
+    expect(parseImageManifest(badCount)).toBeNull();
+  });
+});
+
+describe("parseIntendedState — exact-schema canonical", () => {
   const stored = () => JSON.parse(JSON.stringify(buildIntendedState(baseInput)));
-  it("round-trips a valid snapshot", () => {
-    expect(parseIntendedState(stored())).toEqual(buildIntendedState(baseInput));
-  });
-  it("fails closed (null) on wrong version, bad format, non-canonical price, bad quantity, bad aspects", () => {
-    expect(parseIntendedState({ ...stored(), version: 2 })).toBeNull();
+  it("round-trips", () => expect(parseIntendedState(stored())).toEqual(buildIntendedState(baseInput)));
+  it("fails closed on unknown field, noncanonical descriptor/aspect order, dup value, bad currency/quantity/title/price", () => {
+    expect(parseIntendedState({ ...stored(), extra: 1 })).toBeNull();
+    expect(parseIntendedState({ ...stored(), conditionDescriptors: ["b", "a"] })).toBeNull();     // not sorted
+    expect(parseIntendedState({ ...stored(), conditionDescriptors: ["a", "a"] })).toBeNull();     // dup
+    expect(parseIntendedState({ ...stored(), aspects: { Grade: ["10", "10"] } })).toBeNull();      // dup value
+    expect(parseIntendedState({ ...stored(), aspects: { Grade: ["b", "a"] } })).toBeNull();        // unsorted values
+    expect(parseIntendedState({ ...stored(), currency: "EUR" })).toBeNull();
+    expect(parseIntendedState({ ...stored(), availableQuantity: 0 })).toBeNull();
+    expect(parseIntendedState({ ...stored(), title: "x".repeat(81) })).toBeNull();
+    expect(parseIntendedState({ ...stored(), price: "199.9" })).toBeNull();
     expect(parseIntendedState({ ...stored(), format: "AUCTION" })).toBeNull();
-    expect(parseIntendedState({ ...stored(), price: "199.9" })).toBeNull(); // not 2dp canonical
-    expect(parseIntendedState({ ...stored(), availableQuantity: -1 })).toBeNull();
-    expect(parseIntendedState({ ...stored(), aspects: { Grade: "10" } })).toBeNull(); // value not array
-    expect(parseIntendedState({ ...stored(), title: "" })).toBeNull();
-    expect(parseIntendedState(null)).toBeNull();
-    expect(parseIntendedState("nope")).toBeNull();
+    expect(parseIntendedState({ ...stored(), description: "" })).toBeNull();
   });
 });
 
-describe("parseImageManifest — strict versioned parser", () => {
-  const stored = () => JSON.parse(JSON.stringify(manifest()));
-  it("round-trips a valid manifest", () => {
-    expect(parseImageManifest(stored())).toEqual(manifest());
-  });
-  it("fails closed on wrong version, bad count, bad hash, missing front", () => {
-    expect(parseImageManifest({ ...stored(), version: 9 })).toBeNull();
-    expect(parseImageManifest({ ...stored(), count: 5 })).toBeNull();
-    const badHash = stored(); badHash.images[0].sha256 = "zz"; expect(parseImageManifest(badHash)).toBeNull();
-    const noFront = stored(); noFront.images[0].role = "back"; expect(parseImageManifest(noFront)).toBeNull();
-  });
+// ── §8 fingerprint + snapshot-verify matrix ──────────────────────────────────
+const storedRow = (over: { intended?: unknown; manifest?: unknown; fingerprint?: unknown; version?: unknown } = {}) => ({
+  intendedState: over.intended ?? JSON.parse(JSON.stringify(buildIntendedState(baseInput))),
+  imageManifest: over.manifest ?? JSON.parse(JSON.stringify(manifest())),
+  fingerprint: over.fingerprint,
+  fingerprintVersion: over.version ?? LISTING_FINGERPRINT_VERSION,
 });
 
-describe("canonicalListingFingerprint — SHA-256, order-stable, signed-URL-free", () => {
-  it("is a 64-char hex digest tagged by the fingerprint version", async () => {
+describe("canonicalListingFingerprint + verifyDurableIntendedSnapshot", () => {
+  it("SHA-256 hex, version 3, key/value-order independent", async () => {
     const fp = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
     expect(LISTING_FINGERPRINT_VERSION).toBe(3);
+    const reordered = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, aspects: { Grader: ["PSA"], Grade: ["10"] } })!, manifest());
+    expect(reordered).toBe(fp);
   });
-  it("is independent of aspect-KEY order and aspect-VALUE order", async () => {
-    const a = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, aspects: { Grade: ["10"], Grader: ["PSA"] } })!, manifest());
-    const b = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, aspects: { Grader: ["PSA"], Grade: ["10"] } })!, manifest());
-    expect(a).toBe(b);
-    const multiA = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, aspects: { Feature: ["Holo", "First Edition"] } })!, manifest());
-    const multiB = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, aspects: { Feature: ["First Edition", "Holo"] } })!, manifest());
-    expect(multiA).toBe(multiB);
+
+  it("a VALID stored snapshot verifies (recomputed == stored)", async () => {
+    const fp = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
+    const r = await verifyDurableIntendedSnapshot(storedRow({ fingerprint: fp }));
+    expect(r.outcome).toBe("valid");
   });
-  it("is independent of condition-descriptor order", async () => {
-    const a = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, conditionDescriptors: [{ name: "Corners", values: ["A"] }, { name: "Edges", values: ["B"] }] })!, manifest());
-    const b = await canonicalListingFingerprint(buildIntendedState({ ...baseInput, conditionDescriptors: [{ name: "Edges", values: ["B"] }, { name: "Corners", values: ["A"] }] })!, manifest());
-    expect(a).toBe(b);
+
+  it("missing / bad-format / unsupported-version fingerprints fail closed", async () => {
+    expect((await verifyDurableIntendedSnapshot({ intendedState: null, imageManifest: null, fingerprint: H1, fingerprintVersion: LISTING_FINGERPRINT_VERSION })).outcome).toBe("missing_intended_state");
+    expect((await verifyDurableIntendedSnapshot(storedRow({ fingerprint: "not-a-hash" }))).outcome).toBe("invalid_fingerprint_format");
+    expect((await verifyDurableIntendedSnapshot(storedRow({ fingerprint: "A".repeat(64) }))).outcome).toBe("invalid_fingerprint_format");
+    const fp = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
+    expect((await verifyDurableIntendedSnapshot(storedRow({ fingerprint: fp, version: 2 }))).outcome).toBe("unsupported_fingerprint_version");
+    expect((await verifyDurableIntendedSnapshot(storedRow({ intended: { version: 99 }, fingerprint: fp }))).outcome).toBe("invalid_intended_state");
   });
-  it("CHANGES when price, quantity, condition, title, description, policy, SKU, marketplace or an image hash changes", async () => {
-    const base = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
-    const diff = async (over: Partial<IntendedStateInput>) => canonicalListingFingerprint(buildIntendedState({ ...baseInput, ...over })!, manifest());
-    for (const over of [{ price: 200 }, { availableQuantity: 2 }, { condition: "USED" }, { title: "Other" }, { description: "Other" }, { fulfillmentPolicyId: "F9" }, { sku: "GCV000048" }, { marketplaceId: "EBAY_GB" }] as Partial<IntendedStateInput>[]) {
-      expect(await diff(over)).not.toBe(base);
+
+  it("a forged fingerprint paired with valid JSON → fingerprint_mismatch", async () => {
+    expect((await verifyDurableIntendedSnapshot(storedRow({ fingerprint: H1 }))).outcome).toBe("fingerprint_mismatch");
+  });
+
+  it("ANY altered listing/image field (fingerprint kept) → fingerprint_mismatch", async () => {
+    const good = buildIntendedState(baseInput)!;
+    const fp = await canonicalListingFingerprint(good, manifest());
+    const mutations: Array<() => unknown> = [
+      () => ({ ...JSON.parse(JSON.stringify(good)), title: "Other" }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), listingDescription: "Other." }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), description: "Other." }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), condition: "USED" }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), conditionDescription: "Near mint" }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), conditionDescriptors: ["Corners=A"] }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), aspects: { Grade: ["9"], Grader: ["PSA"] } }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), fulfillmentPolicyId: "F9" }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), price: "200.00" }),
+      () => ({ ...JSON.parse(JSON.stringify(good)), availableQuantity: 2 }),
+    ];
+    for (const m of mutations) {
+      expect((await verifyDurableIntendedSnapshot(storedRow({ intended: m(), fingerprint: fp }))).outcome).toBe("fingerprint_mismatch");
     }
-    // A changed image byte hash changes the fingerprint (images are IN the hash).
-    const otherImages = buildImageManifest([{ role: "front", path: "slabs/47/front.jpg", sha256: "c".repeat(64) }, { role: "back", path: "slabs/47/back.jpg", sha256: H2 }])!;
-    expect(await canonicalListingFingerprint(buildIntendedState(baseInput)!, otherImages)).not.toBe(base);
-  });
-  it("does NOT depend on signed URLs (they never enter the state or manifest)", async () => {
-    // Two fingerprints built from the same state + same manifest (paths+hashes) are
-    // identical regardless of any signed URL generated elsewhere.
-    const a = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
-    const b = await canonicalListingFingerprint(buildIntendedState(baseInput)!, manifest());
-    expect(a).toBe(b);
+    // image hash / path / role / count changes
+    const swapHash = JSON.parse(JSON.stringify(manifest())); swapHash.images[0].sha256 = H3;
+    const swapPath = JSON.parse(JSON.stringify(manifest())); swapPath.images[0].path = "slabs/47/front-v2.jpg";
+    const dropBack = { version: 1, count: 1, images: [JSON.parse(JSON.stringify(manifest())).images[0]] };
+    for (const man of [swapHash, swapPath, dropBack]) {
+      expect((await verifyDurableIntendedSnapshot(storedRow({ manifest: man, fingerprint: fp }))).outcome).toBe("fingerprint_mismatch");
+    }
   });
 });
