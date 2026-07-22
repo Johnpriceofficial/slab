@@ -7,6 +7,7 @@ const LEASE = readFileSync(join(process.cwd(), "supabase/migrations/202608280000
 const FENCE = readFileSync(join(process.cwd(), "supabase/migrations/20260829000000_ebay_sync_lease_fencing.sql"), "utf8");
 const ATOMIC = readFileSync(join(process.cwd(), "supabase/migrations/20260830000000_ebay_sync_atomic_complete.sql"), "utf8");
 const TOTALS = readFileSync(join(process.cwd(), "supabase/migrations/20260831000000_ebay_orders_persist_confirmed_totals.sql"), "utf8");
+const BEGINFENCE = readFileSync(join(process.cwd(), "supabase/migrations/20260832000000_ebay_sync_begin_lease_fenced.sql"), "utf8");
 
 describe("20260827 durable sync state", () => {
   it("creates a per-account/resource state table with a watermark + status, RLS enabled", () => {
@@ -67,5 +68,21 @@ describe("C.8.1 hardening migrations", () => {
     expect(TOTALS).toMatch(/confirmed_line_total/);
     expect(TOTALS).toMatch(/count\(\*\) into v_confirmed_orders from private\.ebay_orders where ebay_account_id = p_account_id/);
     expect(TOTALS).toMatch(/grant execute on function public\.ebay_orders_persist\([^)]*\) to service_role/);
+  });
+  it("20260832 FENCES begin-run: drops the 2-arg load, creates a token-fenced 3-arg load under the advisory lock", () => {
+    // The unfenced 2-arg load is removed so a stale/expired runner cannot begin a run.
+    expect(BEGINFENCE).toMatch(/drop function if exists public\.ebay_sync_state_load\(uuid, text\)/);
+    expect(BEGINFENCE).toMatch(/create or replace function public\.ebay_sync_state_load\(p_account_id uuid, p_resource_type text, p_lease_token text\)/);
+    // Same advisory lock as the lease; the exact token must exist AND be unexpired BEFORE any state change.
+    expect(BEGINFENCE).toMatch(/pg_advisory_xact_lock/);
+    expect(BEGINFENCE).toMatch(/from private\.ebay_sync_leases[\s\S]*lease_token = p_lease_token[\s\S]*expires_at > now\(\)/);
+    expect(BEGINFENCE).toMatch(/'error_code', 'lease_lost'/);
+    expect(BEGINFENCE).toMatch(/'error_code', 'sync_begin_failed'/);
+    // run_id is only minted after the fence passes.
+    expect(BEGINFENCE).toMatch(/run_id = gen_random_uuid\(\)/);
+    expect(BEGINFENCE).toMatch(/set search_path = public, private, pg_temp/);
+    expect(BEGINFENCE).toMatch(/grant execute on function public\.ebay_sync_state_load\(uuid, text, text\) to service_role/);
+    expect(BEGINFENCE).toMatch(/revoke all on function public\.ebay_sync_state_load\(uuid, text, text\) from public, anon, authenticated/);
+    expect(BEGINFENCE).not.toMatch(/to authenticated;/);
   });
 });

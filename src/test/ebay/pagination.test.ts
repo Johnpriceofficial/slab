@@ -25,6 +25,10 @@ const runOrders = (pages: Parameters<typeof mock>[0], maxPages = 50) => {
   const m = mock(pages);
   return fetchAllEbayOrders({ fetchImpl: m.impl, apiOrigin: O, accessToken: "AT", maxPages, timeoutMs: 20 }).then((r) => ({ r, calls: m.calls() }));
 };
+const runOrdersGuarded = (pages: Parameters<typeof mock>[0], beforePageFetch: () => Promise<boolean>) => {
+  const m = mock(pages);
+  return fetchAllEbayOrders({ fetchImpl: m.impl, apiOrigin: O, accessToken: "AT", maxPages: 50, timeoutMs: 20, beforePageFetch }).then((r) => ({ r, calls: m.calls() }));
+};
 
 describe("validateOrder / validateTransaction — strict item contracts", () => {
   it("order requires a non-empty orderId + valid line items", () => {
@@ -106,6 +110,33 @@ describe("fetchAllEbayOrders — pagination recovery matrix", () => {
   });
 });
 
+describe("finding #1 — the lease heartbeat guard runs before EVERY page fetch", () => {
+  it("guard true on every call → all pages fetched, guard consulted once per page", async () => {
+    let guardCalls = 0;
+    const { r, calls } = await runOrdersGuarded({
+      [ordersUrl()]: { status: 200, body: { orders: [order("A")], total: 2, size: 1, offset: 0, next: ordersUrl(200) } },
+      [ordersUrl(200)]: { status: 200, body: { orders: [order("B")], total: 2, size: 1, offset: 200 } },
+    }, async () => { guardCalls += 1; return true; });
+    expect(r.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(guardCalls).toBe(2); // consulted before page 1 AND page 2
+  });
+  it("guard false BEFORE the first page → sync_lease_lost, ZERO provider fetches", async () => {
+    const { r, calls } = await runOrdersGuarded({ [ordersUrl()]: { status: 200, body: { orders: [order("A")], total: 1, size: 1, offset: 0 } } }, async () => false);
+    expect(r).toMatchObject({ ok: false, errorCode: "sync_lease_lost" });
+    expect(calls).toBe(0); // never even hit the provider
+  });
+  it("guard false BEFORE page N (lease lost mid-pagination) → sync_lease_lost, no further page", async () => {
+    let n = 0;
+    const { r, calls } = await runOrdersGuarded({
+      [ordersUrl()]: { status: 200, body: { orders: [order("A")], total: 2, size: 1, offset: 0, next: ordersUrl(200) } },
+      [ordersUrl(200)]: { status: 200, body: { orders: [order("B")], total: 2, size: 1, offset: 200 } },
+    }, async () => { n += 1; return n === 1; }); // true for page 1, false before page 2
+    expect(r).toMatchObject({ ok: false, errorCode: "sync_lease_lost" });
+    expect(calls).toBe(1); // page 2 was never fetched
+  });
+});
+
 describe("validateOrder / validateTransaction — expanded canonical conflict matrix (finding #5)", () => {
   const base = { orderId: "A", orderFulfillmentStatus: "FULFILLED", orderPaymentStatus: "PAID", creationDate: "2026-06-01T00:00:00Z", lastModifiedDate: "2026-07-01T00:00:00Z", pricingSummary: { total: { value: "10.00", currency: "USD" } }, lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] };
   const canonOf = (o: unknown) => { const v = validateOrder(o); return v.ok ? v.canonical : "INVALID"; };
@@ -114,10 +145,15 @@ describe("validateOrder / validateTransaction — expanded canonical conflict ma
     for (const over of [
       { orderFulfillmentStatus: "IN_PROGRESS" }, { orderPaymentStatus: "PENDING" }, { lastModifiedDate: "2026-07-02T00:00:00Z" },
       { pricingSummary: { total: { value: "12.00", currency: "USD" } } }, { cancelStatus: { cancelState: "CANCELED" } },
+      { buyer: { username: "someone_else" } },                                  // buyer identity
+      { fulfillmentStartInstructions: [{ shippingStep: { shipTo: { city: "Reno" } } }] }, // ship-to address
+      { cancellation: { cancelReason: "BUYER_ASKED" } },                        // cancellation block
+      { someFutureUnknownField: "provider-added-value" },                       // unknown top-level field preserved
       { lineItems: [{ lineItemId: "L1", sku: "GCV000099", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
       { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "2", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
       { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "99.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
       { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "NOT_STARTED" }] },
+      { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED", unknownLineField: "x" }] }, // unknown line field
     ]) {
       expect(canonOf({ ...base, ...over })).not.toBe(b);
     }

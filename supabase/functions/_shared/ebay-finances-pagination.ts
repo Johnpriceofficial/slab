@@ -9,8 +9,9 @@ import { fetchAllPages, type ItemValidation, type PageFetchImpl, type PaginatedR
 export const FINANCE_PATH = "/sell/finances/v1/transaction";
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const canon = (v: unknown): string => {
+// Deterministic canonical: object keys sorted at every depth; array order preserved.
+export const canon = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
   if (v && typeof v === "object") return `{${Object.keys(v as Record<string, unknown>).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`;
   return JSON.stringify(v ?? null);
 };
@@ -19,10 +20,11 @@ export type RawTransaction = Record<string, unknown>;
 
 /** Strict transaction contract: non-empty transactionId; amount (when present) a
  *  plain object; date/status/type (when present) strings — unknown enum values are
- *  preserved as-is, never rejected or reinterpreted. The canonical form covers ALL
- *  persisted + decision-relevant fields (id, order id, type/status/date, amount,
- *  fee-basis, booking entry, payout/reference) so two different transactions can
- *  never be silently treated as identical. */
+ *  preserved as-is, never rejected or reinterpreted. The canonical form is the
+ *  COMPLETE persisted provider record (every field kept in raw_response — amount,
+ *  fee-basis, booking entry, order/payout/reference, unknown fields), so two
+ *  same-id transactions that differ in ANY persisted field can never be silently
+ *  deduplicated. The canonical is compared only in-memory — never logged/returned. */
 export function validateTransaction(raw: unknown): ItemValidation<RawTransaction> {
   if (!isObj(raw)) return { ok: false };
   const id = raw.transactionId;
@@ -31,20 +33,7 @@ export function validateTransaction(raw: unknown): ItemValidation<RawTransaction
   for (const k of ["transactionDate", "transactionStatus", "transactionType"] as const) {
     if (raw[k] !== undefined && typeof raw[k] !== "string") return { ok: false };
   }
-  const canonical = canon({
-    id,
-    orderId: raw.orderId ?? (isObj(raw.references) ? raw.references : null),
-    type: raw.transactionType ?? null,
-    status: raw.transactionStatus ?? null,
-    date: raw.transactionDate ?? null,
-    amount: raw.amount ?? null,
-    feeBasis: raw.totalFeeBasisAmount ?? null,
-    bookingEntry: raw.bookingEntry ?? null,
-    payoutId: raw.payoutId ?? null,
-    references: raw.references ?? null,
-    feeType: raw.feeType ?? null,
-  });
-  return { ok: true, id, item: raw, canonical };
+  return { ok: true, id, item: raw, canonical: canon(raw) };
 }
 
 export interface FinanceFetchArgs {
@@ -54,12 +43,13 @@ export interface FinanceFetchArgs {
   query?: Record<string, string>;
   maxPages?: number;
   timeoutMs?: number;
+  beforePageFetch?: () => Promise<boolean>;
 }
 
 export function fetchAllEbayFinanceTransactions(args: FinanceFetchArgs): Promise<PaginatedResult<RawTransaction>> {
   return fetchAllPages<RawTransaction>({
     fetchImpl: args.fetchImpl, apiOrigin: args.apiOrigin, accessToken: args.accessToken,
     path: FINANCE_PATH, query: args.query ?? { limit: "200" }, itemsKey: "transactions",
-    validateItem: validateTransaction, maxPages: args.maxPages, timeoutMs: args.timeoutMs,
+    validateItem: validateTransaction, maxPages: args.maxPages, timeoutMs: args.timeoutMs, beforePageFetch: args.beforePageFetch,
   });
 }

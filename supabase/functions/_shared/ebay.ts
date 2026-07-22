@@ -268,8 +268,8 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
   const ordersOrigin = new URL(API).origin;
   const financeOrigin = new URL(ebayApizBase(MODE)).origin;
   return {
-    fetchOrders: (accessToken, query) => fetchAllEbayOrders({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: ordersOrigin, accessToken, query }),
-    fetchFinances: (accessToken, query) => fetchAllEbayFinanceTransactions({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: financeOrigin, accessToken, query }),
+    fetchOrders: (accessToken, query, beforePageFetch) => fetchAllEbayOrders({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: ordersOrigin, accessToken, query, beforePageFetch }),
+    fetchFinances: (accessToken, query, beforePageFetch) => fetchAllEbayFinanceTransactions({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: financeOrigin, accessToken, query, beforePageFetch }),
     resolveOrderMappings: async (accountId, skus) => {
       const { data, error } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
       if (error) return { ok: false };
@@ -304,15 +304,15 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
       if (r.error) return { released: false };
       return { released: (r.data as { released?: boolean } | null)?.released === true };
     },
-    syncBegin: async (accountId, resource) => {
-      const { data, error } = await admin.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: resource });
-      if (error) return { ok: false };
-      const d = (data as { run_id?: string; high_watermark_at?: string | null } | null);
-      if (!d?.run_id) return { ok: false };
+    syncBegin: async (accountId, resource, token) => {
+      const { data, error } = await admin.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: resource, p_lease_token: token });
+      if (error) return { ok: false, errorCode: "sync_begin_failed" };
+      const d = (data as { ok?: boolean; run_id?: string; high_watermark_at?: string | null; error_code?: string } | null);
+      if (d?.ok !== true || !d.run_id) return { ok: false, errorCode: d?.error_code ?? "sync_begin_failed" };
       return { ok: true, runId: d.run_id, highWatermarkAt: d.high_watermark_at ?? null };
     },
     syncComplete: async (accountId, resource, token, args) => {
-      const { data, error } = await admin.rpc("ebay_sync_complete", { p_account_id: accountId, p_resource_type: resource, p_run_id: args.runId, p_lease_token: token, p_high_watermark_at: args.highWatermarkAt, p_overlap_start_at: args.overlapStartAt, p_pages: args.pagesFetched, p_records_fetched: args.recordsFetched, p_records_persisted: args.recordsPersisted, p_durable_total: args.durableTotal, p_latency_ms: 0 });
+      const { data, error } = await admin.rpc("ebay_sync_complete", { p_account_id: accountId, p_resource_type: resource, p_run_id: args.runId, p_lease_token: token, p_high_watermark_at: args.highWatermarkAt, p_overlap_start_at: args.overlapStartAt, p_pages: args.pagesFetched, p_records_fetched: args.recordsFetched, p_records_persisted: args.recordsPersisted, p_durable_total: args.durableTotal, p_latency_ms: Math.max(0, Math.round(args.latencyMs)) });
       if (error) return { ok: false, errorCode: "sync_complete_rpc_failed" };
       const d = (data as { ok?: boolean; error_code?: string } | null);
       return d?.ok === true ? { ok: true } : { ok: false, errorCode: d?.error_code ?? "sync_complete_failed" };
