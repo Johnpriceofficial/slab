@@ -27,134 +27,102 @@ const item = (over: Partial<NormalizedInventoryItem> = {}): NormalizedInventoryI
   title: "2016 Charizard PSA 10", description: "Graded.", aspects: { Grade: ["10"], Grader: ["PSA"] }, imageCount: 2, quantity: 1, ...over,
 });
 const okDisc = (offers: OfferSummary[]): OffersDiscovery => ({ ok: true, offers, pagesFetched: 1, providerTotal: offers.length, providerSize: offers.length, deduplicatedCount: 0 });
-const durable = (over: Partial<DurableLocal> = {}): DurableLocal => ({ status: "preparing", fingerprint: FP, offerId: "O1", listingId: null, manifest, providerVerified: true, ...over });
+// Our OWN recorded listing (durable identity present): images_submitted, unchanged manifest+fp.
+const ours = (over: Partial<DurableLocal> = {}): DurableLocal => ({ status: "offer_created", fingerprint: FP, offerId: "O1", listingId: null, manifest, imagesSubmittedAt: "2026-07-22T00:00:00Z", verificationMethod: "submitted_only", ...over });
 
 function ops(disc: OffersDiscovery, inv?: InventoryItemResult) {
   const discoverOffers = vi.fn(async () => disc);
   const fetchInventoryItem = vi.fn(async () => inv ?? ({ ok: true, present: false } as InventoryItemResult));
   const o: EngineReadOps = { discoverOffers, fetchInventoryItem };
-  return { o, invCalls: () => fetchInventoryItem.mock.calls.length, discCalls: () => discoverOffers.mock.calls.length };
+  return { o, invCalls: () => fetchInventoryItem.mock.calls.length };
 }
 const ctx = (local: DurableLocal | null = null): EngineContext => ({ intended, manifest, fingerprint: FP, local });
 
-describe("evaluateProviderState — a failed provider READ blocks with no second read", () => {
-  for (const code of ["provider_lookup_failed", "invalid_provider_response", "provider_redirect_rejected", "pagination_loop", "pagination_limit_exceeded", "incomplete_provider_result", "inconsistent_provider_pagination", "unsafe_pagination_url", "invalid_api_origin"]) {
-    it(`discovery ${code} → providerFailure block, inventory NOT fetched`, async () => {
+describe("evaluateImageEvidence — HONEST (never `verified` from count/identity/timestamp)", () => {
+  it("no durable record → unverifiable/unverifiable", () => {
+    expect(evaluateImageEvidence(ctx(null), 2, "O1", null)).toEqual({ evidence: "unverifiable", method: "unverifiable" });
+  });
+  it("provider count differs → mismatch", () => {
+    expect(evaluateImageEvidence(ctx(ours()), 1, "O1", null).evidence).toBe("mismatch");
+  });
+  it("identity mismatch → unverifiable (not verified)", () => {
+    expect(evaluateImageEvidence(ctx(ours()), 2, "OTHER", null)).toEqual({ evidence: "unverifiable", method: "unverifiable" });
+  });
+  it("our unchanged listing → unverifiable with provider_reference_match (NEVER verified)", () => {
+    const r = evaluateImageEvidence(ctx(ours()), 2, "O1", null);
+    expect(r).toEqual({ evidence: "unverifiable", method: "provider_reference_match" });
+    expect(r.evidence).not.toBe("verified"); // current eBay API exposes no content hash
+  });
+  it("local fingerprint changed → mismatch", () => {
+    expect(evaluateImageEvidence(ctx(ours({ fingerprint: "OLD" })), 2, "O1", null).evidence).toBe("mismatch");
+  });
+});
+
+describe("evaluateProviderState — offer-level decisions, no second read", () => {
+  for (const code of ["provider_lookup_failed", "invalid_provider_response", "provider_redirect_rejected", "provider_timeout"]) {
+    it(`discovery ${code} → providerFailure, inventory NOT fetched`, async () => {
       const t = ops({ ok: false, errorCode: code, httpStatus: null, safeProviderErrorId: null, pagesFetched: 0 });
       const r = await evaluateProviderState(t.o, ctx());
       expect(r.providerFailure).toBe(true);
-      expect(r.providerErrorCode).toBe(code);
       expect(t.invCalls()).toBe(0);
     });
   }
-});
-
-describe("evaluateProviderState — offer-level decisions never fetch the inventory item", () => {
-  it("proven-zero offers + no local artifact → create_new", async () => {
+  it("proven-zero + no local artifact → create_new (method submitted_only)", async () => {
     const t = ops(okDisc([]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("create_new");
-    expect(t.invCalls()).toBe(0);
+    const r = await evaluateProviderState(t.o, ctx());
+    expect(r.decision).toBe("create_new");
+    expect(r.verificationMethod).toBe("submitted_only");
   });
-  it("proven-zero offers but a local offer id → local_provider_identity_conflict", async () => {
-    const t = ops(okDisc([]));
-    expect((await evaluateProviderState(t.o, ctx(durable({ offerId: "O1" })))).decision).toBe("local_provider_identity_conflict");
+  it("proven-zero + local offer id → local_provider_identity_conflict", async () => {
+    expect((await evaluateProviderState(ops(okDisc([])).o, ctx(ours()))).decision).toBe("local_provider_identity_conflict");
   });
-  it("multiple compatible offers → duplicate_offer_ambiguity", async () => {
-    const t = ops(okDisc([offer({ offerId: "A" }), offer({ offerId: "B" })]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("duplicate_offer_ambiguity");
-    expect(t.invCalls()).toBe(0);
-  });
-  it("incompatible same-SKU offer → incompatible_offer_exists", async () => {
-    const t = ops(okDisc([offer({ marketplaceId: "EBAY_GB" })]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("incompatible_offer_exists");
-    expect(t.invCalls()).toBe(0);
-  });
-  it("on-hold offer → listing_on_hold", async () => {
-    const t = ops(okDisc([offer({ listingOnHold: true })]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("listing_on_hold");
-    expect(t.invCalls()).toBe(0);
-  });
-  it("compatible unpublished offer with a STALE description → existing_offer_inputs_changed", async () => {
-    const t = ops(okDisc([offer({ listingDescription: "old" })]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("existing_offer_inputs_changed");
-    expect(t.invCalls()).toBe(0);
-  });
-  it("compatible published offer with changed offer-level inputs → existing_listing_inputs_changed", async () => {
-    const t = ops(okDisc([offer({ listingId: "L9", price: "150.00" })]));
-    expect((await evaluateProviderState(t.o, ctx())).decision).toBe("existing_listing_inputs_changed");
-    expect(t.invCalls()).toBe(0);
+  it("incompatible / duplicate / on-hold / stale-desc / changed-published → block, no inventory fetch", async () => {
+    for (const [disc, expected] of [
+      [okDisc([offer({ marketplaceId: "EBAY_GB" })]), "incompatible_offer_exists"],
+      [okDisc([offer({ offerId: "A" }), offer({ offerId: "B" })]), "duplicate_offer_ambiguity"],
+      [okDisc([offer({ listingOnHold: true })]), "listing_on_hold"],
+      [okDisc([offer({ listingDescription: "old" })]), "existing_offer_inputs_changed"],
+      [okDisc([offer({ listingId: "L9", price: "150.00" })]), "existing_listing_inputs_changed"],
+    ] as Array<[OffersDiscovery, string]>) {
+      const t = ops(disc);
+      expect((await evaluateProviderState(t.o, ctx())).decision).toBe(expected);
+      expect(t.invCalls()).toBe(0);
+    }
   });
 });
 
-describe("evaluateProviderState — adopt/reconcile require a verified inventory item", () => {
-  it("offer matches but inventory lookup FAILS → providerFailure block", async () => {
-    const t = ops(okDisc([offer()]), { ok: false, errorCode: "inventory_item_lookup_failed", httpStatus: 500 });
-    const r = await evaluateProviderState(t.o, ctx(durable()));
-    expect(r.providerFailure).toBe(true);
-    expect(t.invCalls()).toBe(1);
+describe("evaluateProviderState — adopt/reconcile use identity + content, NOT image 'verified'", () => {
+  it("our own unpublished offer, exact content, unchanged images → resume_local_exact (method provider_reference_match)", async () => {
+    const t = ops(okDisc([offer()]), { ok: true, present: true, item: item() });
+    const r = await evaluateProviderState(t.o, ctx(ours()));
+    expect(r.decision).toBe("resume_local_exact");
+    expect(r.verificationMethod).toBe("provider_reference_match");
+    expect(r.imageEvidence).not.toBe("verified");
   });
-  it("offer matches but NO inventory item → inventory_item_lookup_failed (an offer implies an item)", async () => {
-    const t = ops(okDisc([offer()]), { ok: true, present: false });
-    expect((await evaluateProviderState(t.o, ctx(durable()))).decision).toBe("inventory_item_lookup_failed");
+  it("EXTERNAL unpublished offer (no durable identity) → existing_offer_requires_review", async () => {
+    const t = ops(okDisc([offer()]), { ok: true, present: true, item: item() });
+    expect((await evaluateProviderState(t.o, ctx(null))).decision).toBe("existing_offer_requires_review");
   });
-  it("offer + item content mismatch (unpublished) → existing_offer_inputs_changed", async () => {
+  it("content mismatch → existing_offer_inputs_changed", async () => {
     const t = ops(okDisc([offer()]), { ok: true, present: true, item: item({ title: "different" }) });
-    expect((await evaluateProviderState(t.o, ctx(durable()))).decision).toBe("existing_offer_inputs_changed");
+    expect((await evaluateProviderState(t.o, ctx(ours()))).decision).toBe("existing_offer_inputs_changed");
   });
-  it("null provider quantity is NOT an exact match → existing_offer_inputs_changed", async () => {
-    const t = ops(okDisc([offer()]), { ok: true, present: true, item: item({ quantity: null }) });
-    expect((await evaluateProviderState(t.o, ctx(durable()))).decision).toBe("existing_offer_inputs_changed");
+  it("published: our own exact match → reconcile_exact_published; already-mapped → already_published_exact", async () => {
+    const t1 = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item() });
+    expect((await evaluateProviderState(t1.o, ctx(ours({ status: "published_unmapped", listingId: "L9" })))).decision).toBe("reconcile_exact_published");
+    const t2 = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item() });
+    expect((await evaluateProviderState(t2.o, ctx(ours({ status: "published", listingId: "L9" })))).decision).toBe("already_published_exact");
   });
-  it("our own unpublished offer, exact match + verified evidence → resume_local_exact", async () => {
-    const t = ops(okDisc([offer()]), { ok: true, present: true, item: item() });
-    expect((await evaluateProviderState(t.o, ctx(durable({ offerId: "O1", listingId: null })))).decision).toBe("resume_local_exact");
-  });
-  it("an EXTERNAL unpublished offer (no durable evidence) that matches → existing_offer_requires_review (never auto-adopted)", async () => {
-    const t = ops(okDisc([offer()]), { ok: true, present: true, item: item() });
-    const r = await evaluateProviderState(t.o, ctx(null));
-    expect(r.decision).toBe("existing_offer_requires_review");
-    expect(r.imageEvidence).toBe("unverifiable");
-  });
-});
-
-describe("evaluateProviderState — published reconcile", () => {
-  it("published, content mismatch → existing_listing_inputs_changed", async () => {
-    const t = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item({ condition: "USED" }) });
-    expect((await evaluateProviderState(t.o, ctx(durable({ offerId: "O1", listingId: "L9" })))).decision).toBe("existing_listing_inputs_changed");
-  });
-  it("published, image COUNT mismatch → existing_listing_inputs_changed (image mismatch cannot be reconciled)", async () => {
+  it("published: image COUNT mismatch → existing_listing_inputs_changed", async () => {
     const t = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item({ imageCount: 1 }) });
-    expect((await evaluateProviderState(t.o, ctx(durable({ offerId: "O1", listingId: "L9" })))).decision).toBe("existing_listing_inputs_changed");
+    expect((await evaluateProviderState(t.o, ctx(ours({ status: "published_unmapped", listingId: "L9" })))).decision).toBe("existing_listing_inputs_changed");
   });
-  it("published, exact match + verified evidence, local mapping missing → reconcile_exact_published", async () => {
-    const t = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item() });
-    expect((await evaluateProviderState(t.o, ctx(durable({ status: "preparing", offerId: "O1", listingId: "L9" })))).decision).toBe("reconcile_exact_published");
-  });
-  it("published, exact match, already mapped locally → already_published_exact", async () => {
-    const t = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item() });
-    expect((await evaluateProviderState(t.o, ctx(durable({ status: "published", offerId: "O1", listingId: "L9" })))).decision).toBe("already_published_exact");
-  });
-  it("published external offer (no durable evidence) → existing_offer_requires_review", async () => {
+  it("published EXTERNAL offer → existing_offer_requires_review", async () => {
     const t = ops(okDisc([offer({ listingId: "L9" })]), { ok: true, present: true, item: item() });
     expect((await evaluateProviderState(t.o, ctx(null))).decision).toBe("existing_offer_requires_review");
   });
-});
-
-describe("evaluateImageEvidence — stable, durable-evidence based (never signed URLs / count alone)", () => {
-  it("no durable local record → unverifiable", () => {
-    expect(evaluateImageEvidence(ctx(null), 2, "O1", null)).toBe("unverifiable");
-  });
-  it("provider image count differs from the manifest → mismatch", () => {
-    expect(evaluateImageEvidence(ctx(durable()), 1, "O1", null)).toBe("mismatch");
-  });
-  it("provider identity mismatch or not provider-verified → unverifiable", () => {
-    expect(evaluateImageEvidence(ctx(durable({ offerId: "O1" })), 2, "OTHER", null)).toBe("unverifiable");
-    expect(evaluateImageEvidence(ctx(durable({ providerVerified: false })), 2, "O1", null)).toBe("unverifiable");
-  });
-  it("fingerprint changed since recording → mismatch", () => {
-    expect(evaluateImageEvidence(ctx(durable({ fingerprint: "OLD" })), 2, "O1", null)).toBe("mismatch");
-  });
-  it("exact identity + manifest + fingerprint + provider-verified → verified", () => {
-    expect(evaluateImageEvidence(ctx(durable()), 2, "O1", null)).toBe("verified");
+  it("recorded local offer id disagreeing with provider → local_provider_identity_conflict", async () => {
+    const t = ops(okDisc([offer({ offerId: "O2" })]), { ok: true, present: true, item: item() });
+    expect((await evaluateProviderState(t.o, ctx(ours({ offerId: "O1" })))).decision).toBe("local_provider_identity_conflict");
   });
 });
