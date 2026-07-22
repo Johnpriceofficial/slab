@@ -7,11 +7,16 @@ describe("ebayListingTitle", () => {
     variation: "Holo", rarity: "Rare Holo", grader: "PSA", grade_label: "GEM MT", grade: "10",
   };
 
-  it("assembles a rich title, dedupes overlapping variation/rarity, and stays within 80 chars", () => {
+  it("assembles a rich title, dedupes overlapping variation/rarity, drops the # prefix, Title-Cases the label", () => {
     const t = ebayListingTitle(full);
     expect(t.length).toBeLessThanOrEqual(80);
-    // variation "Holo" is contained in rarity "Rare Holo" → the redundant "Holo" is dropped.
-    expect(t).toBe("2016 XY Evolutions Charizard #11 Rare Holo PSA GEM MT 10");
+    // variation "Holo" is contained in rarity "Rare Holo" → the redundant "Holo" is
+    // dropped; "11" has no leading '#'; "GEM MT" → "Gem Mt".
+    expect(t).toBe("2016 XY Evolutions Charizard 11 Rare Holo PSA Gem Mt 10");
+  });
+
+  it("Title-cases an ALL-CAPS grade designation (PRISTINE → Pristine)", () => {
+    expect(ebayListingTitle({ card_name: "Kyurem ex", grader: "CGC", grade_label: "PRISTINE", grade: "10" })).toBe("Kyurem ex CGC Pristine 10");
   });
 
   it("includes the language when known", () => {
@@ -30,7 +35,7 @@ describe("ebayListingTitle", () => {
   it("always keeps the card name and the grade suffix", () => {
     const t = ebayListingTitle(full);
     expect(t).toContain("Charizard");
-    expect(t).toContain("PSA GEM MT 10");
+    expect(t).toContain("PSA Gem Mt 10");
   });
 
   it("drops low-value tokens (rarity → variation → #num → year → set) to fit the cap", () => {
@@ -42,7 +47,7 @@ describe("ebayListingTitle", () => {
     const t = ebayListingTitle(longSet);
     expect(t.length).toBeLessThanOrEqual(80);
     expect(t).toContain("Charizard VMAX Rainbow Rare Secret"); // name kept
-    expect(t).toContain("PSA GEM MT 10"); // grade kept
+    expect(t).toContain("PSA Gem Mt 10"); // grade kept
     expect(t).not.toContain("Rare Holo"); // rarity dropped first
   });
 

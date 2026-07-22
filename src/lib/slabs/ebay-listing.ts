@@ -21,6 +21,11 @@ export interface ListingSlab {
 
 const clean = (s: unknown): string => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
 
+// Display-normalize an ALL-CAPS grade designation for the title: PRISTINE →
+// Pristine, GEM MINT → Gem Mint. Mixed-case input is left as-is.
+const titleCaseLabel = (s: string): string =>
+  s === s.toUpperCase() ? s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : s;
+
 // Word-boundary phrase containment (case-insensitive), padded so "Holo" is found
 // inside "Rare Holo" but not inside "Holograph".
 const includesPhrase = (text: string, phrase: string): boolean =>
@@ -39,11 +44,11 @@ const includesPhrase = (text: string, phrase: string): boolean =>
  */
 export function ebayListingTitle(slab: ListingSlab, max = 80): string {
   const cardName = clean(slab.card_name) || "Graded Card";
-  const grade = [clean(slab.grader), clean(slab.grade_label), clean(slab.grade)].filter(Boolean).join(" ");
+  const grade = [clean(slab.grader), titleCaseLabel(clean(slab.grade_label)), clean(slab.grade)].filter(Boolean).join(" ");
   const year = typeof slab.year === "number" ? String(slab.year) : "";
   const language = clean(slab.language);
   const set = clean(slab.set_name);
-  const num = clean(slab.card_number) ? `#${clean(slab.card_number)}` : "";
+  const num = clean(slab.card_number); // collector number, no leading '#'
 
   // Deduplicate variation vs rarity: when one phrase contains the other, keep the
   // more specific (longer) one and drop the redundant one.

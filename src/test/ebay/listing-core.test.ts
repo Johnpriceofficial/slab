@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
+import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, extractOfferIds, resolveOfferCreation, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "../../../supabase/functions/_shared/ebay-mutation-flags";
 
 describe("orderedImagePaths", () => {
@@ -26,14 +26,38 @@ describe("hasFrontImage", () => {
 });
 
 describe("listingFingerprint", () => {
-  const base = { sku: "GCV000047", title: "T", description: "D", price_value: 10, currency: "USD", category_id: "1", merchant_location_key: "L", fulfillment_policy_id: "F", payment_policy_id: "P", return_policy_id: "R", condition: "GRADED", image_count: 2 };
-  it("is deterministic for identical inputs", () => {
-    expect(listingFingerprint(base)).toBe(listingFingerprint({ ...base }));
+  const base = { sku: "GCV000047", title: "T", description: "D", price_value: 10, currency: "USD", category_id: "1", merchant_location_key: "L", fulfillment_policy_id: "F", payment_policy_id: "P", return_policy_id: "R", condition: "USED_VERY_GOOD", condition_description: "graded", quantity: 1, front_image_path: "slabs/47/front.jpg", back_image_path: "slabs/47/back.jpg", aspects: { Grade: "10", Grader: "PSA" } };
+  it("is versioned and deterministic for identical inputs (aspect key order irrelevant)", () => {
+    expect(listingFingerprint(base)).toMatch(/^v2\|/);
+    expect(listingFingerprint(base)).toBe(listingFingerprint({ ...base, aspects: { Grader: "PSA", Grade: "10" } }));
   });
-  it("changes when any listing input changes", () => {
+  it("changes when the front image, an aspect value, quantity, or condition descriptor changes", () => {
+    // Swapping the front image while keeping ONE image must change the fingerprint.
+    expect(listingFingerprint({ ...base, front_image_path: "slabs/47/front-v2.jpg" })).not.toBe(listingFingerprint(base));
+    expect(listingFingerprint({ ...base, aspects: { Grade: "9", Grader: "PSA" } })).not.toBe(listingFingerprint(base));
+    expect(listingFingerprint({ ...base, quantity: 2 })).not.toBe(listingFingerprint(base));
+    expect(listingFingerprint({ ...base, condition_description: "graded gem" })).not.toBe(listingFingerprint(base));
     expect(listingFingerprint({ ...base, price_value: 11 })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, title: "T2" })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, image_count: 1 })).not.toBe(listingFingerprint(base));
+  });
+});
+
+describe("extractOfferIds / resolveOfferCreation (provider-side idempotency)", () => {
+  it("extracts offer ids from the getOffers response", () => {
+    expect(extractOfferIds({ offers: [{ offerId: "1" }, { offerId: "2" }, {}] })).toEqual(["1", "2"]);
+    expect(extractOfferIds({})).toEqual([]);
+    expect(extractOfferIds(null)).toEqual([]);
+  });
+  it("creates ONLY when a successful lookup proves no offer exists", () => {
+    expect(resolveOfferCreation({ ok: true, offerIds: [] })).toEqual({ action: "create" });
+  });
+  it("adopts the single existing offer instead of creating a duplicate", () => {
+    expect(resolveOfferCreation({ ok: true, offerIds: ["O1"] })).toEqual({ action: "adopt", offerId: "O1" });
+  });
+  it("refuses when multiple offers exist (ambiguous)", () => {
+    expect(resolveOfferCreation({ ok: true, offerIds: ["O1", "O2"] })).toEqual({ action: "duplicate_offer_ambiguity", offerIds: ["O1", "O2"] });
+  });
+  it("a lookup failure NEVER creates — it is provider_lookup_failed (retries stay safe)", () => {
+    expect(resolveOfferCreation({ ok: false, offerIds: [] })).toEqual({ action: "provider_lookup_failed" });
   });
 });
 
