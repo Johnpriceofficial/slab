@@ -1,9 +1,9 @@
 // Fail-closed, paginated eBay order reader. Fetches EVERY page of the Fulfillment
-// getOrders result, strictly validating each order (non-empty orderId + a present
-// lineItems array whose entries have non-empty, order-unique lineItemIds) and every
-// pagination page, and never returning partial data as success. Identical duplicate
-// orders across pages are deduped; conflicting duplicates fail closed. DI fetch →
-// fully unit-testable.
+// getOrders result, strictly validating each order (non-whitespace orderId + a
+// present, NON-EMPTY lineItems array whose entries have non-whitespace, order-unique
+// lineItemIds) and every pagination page, and never returning partial data as
+// success. Identical duplicate orders across pages are deduped; conflicting
+// duplicates fail closed. DI fetch → fully unit-testable.
 
 import { fetchAllPages, type ItemValidation, type PageFetchImpl, type PaginatedResult } from "./ebay-pagination-core.ts";
 
@@ -34,14 +34,19 @@ export type RawOrder = Record<string, unknown>;
 export function validateOrder(raw: unknown): ItemValidation<RawOrder> {
   if (!isObj(raw)) return { ok: false };
   const orderId = raw.orderId;
-  if (typeof orderId !== "string" || !orderId) return { ok: false };
-  // A fulfillment order always carries its lines: lineItems MUST be a present array.
+  // A non-whitespace orderId is required. Note: emptiness is only a CHECK — the exact
+  // provider value is preserved unmodified in `id`/`item` (never trimmed/normalized).
+  if (typeof orderId !== "string" || orderId.trim().length === 0) return { ok: false };
+  // A fulfillment order always carries at least one line: lineItems MUST be a present,
+  // NON-EMPTY array (an empty array would advance the watermark without capturing any
+  // line data, so it fails closed).
   const rawLines = raw.lineItems;
-  if (!Array.isArray(rawLines)) return { ok: false };
-  // Every line: a plain object with a non-empty, order-unique lineItemId.
+  if (!Array.isArray(rawLines) || rawLines.length === 0) return { ok: false };
+  // Every line: a plain object with a non-whitespace lineItemId that is UNIQUE by exact
+  // value within the order (identity emptiness is a check only; exact values are kept).
   const seen = new Set<string>();
   for (const li of rawLines) {
-    if (!isObj(li) || typeof li.lineItemId !== "string" || !li.lineItemId) return { ok: false };
+    if (!isObj(li) || typeof li.lineItemId !== "string" || li.lineItemId.trim().length === 0) return { ok: false };
     if (seen.has(li.lineItemId)) return { ok: false }; // repeated lineItemId → malformed (fail closed)
     seen.add(li.lineItemId);
   }

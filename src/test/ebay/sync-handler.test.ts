@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "../../../supabase/functions/_shared/ebay-sync-handler";
 import type { CompleteArgs } from "../../../supabase/functions/_shared/ebay-sync-orchestrator";
-import type { PaginatedResult } from "../../../supabase/functions/_shared/ebay-pagination-core";
-import type { RawOrder } from "../../../supabase/functions/_shared/ebay-orders-pagination";
+import type { PageFetchImpl, PaginatedResult } from "../../../supabase/functions/_shared/ebay-pagination-core";
+import { fetchAllEbayOrders, type RawOrder } from "../../../supabase/functions/_shared/ebay-orders-pagination";
 import type { RawTransaction } from "../../../supabase/functions/_shared/ebay-finances-pagination";
 
 const order = (id: string, sku = "GCV000047", ts = "2026-07-20T00:00:00Z") => ({ orderId: id, lastModifiedDate: ts, lineItems: [{ lineItemId: `${id}-L`, sku, quantity: "1" }] });
@@ -151,6 +151,24 @@ describe("runOrderSync — fenced, batched order sync", () => {
     expect(spies.persistOrders).toHaveBeenCalledTimes(0);
     expect(spies.syncComplete).toHaveBeenCalledTimes(0);
     expect(proposed).toBeUndefined(); // collectProposedSales never invoked
+  });
+  it("END-TO-END: an EMPTY-line order through the REAL paginator never reaches mapping/shaping/persist/proposed/complete", async () => {
+    // Wire the handler's fetchOrders to the REAL fetchAllEbayOrders over a mocked HTTP
+    // page that returns a zero-line order — proving the whole pipeline fails closed.
+    const ORIGIN = "https://api.ebay.com";
+    const page = { orders: [{ orderId: "ORDER-1", lineItems: [] as unknown[] }], total: 1, size: 1, offset: 0 };
+    const fetchImpl: PageFetchImpl = () => Promise.resolve({ ok: true, status: 200, json: async () => page });
+    const realFetchOrders = (accessToken: string, query: Record<string, string>, guard: () => Promise<boolean>) =>
+      fetchAllEbayOrders({ fetchImpl, apiOrigin: ORIGIN, accessToken, query, beforePageFetch: guard, timeoutMs: 50 });
+    let proposed: unknown[] | undefined;
+    const { spies } = mk({});
+    const d = { ...spies, fetchOrders: realFetchOrders, collectProposedSales: (s: unknown[]) => { proposed = s; } } as unknown as SyncHandlerDeps;
+    const r = await runOrderSync("ACC", "AT", d);
+    expect(r.errorCode).toBe("malformed_provider_response");   // real validator rejected the empty-line order
+    expect(spies.resolveOrderMappings).toHaveBeenCalledTimes(0); // never reached mapping lookup
+    expect(spies.persistOrders).toHaveBeenCalledTimes(0);        // never reached persistence
+    expect(spies.syncComplete).toHaveBeenCalledTimes(0);         // watermark never advanced
+    expect(proposed).toBeUndefined();                            // no proposed sales
   });
 });
 

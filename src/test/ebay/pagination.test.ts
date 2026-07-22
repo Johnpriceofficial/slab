@@ -38,15 +38,21 @@ describe("validateOrder / validateTransaction — strict item contracts", () => 
     expect(validateOrder({ orderId: "1", lineItems: [{ sku: "x" }] }).ok).toBe(false); // line missing lineItemId
     expect(validateOrder({ orderId: "1", lineItems: "nope" }).ok).toBe(false);
   });
-  it("strict line-item identity: lineItems must be a present array of uniquely-identified objects", () => {
-    // A present lineItems array is REQUIRED (a fulfillment order always carries lines).
+  it("strict line-item identity: lineItems must be a present, NON-EMPTY array of uniquely-identified objects", () => {
+    // A present, non-empty lineItems array is REQUIRED (an order always carries ≥1 line).
     expect(validateOrder({ orderId: "1" }).ok).toBe(false);                                   // missing lineItems
     expect(validateOrder({ orderId: "1", lineItems: "nope" }).ok).toBe(false);                // non-array lineItems
+    expect(validateOrder({ orderId: "1", lineItems: [] }).ok).toBe(false);                    // EMPTY array → no sale lines
     expect(validateOrder({ orderId: "1", lineItems: [42] }).ok).toBe(false);                  // non-object line
     expect(validateOrder({ orderId: "1", lineItems: [{ sku: "x" }] }).ok).toBe(false);        // line missing lineItemId
     expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "" }] }).ok).toBe(false);  // empty lineItemId
-    // A single valid line works.
-    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1", sku: "GCV000047" }] }).ok).toBe(true);
+    // Whitespace-only identities are rejected.
+    expect(validateOrder({ orderId: "   ", lineItems: [{ lineItemId: "L1" }] }).ok).toBe(false);   // whitespace orderId
+    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "  \t " }] }).ok).toBe(false);  // whitespace lineItemId
+    // A single valid line works, and the EXACT provider ids are preserved (not trimmed).
+    const one = validateOrder({ orderId: " ORDER-1 ", lineItems: [{ lineItemId: " L1 ", sku: "GCV000047" }] });
+    expect(one.ok).toBe(true);
+    if (one.ok) { expect(one.id).toBe(" ORDER-1 "); expect((one.item.lineItems as Array<{ lineItemId: string }>)[0].lineItemId).toBe(" L1 "); }
     // Two distinct line ids work.
     expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1" }, { lineItemId: "L2" }] }).ok).toBe(true);
   });
@@ -107,6 +113,11 @@ describe("fetchAllEbayOrders — pagination recovery matrix", () => {
   it("an order with a duplicate lineItemId in one page → malformed_provider_response (never reaches shaping)", async () => {
     const dupOrder = { orderId: "A", lineItems: [{ lineItemId: "L1", sku: "GCV000047" }, { lineItemId: "L1", sku: "GCV000099" }] };
     const { r } = await runOrders({ [ordersUrl()]: { status: 200, body: { orders: [dupOrder], total: 1, size: 1, offset: 0 } } });
+    expect(r).toMatchObject({ ok: false, errorCode: "malformed_provider_response" });
+  });
+  it("an EMPTY-line order in one page → malformed_provider_response through the real paginator", async () => {
+    const emptyLineOrder = { orderId: "ORDER-1", lineItems: [] as unknown[] };
+    const { r } = await runOrders({ [ordersUrl()]: { status: 200, body: { orders: [emptyLineOrder], total: 1, size: 1, offset: 0 } } });
     expect(r).toMatchObject({ ok: false, errorCode: "malformed_provider_response" });
   });
   const failCases: Array<[string, Parameters<typeof mock>[0], string]> = [
