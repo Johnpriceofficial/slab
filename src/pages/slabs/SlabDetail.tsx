@@ -189,6 +189,7 @@ export default function SlabDetail() {
             <Detail label="Card #" value={slab.card_number} />
             <Detail label="Year" value={slab.year} />
             <Detail label="Language" value={slab.language} />
+            <Detail label="Game / Franchise" value={slab.game_or_franchise} />
             <Detail label="Rarity" value={slab.rarity} />
             <Detail label="Variation" value={slab.variation} />
             <Detail label="Label Accuracy" value={slab.label_accuracy} />
@@ -352,6 +353,7 @@ export function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => v
     card_number: slab.card_number ?? "",
     year: slab.year?.toString() ?? "",
     language: slab.language ?? "",
+    game_or_franchise: slab.game_or_franchise ?? "",
     rarity: slab.rarity ?? "",
     variation: slab.variation ?? "",
     grader: slab.grader ?? "",
@@ -377,6 +379,7 @@ export function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => v
     || form.card_number.trim() !== (slab.card_number ?? "").trim()
     || form.year.trim() !== (slab.year?.toString() ?? "")
     || form.language.trim() !== (slab.language ?? "").trim()
+    || form.game_or_franchise.trim() !== (slab.game_or_franchise ?? "").trim()
     || form.rarity.trim() !== (slab.rarity ?? "").trim()
     || form.variation.trim() !== (slab.variation ?? "").trim()
     || form.grader.trim() !== (slab.grader ?? "").trim()
@@ -419,6 +422,7 @@ export function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => v
         card_number: form.card_number.trim() || null,
         year: form.year.trim() ? Number(form.year.replace(/[^0-9]/g, "").slice(0, 4)) : null,
         language: form.language.trim() || null,
+        game_or_franchise: form.game_or_franchise.trim() || null,
         rarity: form.rarity.trim() || null,
         variation: form.variation.trim() || null,
         grader: form.grader.trim() || null,
@@ -539,6 +543,7 @@ export function EditSlabDialog({ slab, onSaved }: { slab: Slab; onSaved: () => v
           <EditField label="Card #"><Input value={form.card_number} onChange={(e) => set("card_number", e.target.value)} /></EditField>
           <EditField label="Year"><Input value={form.year} onChange={(e) => set("year", e.target.value)} inputMode="numeric" /></EditField>
           <EditField label="Language"><Input value={form.language} onChange={(e) => set("language", e.target.value)} /></EditField>
+          <EditField label="Game / Franchise"><Input value={form.game_or_franchise} onChange={(e) => set("game_or_franchise", e.target.value)} /></EditField>
           <EditField label="Rarity"><Input value={form.rarity} onChange={(e) => set("rarity", e.target.value)} /></EditField>
           <EditField label="Variation"><Input value={form.variation} onChange={(e) => set("variation", e.target.value)} /></EditField>
           <EditField label="Grader"><Input value={form.grader} onChange={(e) => set("grader", e.target.value)} /></EditField>

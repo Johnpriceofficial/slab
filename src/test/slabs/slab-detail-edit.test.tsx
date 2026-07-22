@@ -55,6 +55,7 @@ const draft: Slab = {
   language: null,
   rarity: null,
   variation: null,
+  game_or_franchise: null,
   label_description: null,
   label_accuracy: "accurate",
   verification_status: "unverified",

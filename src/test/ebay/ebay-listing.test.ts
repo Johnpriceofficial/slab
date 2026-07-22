@@ -7,29 +7,29 @@ describe("ebayListingTitle", () => {
     variation: "Holo", rarity: "Rare Holo", grader: "PSA", grade_label: "GEM MT", grade: "10",
   };
 
-  it("assembles a rich title, dedupes overlapping variation/rarity, drops the # prefix, Title-Cases the label", () => {
-    const t = ebayListingTitle(full);
+  it("leads with year·game·language·set·name·number·grade and OMITS noisy rarity/variation", () => {
+    const t = ebayListingTitle({ ...full, game_or_franchise: "Pokemon" });
     expect(t.length).toBeLessThanOrEqual(80);
-    // variation "Holo" is contained in rarity "Rare Holo" → the redundant "Holo" is
-    // dropped; "11" has no leading '#'; "GEM MT" → "Gem Mt".
-    expect(t).toBe("2016 XY Evolutions Charizard 11 Rare Holo PSA Gem Mt 10");
+    // rarity "Rare Holo" and variation "Holo" are intentionally omitted; "11" has
+    // no leading '#'; "GEM MT" → "Gem Mt".
+    expect(t).toBe("2016 Pokemon XY Evolutions Charizard 11 PSA Gem Mt 10");
+    expect(t).not.toContain("Holo");
+  });
+
+  it("EXACT S0006 / #48 title from its real fields (game field supplies 'Pokemon')", () => {
+    const s0006: ListingSlab = {
+      year: 2025, game_or_franchise: "Pokemon", language: "Japanese", set_name: "Black Bolt",
+      card_name: "Kyurem ex", card_number: "160/086", rarity: "Super Rare", variation: "Super Rare - Holo",
+      grader: "CGC", grade_label: "PRISTINE", grade: "10",
+    };
+    const t = ebayListingTitle(s0006);
+    expect(t).toBe("2025 Pokemon Japanese Black Bolt Kyurem ex 160/086 CGC Pristine 10");
+    expect(t.length).toBeLessThanOrEqual(80);
+    expect(t).not.toContain("Super Rare"); // rarity/variation omitted
   });
 
   it("Title-cases an ALL-CAPS grade designation (PRISTINE → Pristine)", () => {
     expect(ebayListingTitle({ card_name: "Kyurem ex", grader: "CGC", grade_label: "PRISTINE", grade: "10" })).toBe("Kyurem ex CGC Pristine 10");
-  });
-
-  it("includes the language when known", () => {
-    const t = ebayListingTitle({ year: 2025, language: "Japanese", set_name: "Black Bolt", card_name: "Kyurem ex", card_number: "160/086", grader: "CGC", grade_label: "Pristine", grade: "10" });
-    expect(t).toContain("Japanese");
-    expect(t.length).toBeLessThanOrEqual(80);
-    expect(t).toContain("Kyurem ex");
-    expect(t).toContain("CGC Pristine 10");
-  });
-
-  it("does not duplicate an identical rarity/variation phrase (no doubled Super Rare)", () => {
-    const t = ebayListingTitle({ card_name: "Pikachu", variation: "Super Rare", rarity: "Super Rare", grader: "PSA", grade: "10" });
-    expect((t.match(/Super Rare/gi) ?? []).length).toBe(1);
   });
 
   it("always keeps the card name and the grade suffix", () => {
@@ -38,9 +38,9 @@ describe("ebayListingTitle", () => {
     expect(t).toContain("PSA Gem Mt 10");
   });
 
-  it("drops low-value tokens (rarity → variation → #num → year → set) to fit the cap", () => {
+  it("drops low-value tokens (# → language → year → set → game) to fit the cap", () => {
     const longSet: ListingSlab = {
-      ...full,
+      ...full, game_or_franchise: "Pokemon",
       set_name: "Super Long Championship Promotional Set Name Edition Deluxe",
       card_name: "Charizard VMAX Rainbow Rare Secret",
     };
@@ -48,7 +48,6 @@ describe("ebayListingTitle", () => {
     expect(t.length).toBeLessThanOrEqual(80);
     expect(t).toContain("Charizard VMAX Rainbow Rare Secret"); // name kept
     expect(t).toContain("PSA Gem Mt 10"); // grade kept
-    expect(t).not.toContain("Rare Holo"); // rarity dropped first
   });
 
   it("hard-truncates as a final guard when even name + grade exceed the cap", () => {
