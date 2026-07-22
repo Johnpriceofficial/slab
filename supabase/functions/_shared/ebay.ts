@@ -815,8 +815,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       // partial collection read as "complete/none".
       const lookup = await discoverOffers(accessToken, sku);
       if (!lookup.ok) {
-        await admin.from("ebay_listing_intents").update({ status: "offer_discovery_failed", last_error: `${lookup.errorCode}:${lookup.httpStatus ?? ""}`, updated_at: new Date().toISOString() }).eq("id", intentId);
-        return reply({ status: "error", error_code: lookup.errorCode, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify existing eBay offers for this SKU; refusing to create a possibly-duplicate offer." }, 502);
+        const { error: discErr } = await admin.from("ebay_listing_intents").update({ status: "offer_discovery_failed", last_error: `${lookup.errorCode}:${lookup.httpStatus ?? ""}`, updated_at: new Date().toISOString() }).eq("id", intentId);
+        return reply({ status: "error", error_code: lookup.errorCode, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, intent_persist_failed: !!discErr, message: "Could not COMPLETELY verify existing eBay offers for this SKU; refusing to create a possibly-duplicate offer." }, 502);
       }
       // FULL content validation: compatibility (SKU+marketplace+FIXED_PRICE) AND a
       // field-by-field match against intent — never adopt/publish a stale offer.
@@ -912,7 +912,9 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const lookup = await discoverOffers(accessToken, sku);
     if (!lookup.ok) {
       const code = lookup.httpStatus === 401 || lookup.httpStatus === 403 ? "authorization_failed" : lookup.errorCode;
-      return reply({ status: "error", error_code: code, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify the eBay offer for this SKU; cannot distinguish 'no offer' from a lookup/discovery failure." }, 502);
+      // Record the discovery failure on the intent (checked) before returning.
+      const { error: discErr } = await admin.from("ebay_listing_intents").update({ status: "offer_discovery_failed", last_error: `${lookup.errorCode}:${lookup.httpStatus ?? ""}`, updated_at: new Date().toISOString() }).eq("id", intent.id);
+      return reply({ status: "error", error_code: code, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, intent_persist_failed: !!discErr, message: "Could not COMPLETELY verify the eBay offer for this SKU; cannot distinguish 'no offer' from a lookup/discovery failure." }, 502);
     }
     if (lookup.offers.length > 1) {
       return reply({ status: "duplicate_offer_ambiguity", offer_ids: lookup.offers.map((o) => o.offerId), message: "eBay has multiple offers for this SKU; resolve them before reconciling." }, 409);
