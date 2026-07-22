@@ -18,7 +18,6 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
   let service: SupabaseClient;
   let adminClient: SupabaseClient;
   const stamp = `${Math.floor(performance.now())}`;
-  const invNum = Number(`9${stamp.slice(-6)}`);
   const userIds: string[] = [];
   const accountIds: string[] = [];
   let accountId = "";
@@ -47,8 +46,14 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
     await adminClient.auth.signInWithPassword({ email, password });
     const { data: acct } = await service.from("ebay_accounts").insert({ ebay_user_id: `ebay-rl-${stamp}`, connection_status: "connected" }).select("id").single();
     accountId = acct!.id; accountIds.push(accountId);
-    const { data: slab } = await service.from("slabs").insert({ inventory_number: invNum, inventory_sequence: invNum, card_name: "RL Test" }).select("id").single();
-    slabId = slab!.id;
+    // Create the slab via the RPC (a raw insert would trip owner/trigger rules).
+    const { data: slab, error: slabErr } = await adminClient.rpc("create_slab", {
+      p: { card_name: "RL Test", grader: "PSA", grade: "9", certification_number: `RL${stamp}`, set_name: "Base Set", card_number: "4", year: 1999, language: "English", final_value_cents: 12500, verification_status: "verified", valuation_confidence: "manual", valuation_provenance: "manual_value" },
+      p_front_ext: "jpg", p_back_ext: "png",
+    });
+    if (slabErr) throw slabErr;
+    const slabRow = (Array.isArray(slab) ? slab[0] : slab) as { id: string };
+    slabId = slabRow.id;
   });
 
   afterAll(async () => {
