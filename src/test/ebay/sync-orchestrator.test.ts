@@ -10,20 +10,22 @@ interface Cfg {
   acquired?: boolean; leaseError?: boolean; beginOk?: boolean; beginErrorCode?: string; prior?: string | null;
   page?: PaginatedResult<Item>; assert?: boolean; persistOk?: boolean; complete?: { ok: boolean; errorCode?: string };
   failOk?: boolean; apiRunOk?: boolean; released?: boolean; clock?: () => number; initial?: string;
+  throwOn?: string[]; // dependency names that should REJECT (throw) instead of returning
 }
 function mk(cfg: Cfg = {}) {
   const clock = cfg.clock ?? (() => Date.parse("2026-07-22T00:00:00Z"));
   const initial = cfg.initial ?? "2026-04-23T00:00:00.000Z"; // bounded 90-day initial fallback
+  const boom = (name: string) => { if (cfg.throwOn?.includes(name)) throw new Error(`boom:${name}`); };
   const spies = {
-    acquireLease: vi.fn(async () => ({ acquired: cfg.acquired ?? true, error: cfg.leaseError ?? false })),
-    assertLease: vi.fn(async () => cfg.assert ?? true),
-    releaseLease: vi.fn(async () => ({ released: cfg.released ?? true })),
-    beginRun: vi.fn(async () => (cfg.beginOk === false ? { ok: false as const, errorCode: cfg.beginErrorCode } : { ok: true as const, state: { highWatermarkAt: cfg.prior ?? null }, runId: "RUN-1" })),
-    fetchAllPages: vi.fn(async (_q: Record<string, string>) => cfg.page ?? okPage([{ id: "A", ts: "2026-07-20T00:00:00Z" }])),
-    persist: vi.fn(async () => (cfg.persistOk === false ? { ok: false as const, errorCode: "orders_persist_failed" } : { ok: true as const, durableTotal: 3, durableSecondary: 5, persisted: 1 })),
-    complete: vi.fn(async (_a: CompleteArgs) => cfg.complete ?? { ok: true }),
-    recordFailure: vi.fn(async (_r: string, _c: string) => ({ ok: cfg.failOk ?? true })),
-    recordApiRun: vi.fn(async (_s: string, _c: string | null) => ({ ok: cfg.apiRunOk ?? true })),
+    acquireLease: vi.fn(async () => { boom("acquireLease"); return { acquired: cfg.acquired ?? true, error: cfg.leaseError ?? false }; }),
+    assertLease: vi.fn(async () => { boom("assertLease"); return cfg.assert ?? true; }),
+    releaseLease: vi.fn(async () => { boom("releaseLease"); return { released: cfg.released ?? true }; }),
+    beginRun: vi.fn(async () => { boom("beginRun"); return (cfg.beginOk === false ? { ok: false as const, errorCode: cfg.beginErrorCode } : { ok: true as const, state: { highWatermarkAt: cfg.prior ?? null }, runId: "RUN-1" }); }),
+    fetchAllPages: vi.fn(async (_q: Record<string, string>) => { boom("fetchAllPages"); return cfg.page ?? okPage([{ id: "A", ts: "2026-07-20T00:00:00Z" }]); }),
+    persist: vi.fn(async () => { boom("persist"); return (cfg.persistOk === false ? { ok: false as const, errorCode: "orders_persist_failed" } : { ok: true as const, durableTotal: 3, durableSecondary: 5, persisted: 1 }); }),
+    complete: vi.fn(async (_a: CompleteArgs) => { boom("complete"); return cfg.complete ?? { ok: true }; }),
+    recordFailure: vi.fn(async (_r: string, _c: string) => { boom("recordFailure"); return { ok: cfg.failOk ?? true }; }),
+    recordApiRun: vi.fn(async (_s: string, _c: string | null) => { boom("recordApiRun"); return { ok: cfg.apiRunOk ?? true }; }),
     extractWatermark: vi.fn((items: Item[]) => items.reduce<string | null>((m, i) => (!m || i.ts > m ? i.ts : m), null)),
     // Returns the provider query AND the EXACT effective start it used (finding #6).
     buildQuery: vi.fn((from: string | null) => { const effectiveStartAt = from ?? initial; return { query: { limit: "200", filter: `from:${effectiveStartAt}` }, effectiveStartAt }; }),
@@ -146,5 +148,83 @@ describe("runSync — fenced lease + atomic completion + checked recovery", () =
     const r = await runSync(ops);
     expect(r.releaseUnconfirmed).toBe(true);
     expect(r.recoveryUnpersisted).toBe(true);
+  });
+});
+
+describe("runSync — exception-safe guaranteed release (blocker 2)", () => {
+  // Each injected dependency THROWS (rejects) rather than returning a structured error.
+  it("acquireLease throws → sync_internal_error, NO begin, NO release (nothing was acquired)", async () => {
+    const { ops, spies } = mk({ throwOn: ["acquireLease"] });
+    const r = await runSync(ops);
+    expect(r).toMatchObject({ status: "sync_internal_error", errorCode: "sync_internal_error", httpStatus: 500 });
+    expect(spies.beginRun).toHaveBeenCalledTimes(0);
+    expect(spies.releaseLease).toHaveBeenCalledTimes(0);
+  });
+  it("a non-acquiring second caller → NO release attempted", async () => {
+    const { ops, spies } = mk({ acquired: false });
+    await runSync(ops);
+    expect(spies.releaseLease).toHaveBeenCalledTimes(0);
+  });
+
+  // For every case below the lease WAS acquired → release must be attempted exactly once.
+  const acquiredThrowCases: Array<[string, string[], string | undefined]> = [
+    ["beginRun throws", ["beginRun"], undefined],       // no run_id yet
+    ["fetchAllPages throws", ["fetchAllPages"], "RUN-1"],
+    ["assertLease throws", ["assertLease"], "RUN-1"],
+    ["persist throws", ["persist"], "RUN-1"],
+    ["complete throws", ["complete"], "RUN-1"],
+  ];
+  for (const [name, throwOn, expectRunId] of acquiredThrowCases) {
+    it(`${name} → stable sync_internal_error, checked recovery, release attempted exactly once`, async () => {
+      const { ops, spies } = mk({ prior: "2026-07-05T00:00:00Z", throwOn });
+      const r = await runSync(ops);
+      expect(r.status).toBe("sync_internal_error");
+      expect(r.errorCode).toBe("sync_internal_error");
+      expect(r.httpStatus).toBe(500);
+      expect(spies.releaseLease).toHaveBeenCalledTimes(1);       // GUARANTEED release
+      // A run that had begun gets a CHECKED failure + error audit; the fail RPC is
+      // active-runner-only in SQL, so a possibly-committed complete is not rolled back.
+      if (expectRunId) {
+        expect(r.runId).toBe(expectRunId);
+        expect(spies.recordFailure).toHaveBeenCalledWith(expectRunId, "sync_internal_error");
+      }
+      expect(spies.recordApiRun).toHaveBeenCalledWith("error", "sync_internal_error");
+    });
+  }
+
+  it("recordFailure throws during recovery → still sync_internal_error, recoveryUnpersisted, release once", async () => {
+    const { ops, spies } = mk({ throwOn: ["fetchAllPages", "recordFailure"] });
+    const r = await runSync(ops);
+    expect(r.status).toBe("sync_internal_error");
+    expect(r.recoveryUnpersisted).toBe(true);
+    expect(spies.releaseLease).toHaveBeenCalledTimes(1);
+  });
+  it("recordApiRun throws during recovery → recoveryUnpersisted, release once", async () => {
+    const { ops, spies } = mk({ throwOn: ["fetchAllPages", "recordApiRun"] });
+    const r = await runSync(ops);
+    expect(r.status).toBe("sync_internal_error");
+    expect(r.recoveryUnpersisted).toBe(true);
+    expect(spies.releaseLease).toHaveBeenCalledTimes(1);
+  });
+  it("a THROWN releaseLease (success path) is itself converted to release_unconfirmed", async () => {
+    const { ops, spies } = mk({ throwOn: ["releaseLease"] });
+    const r = await runSync(ops);
+    expect(r.status).toBe("success");            // the sync itself committed
+    expect(r.releaseUnconfirmed).toBe(true);
+    expect(spies.releaseLease).toHaveBeenCalledTimes(1);
+  });
+  it("a thrown releaseLease AND a thrown release-diagnostic → release_unconfirmed + recovery_unpersisted", async () => {
+    const { ops } = mk({ throwOn: ["releaseLease", "recordApiRun"] });
+    const r = await runSync(ops);
+    expect(r.releaseUnconfirmed).toBe(true);
+    expect(r.recoveryUnpersisted).toBe(true);
+  });
+  it("no raw exception or provider payload escapes — the promise resolves to a known code", async () => {
+    for (const dep of ["beginRun", "fetchAllPages", "persist", "complete", "releaseLease"]) {
+      const { ops } = mk({ throwOn: [dep] });
+      const r = await runSync(ops); // never rejects
+      expect(["sync_internal_error", "success"]).toContain(r.status);
+      expect(JSON.stringify(r)).not.toContain("boom"); // the thrown error's message never leaks
+    }
   });
 });

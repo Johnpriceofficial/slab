@@ -17,7 +17,7 @@ import { type ListingDeps, routeListingWithToken } from "./ebay-listing-handler.
 import { fetchAllEbayOrders } from "./ebay-orders-pagination.ts";
 import { fetchAllEbayFinanceTransactions } from "./ebay-finances-pagination.ts";
 import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "./ebay-sync-handler.ts";
-import type { SyncResult } from "./ebay-sync-orchestrator.ts";
+import { syncBody } from "./ebay-sync-response.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -325,21 +325,6 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
     now: () => Date.now(),
     uuid: () => crypto.randomUUID(),
   };
-}
-
-// Map a SyncResult to a response body.
-function syncBody(r: SyncResult, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  const b: Record<string, unknown> = { status: r.status };
-  if (r.errorCode) b.error_code = r.errorCode;
-  if (r.pagesFetched !== undefined) b.pages_fetched = r.pagesFetched;
-  if (r.recordsFetched !== undefined) b.records_fetched = r.recordsFetched;
-  if (r.recordsPersisted !== undefined) b.records_persisted = r.recordsPersisted;
-  if (r.durableTotal !== undefined) b.durable_total = r.durableTotal;
-  if (r.durableSecondary !== undefined && r.durableSecondary !== null) b.durable_secondary = r.durableSecondary;
-  if (r.deduplicated !== undefined) b.deduplicated = r.deduplicated;
-  if (r.highWatermarkAt !== undefined) b.high_watermark_at = r.highWatermarkAt;
-  if (r.recoveryUnpersisted) b.recovery_unpersisted = true;
-  return { ...b, ...extra };
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification

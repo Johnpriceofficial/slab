@@ -81,12 +81,24 @@ export function advanceWatermark(prior: string | null, latest: string | null): s
 
 const READ_FAIL = new Set(["provider_lookup_failed", "provider_redirect_rejected", "provider_timeout", "unsafe_pagination_url", "pagination_loop", "pagination_limit_exceeded", "malformed_provider_response", "inconsistent_provider_pagination", "incomplete_provider_result", "invalid_api_origin"]);
 
-async function runAcquired<T>(ops: SyncOps<T>): Promise<SyncResult> {
+// Carries the run identity + prior watermark OUT of runAcquired so that, if any
+// injected dependency throws unexpectedly, runSync can still record a CHECKED
+// failure against the correct run and report the retained watermark.
+interface RunCtx { runId?: string; prior?: string | null }
+
+// Never let a diagnostic/recovery write's own rejection escape: a thrown call is
+// treated exactly like an unsuccessful one ({ ok: false }).
+async function safeOk(fn: () => Promise<{ ok: boolean }>): Promise<{ ok: boolean }> {
+  try { return await fn(); } catch { return { ok: false }; }
+}
+
+async function runAcquired<T>(ops: SyncOps<T>, ctx: RunCtx): Promise<SyncResult> {
   const startedMs = ops.now();
   const begun = await ops.beginRun();
   if (begun.ok === false) return { status: "error", errorCode: begun.errorCode ?? "sync_begin_failed", httpStatus: begun.errorCode === "lease_lost" ? 409 : 500 };
   const runId = begun.runId;
   const prior = begun.state.highWatermarkAt;
+  ctx.runId = runId; ctx.prior = prior; // published for exception-safe recovery in runSync
   const from = incrementalStart(prior, ops.overlapMs ?? DEFAULT_OVERLAP_MS, ops.now());
 
   const fail = async (code: string, http: number): Promise<SyncResult> => {
@@ -117,16 +129,41 @@ async function runAcquired<T>(ops: SyncOps<T>): Promise<SyncResult> {
 }
 
 export async function runSync<T>(ops: SyncOps<T>): Promise<SyncResult> {
-  const lease = await ops.acquireLease();
+  // Acquisition is OUTSIDE the guaranteed-release scope: if acquire itself throws
+  // or errors, nothing was acquired, so no release is attempted.
+  let lease: { acquired: boolean; error: boolean };
+  try {
+    lease = await ops.acquireLease();
+  } catch {
+    return { status: "sync_internal_error", errorCode: "sync_internal_error", httpStatus: 500 };
+  }
   if (lease.error) return { status: "error", errorCode: "sync_lease_acquire_failed", httpStatus: 500 };
   if (!lease.acquired) return { status: "sync_in_progress", httpStatus: 409 };
 
-  // We acquired the lease → the result is HELD until release handling finishes,
-  // and a failure to release (or to persist its diagnostic) is SURFACED honestly.
-  const result = await runAcquired(ops);
-  const rel = await ops.releaseLease();
-  if (!rel.released) {
-    const diag = await ops.recordApiRun("error", "sync_lease_release_unconfirmed");
+  // From here the lease IS held → release is attempted EXACTLY ONCE regardless of
+  // any unexpected throw, and both the run result and the release outcome are held
+  // until cleanup finishes so cleanup uncertainty is surfaced honestly.
+  const ctx: RunCtx = {};
+  let result: SyncResult;
+  try {
+    result = await runAcquired(ops, ctx);
+  } catch {
+    // An injected dependency (begin/fetch/assert/persist/complete/record*) threw.
+    // Convert to a STABLE internal error — never leak the exception/provider payload —
+    // and, if a run had begun, attempt a CHECKED failure-state + error audit. Because
+    // ebay_sync_state_fail only acts on an active `running` run, a completion that may
+    // already have committed is NOT falsely rolled back (the fail is then a no-op).
+    const audit = await safeOk(() => ops.recordApiRun("error", "sync_internal_error"));
+    const failed = ctx.runId ? await safeOk(() => ops.recordFailure(ctx.runId as string, "sync_internal_error")) : { ok: true };
+    result = { status: "sync_internal_error", errorCode: "sync_internal_error", httpStatus: 500, runId: ctx.runId, highWatermarkAt: ctx.prior, recoveryUnpersisted: (!audit.ok || !failed.ok) || undefined };
+  }
+
+  // Guaranteed single release attempt. A thrown release is itself an unconfirmed
+  // release; a thrown release-diagnostic additionally sets recovery_unpersisted.
+  let released = false;
+  try { released = (await ops.releaseLease()).released; } catch { released = false; }
+  if (!released) {
+    const diag = await safeOk(() => ops.recordApiRun("error", "sync_lease_release_unconfirmed"));
     return { ...result, releaseUnconfirmed: true, recoveryUnpersisted: result.recoveryUnpersisted || !diag.ok || undefined };
   }
   return result;
