@@ -8,7 +8,13 @@ const path = "/sell/inventory/v1/offer";
 const first = `${O}${path}?sku=${SKU}&limit=100`;
 const p2 = `${O}${path}?sku=${SKU}&limit=100&offset=100`;
 const p3 = `${O}${path}?sku=${SKU}&limit=100&offset=200`;
-const offer = (id: string) => ({ offerId: id, sku: SKU, marketplaceId: "EBAY_US", format: "FIXED_PRICE" });
+// A fully strict-contract-valid offer (every field the state engine relies on).
+const offer = (id: string) => ({
+  offerId: id, sku: SKU, marketplaceId: "EBAY_US", format: "FIXED_PRICE",
+  categoryId: "183454", merchantLocationKey: "LOC-A",
+  listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" },
+  pricingSummary: { price: { value: 199.99, currency: "USD" } }, availableQuantity: 1, listingDescription: "",
+});
 
 function mock(pages: Record<string, { status: number; body: unknown } | "throw">): { impl: OffersFetchImpl; calls: () => number } {
   let calls = 0;
