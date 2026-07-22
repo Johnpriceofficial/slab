@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 const EVID = readFileSync(join(process.cwd(), "supabase/migrations/20260824000000_ebay_listing_image_evidence.sql"), "utf8");
 const RPC = readFileSync(join(process.cwd(), "supabase/migrations/20260825000000_ebay_listing_reconcile_local_rpc.sql"), "utf8");
+const FENCED = readFileSync(join(process.cwd(), "supabase/migrations/20260826000000_ebay_reconcile_local_fenced.sql"), "utf8");
 
 describe("20260824 honest image-evidence columns", () => {
   it("adds images_submitted_at, image_verification_method, provider_image_evidence additively", () => {
@@ -35,5 +36,21 @@ describe("20260825 transactional reconcile RPC", () => {
     expect(RPC).toMatch(/fingerprint_mismatch/);
     expect(RPC).toMatch(/raise exception 'ebay_listing_reconcile_local: intent update affected/);
     expect(RPC).toMatch(/raise exception 'ebay_listing_reconcile_local: mapping upsert affected/);
+  });
+});
+
+describe("20260826 fenced reconcile RPC (P0 preflight)", () => {
+  it("drops the old 11-arg signature and re-creates SECURITY DEFINER, service_role-only", () => {
+    expect(FENCED).toMatch(/drop function if exists public\.ebay_listing_reconcile_local\(uuid, uuid, text, uuid, text, text, text, bigint, text, text, integer\)/);
+    expect(FENCED).toMatch(/security definer/);
+    expect(FENCED).toMatch(/set search_path = public, pg_temp/);
+    expect(FENCED).toMatch(/revoke all on function public\.ebay_listing_reconcile_local\([^)]*timestamptz\) from public, anon, authenticated/);
+    expect(FENCED).toMatch(/grant execute on function public\.ebay_listing_reconcile_local\([^)]*timestamptz\) to service_role/);
+  });
+  it("adds an optimistic-concurrency fence (stale_intent) and NEVER fabricates images_submitted_at", () => {
+    expect(FENCED).toMatch(/p_expected_updated_at is not null/);
+    expect(FENCED).toMatch(/stale_intent/);
+    expect(FENCED).not.toMatch(/images_submitted_at = coalesce\(images_submitted_at, now\(\)\)/);
+    expect(FENCED).toMatch(/case when images_submitted_at is not null then 'provider_reference_match'/);
   });
 });

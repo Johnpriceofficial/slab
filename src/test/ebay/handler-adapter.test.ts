@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { handlePublish, handleReconcile, type ListingDeps } from "../../../supabase/functions/_shared/ebay-listing-handler";
+import { handlePublish, handleReconcile, type ListingDeps, routeListingWithToken } from "../../../supabase/functions/_shared/ebay-listing-handler";
 import { buildImageManifest, buildIntendedState, canonicalListingFingerprint, type IntendedStateInput } from "../../../supabase/functions/_shared/ebay-intended-state";
 import type { PublishExecutorOps, ReconcileOps, StoredIntent } from "../../../supabase/functions/_shared/ebay-publish-executor";
 import type { OffersDiscovery } from "../../../supabase/functions/_shared/ebay-offers";
@@ -18,11 +18,17 @@ const intended = buildIntendedState(input)!;
 const manifest = buildImageManifest([{ role: "front", path: "slabs/47/front.jpg", sha256: H1 }, { role: "back", path: "slabs/47/back.jpg", sha256: H2 }])!;
 const FP = await canonicalListingFingerprint(intended, manifest);
 const okDisc = (offers: unknown[] = []): OffersDiscovery => ({ ok: true, offers: offers as never, pagesFetched: 1, providerTotal: offers.length, providerSize: offers.length, deduplicatedCount: 0 });
-const storedIntent = (over: Partial<StoredIntent> = {}): StoredIntent => ({
-  id: "INTENT", status: "preparing", fingerprint: FP, fingerprintVersion: 3, offerId: null, listingId: null,
-  intendedState: JSON.parse(JSON.stringify(intended)), imageManifest: JSON.parse(JSON.stringify(manifest)),
-  imagesSubmittedAt: null, verificationMethod: null, ...over,
-});
+const storedIntent = (over: Partial<StoredIntent> = {}): StoredIntent => {
+  const s: StoredIntent = {
+    id: "INTENT", status: "preparing", fingerprint: FP, fingerprintVersion: 3, offerId: null, listingId: null,
+    intendedState: JSON.parse(JSON.stringify(intended)), imageManifest: JSON.parse(JSON.stringify(manifest)),
+    imagesSubmittedAt: null, verificationMethod: null, providerImageEvidence: null, updatedAt: "2026-07-22T00:00:00Z", ...over,
+  };
+  if (s.imagesSubmittedAt && s.providerImageEvidence === null && !("providerImageEvidence" in over)) {
+    s.providerImageEvidence = { method: "submitted_only", offer_id: s.offerId ?? undefined, listing_id: s.listingId };
+  }
+  return s;
+};
 
 const publishBody = (over: Record<string, unknown> = {}) => ({
   slab_id: "S1", category_id: "183454", merchant_location_key: "LOC-A",
@@ -46,6 +52,7 @@ function mockDeps(cfg: DepsCfg = {}) {
   let hi = 0;
   const spies = {
     flagEnabled: vi.fn((name: string) => (cfg.flagOn ?? true) && name === EBAY_MUTATION_FLAGS.listing),
+    loadAccessToken: vi.fn(async () => ({ ok: true as const, token: "AT" })),
     loadSlabForListing: vi.fn(async () => (cfg.slabOk === false ? { ok: false as const } : { ok: true as const, slab: cfg.slab === undefined ? { inventoryNumber: 47, frontImagePath: "slabs/47/front.jpg", backImagePath: "slabs/47/back.jpg" } : cfg.slab })),
     verifyListingOwnership: vi.fn(async () => (cfg.ownershipOk === false ? { ok: false as const, errorCode: "unknown_location", httpStatus: 400 } : { ok: true as const })),
     signImageUrl: vi.fn(async () => "https://signed/x.jpg"),
@@ -120,7 +127,7 @@ describe("handler-adapter — the ACTUAL list_item/reconcile routing+binding (in
     const ops = defaultPublishOps({}, storedIntent({ status: "offer_created", offerId: "O1", fingerprint: "f".repeat(64) }));
     const { deps } = mockDeps({ publishOps: () => ops });
     const r = await handlePublish(args(publishBody(), deps));
-    expect(r.body.status).toBe("fingerprint_mismatch");
+    expect(r.body.status).toBe("existing_intent_missing_verified_snapshot");
     expect(ops.discoverOffers).toHaveBeenCalledTimes(0);
     expect(ops.putInventoryItem).toHaveBeenCalledTimes(0);
     expect(ops.createOffer).toHaveBeenCalledTimes(0);
@@ -172,6 +179,19 @@ describe("handler-adapter — the ACTUAL list_item/reconcile routing+binding (in
     const r = await handlePublish(args(publishBody(), deps));
     expect(r.body.status).toBe("published_recovery_unpersisted");
     expect(ops.recordApiRun).toHaveBeenCalledWith("publish", "error", "published_unmapped_persist_failed");
+  });
+
+  it("P0-1) routeListingWithToken gates the flag BEFORE loading the seller token (zero credential access on a disabled publish)", async () => {
+    const off = mockDeps({ flagOn: false });
+    const r = await routeListingWithToken("list_item", publishBody(), "ACC", "EBAY_US", "183454", off.deps);
+    expect(r.body.status).toBe("mutation_disabled");
+    expect(off.spies.loadAccessToken).toHaveBeenCalledTimes(0); // token NEVER loaded
+    expect(off.spies.loadSlabForListing).toHaveBeenCalledTimes(0);
+    expect(off.spies.makePublishOps).toHaveBeenCalledTimes(0);
+    // Enabled → the token IS loaded and the publish proceeds.
+    const on = mockDeps({ flagOn: true, publishOps: () => defaultPublishOps() });
+    await routeListingWithToken("list_item", publishBody(), "ACC", "EBAY_US", "183454", on.deps);
+    expect(on.spies.loadAccessToken).toHaveBeenCalledTimes(1);
   });
 
   it("9) listing flag is independent + a confirmation phrase cannot bypass it", async () => {

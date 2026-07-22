@@ -48,6 +48,7 @@ export interface EngineResult {
   verificationMethod?: VerificationMethod;
 }
 
+export interface ProviderImageEvidence { method?: string; offer_id?: string; listing_id?: string | null }
 export interface DurableLocal {
   status: string;
   fingerprint: string | null;
@@ -56,6 +57,7 @@ export interface DurableLocal {
   manifest: ImageManifestV1 | null;
   imagesSubmittedAt: string | null;      // when we submitted these images for the offer (was provider_verified_at)
   verificationMethod: VerificationMethod | null;
+  providerImageEvidence: ProviderImageEvidence | null;  // persisted evidence tying images to a provider offer/listing
 }
 
 export interface EngineContext {
@@ -133,7 +135,16 @@ export function evaluateImageEvidence(
   const identityMatches = local.offerId === providerOfferId && (providerListingId ? local.listingId === providerListingId : true);
   if (!identityMatches) return { evidence: "unverifiable", method: "unverifiable" };
   if (local.fingerprint !== ctx.fingerprint) return { evidence: "mismatch", method: "unverifiable" };
-  // Our listing, our unchanged images — but no provider content proof exists.
+  // GENUINE image-submission provenance is REQUIRED before provider_reference_match:
+  // a recorded submission time, a submitted/reference verification method, and a
+  // persisted evidence record tying THESE images to THIS provider offer/listing.
+  // Identity alone can never manufacture historical submission provenance.
+  const evid = local.providerImageEvidence;
+  const hasProvenance = !!local.imagesSubmittedAt
+    && (local.verificationMethod === "submitted_only" || local.verificationMethod === "provider_reference_match")
+    && !!evid && evid.offer_id === providerOfferId
+    && (providerListingId ? (evid.listing_id ?? null) === providerListingId : true);
+  if (!hasProvenance) return { evidence: "unverifiable", method: "unverifiable" };
   return { evidence: "unverifiable", method: "provider_reference_match" };
 }
 

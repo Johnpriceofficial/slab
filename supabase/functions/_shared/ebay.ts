@@ -9,12 +9,15 @@ import {
 } from "./ebay-notification-verify.ts";
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
-import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
 import { fetchAllOffersForSku, OFFER_MAX_PAGES, type OffersDiscovery } from "./ebay-offers.ts";
 import { fetchInventoryItemForSku, type InventoryItemResult } from "./ebay-inventory-item.ts";
 import { type PersistenceResult, type PublishExecutorOps, type ReconcileLocalArgs, type ReconcileOps, type StoredIntent } from "./ebay-publish-executor.ts";
 import type { VerificationMethod } from "./ebay-provider-state-engine.ts";
-import { handlePublish, handleReconcile, type ListingDeps } from "./ebay-listing-handler.ts";
+import { type ListingDeps, routeListingWithToken } from "./ebay-listing-handler.ts";
+import { fetchAllEbayOrders } from "./ebay-orders-pagination.ts";
+import { fetchAllEbayFinanceTransactions } from "./ebay-finances-pagination.ts";
+import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "./ebay-sync-handler.ts";
+import type { SyncResult } from "./ebay-sync-orchestrator.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -224,7 +227,7 @@ async function assertLeaseHeld(admin: AdminClient, accountId: string, sku: strin
 // Load the durable listing intent (with its snapshot + honest image-evidence
 // columns) for the executor.
 async function loadStoredIntent(admin: AdminClient, accountId: string, sku: string): Promise<{ ok: true; intent: StoredIntent | null } | { ok: false }> {
-  const { data, error } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint, fingerprint_version, intended_state, image_manifest, images_submitted_at, image_verification_method").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+  const { data, error } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint, fingerprint_version, intended_state, image_manifest, images_submitted_at, image_verification_method, provider_image_evidence, updated_at").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
   if (error) return { ok: false };
   const row = data as Record<string, unknown> | null;
   const intent: StoredIntent | null = row
@@ -235,23 +238,97 @@ async function loadStoredIntent(admin: AdminClient, accountId: string, sku: stri
         intendedState: row.intended_state, imageManifest: row.image_manifest,
         imagesSubmittedAt: (row.images_submitted_at as string | null) ?? null,
         verificationMethod: (row.image_verification_method as VerificationMethod | null) ?? null,
+        providerImageEvidence: (row.provider_image_evidence as { method?: string; offer_id?: string; listing_id?: string | null } | null) ?? null,
+        updatedAt: (row.updated_at as string | null) ?? null,
       }
     : null;
   return { ok: true, intent };
 }
 
 // ATOMIC local reconciliation via the transactional RPC → PersistenceResult. The
-// RPC proves identity + fingerprint under a row lock, then writes the mapping AND
-// the intent in ONE transaction (both or neither).
+// RPC proves identity + fingerprint + (for reconcile) the expected version under a
+// row lock, then writes the mapping AND the intent in ONE transaction.
 async function reconcileLocalRpc(admin: AdminClient, ctx: { accountId: string; slabId: string; sku: string; currency: string }, args: ReconcileLocalArgs): Promise<PersistenceResult> {
   const { data, error } = await admin.rpc("ebay_listing_reconcile_local", {
     p_account_id: ctx.accountId, p_slab_id: ctx.slabId, p_sku: ctx.sku, p_intent_id: args.intentId,
     p_offer_id: args.offerId, p_listing_id: args.listingId ?? "", p_listing_status: args.listingStatus,
     p_asking_price_cents: args.askingPriceCents, p_currency: ctx.currency,
     p_expected_fingerprint: args.fingerprint, p_expected_fingerprint_version: args.fingerprintVersion,
+    p_expected_status: args.expectedStatus ?? null, p_expected_offer_id: args.expectedOfferId ?? null,
+    p_expected_listing_id: args.expectedListingId ?? null, p_expected_updated_at: args.expectedUpdatedAt ?? null,
   });
   if (error) return { ok: false, errorCode: "reconcile_rpc_failed" };
   return (data as { ok?: boolean } | null)?.ok === true ? { ok: true } : { ok: false, errorCode: "reconcile_rpc_failed" };
+}
+
+// Production bindings for the paginated order/finance sync orchestrator. Every
+// provider read is fail-closed + paginated; every DB write goes through a checked
+// RPC; the single-flight lease + durable sync state live in service-role-only RPCs.
+function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
+  const ordersOrigin = new URL(API).origin;
+  const financeOrigin = new URL(ebayApizBase(MODE)).origin;
+  return {
+    fetchOrders: (accessToken, query) => fetchAllEbayOrders({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: ordersOrigin, accessToken, query }),
+    fetchFinances: (accessToken, query) => fetchAllEbayFinanceTransactions({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: financeOrigin, accessToken, query }),
+    resolveOrderMappings: async (accountId, skus) => {
+      const { data, error } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
+      if (error) return { ok: false };
+      const bySku = new Map<string, string>();
+      for (const m of (data ?? []) as Array<{ sku: string; slab_id: string | null }>) { if (m.sku && m.slab_id) bySku.set(m.sku, m.slab_id); }
+      return { ok: true, bySku };
+    },
+    persistOrders: async (accountId, shaped) => {
+      const { data, error } = await admin.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shaped });
+      if (error) return { ok: false };
+      const p = (data && typeof data === "object" ? data : {}) as { orders?: number; line_items?: number };
+      return { ok: true, durableTotal: p.orders ?? 0, persisted: p.line_items ?? 0 };
+    },
+    persistFinances: async (accountId, shaped) => {
+      const { data, error } = await admin.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: shaped });
+      if (error) return { ok: false };
+      const r = (data && typeof data === "object" ? data : {}) as { transactions?: number; total?: number };
+      return { ok: true, durableTotal: r.total ?? null, persisted: r.transactions ?? 0 };
+    },
+    leaseAcquire: async (accountId, resource, token) => {
+      const a = await admin.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: resource, p_token: token, p_ttl_seconds: 300 });
+      if (a.error) return { acquired: false, error: true };
+      return { acquired: (a.data as { acquired?: boolean } | null)?.acquired === true, error: false };
+    },
+    leaseRelease: async (accountId, resource, token) => {
+      const r = await admin.rpc("ebay_sync_lease_release", { p_account_id: accountId, p_resource_type: resource, p_token: token });
+      if (r.error) return { released: false };
+      return { released: (r.data as { released?: boolean } | null)?.released === true };
+    },
+    syncStateLoad: async (accountId, resource) => {
+      const { data, error } = await admin.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: resource });
+      if (error) return { ok: false };
+      return { ok: true, highWatermarkAt: (data as { high_watermark_at?: string | null } | null)?.high_watermark_at ?? null };
+    },
+    syncStateCommit: async (accountId, resource, args) => {
+      const { data, error } = await admin.rpc("ebay_sync_state_commit", { p_account_id: accountId, p_resource_type: resource, p_run_id: args.runId, p_high_watermark_at: args.highWatermarkAt, p_pages: args.pagesFetched, p_records_fetched: args.recordsFetched, p_records_persisted: args.recordsPersisted, p_durable_total: args.durableTotal });
+      return { ok: !error && (data as { ok?: boolean } | null)?.ok === true };
+    },
+    syncStateFail: async (accountId, resource, runId, errorCode) => {
+      const { data, error } = await admin.rpc("ebay_sync_state_fail", { p_account_id: accountId, p_resource_type: resource, p_run_id: runId, p_error_code: errorCode });
+      return { ok: !error && (data as { ok?: boolean } | null)?.ok === true };
+    },
+    recordApiRun: async (accountId, operation, status, errorCode) => ({ ok: await recordApiRun(admin, accountId, operation, status, 0, errorCode) }),
+    now: () => Date.now(),
+    uuid: () => crypto.randomUUID(),
+  };
+}
+
+// Map a SyncResult to a response body.
+function syncBody(r: SyncResult, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const b: Record<string, unknown> = { status: r.status };
+  if (r.errorCode) b.error_code = r.errorCode;
+  if (r.pagesFetched !== undefined) b.pages_fetched = r.pagesFetched;
+  if (r.recordsFetched !== undefined) b.records_fetched = r.recordsFetched;
+  if (r.recordsPersisted !== undefined) b.records_persisted = r.recordsPersisted;
+  if (r.durableTotal !== undefined) b.durable_total = r.durableTotal;
+  if (r.deduplicated !== undefined) b.deduplicated = r.deduplicated;
+  if (r.highWatermarkAt !== undefined) b.high_watermark_at = r.highWatermarkAt;
+  return { ...b, ...extra };
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification
@@ -350,7 +427,6 @@ function unavailable(operation: Operation, capability: string): Response {
 export interface EbayDeps extends ListingDeps {
   verifyAdmin: (req: Request) => Promise<{ ok: boolean; userId: string | null }>;
   makeAdmin: () => AdminClient;
-  loadAccessToken: (accountId: string) => Promise<{ ok: true; token: string } | { ok: false }>;
   now: () => number;
 }
 
@@ -777,15 +853,19 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
   if (!accountId) return reply({ status: "error", error_code: "MISSING_ACCOUNT", message: "account_id is required." }, 400);
   // The service-role admin client is used by the non-listing seller ops; the
   // listing ops (list_item / reconcile) reach the DB only through injected deps.
+  // The seller access token is loaded PER-OP (not up front): a disabled list_item
+  // PUBLISH must never touch the OAuth/credential path, so its flag gate runs
+  // before the token load (inside routeListingWithToken).
   const admin = deps.makeAdmin();
-  const tok = await deps.loadAccessToken(accountId);
-  if (!tok.ok) return unavailable(operation, "Connected eBay account");
-  const accessToken = tok.token;
 
   if (operation === "list_item") {
     const marketplaceId = String(body.marketplace_id ?? "EBAY_US");
     const categoryId = String(body.category_id ?? "");
     if (body.confirmation !== "PUBLISH") {
+      // Preparation is READ-ONLY (no mutation) → loading the token here is fine.
+      const ptok = await deps.loadAccessToken(accountId);
+      if (!ptok.ok) return unavailable(operation, "Connected eBay account");
+      const accessToken = ptok.token;
       // Preparation FAILS CLOSED: each requirement is fetched independently with
       // its own success/HTTP captured — a failed provider call is NOT masked as an
       // empty object. Only status "prepared" (all required resources ok) may let
@@ -833,19 +913,22 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
           : "Some listing requirements could not be loaded — Publish stays blocked. See per-resource status.",
       });
     }
-    // list_item PUBLISH is handled by the injected-deps listing handler (the SAME
-    // routing/binding the handler-adapter tests drive). The listing-flag gate,
-    // input validation, server-side SKU derivation, ownership, durable manifest +
-    // fingerprint, single-flight lease, and executor binding all live there — a
-    // confirmation phrase can never bypass the disabled flag.
-    const pub = await handlePublish({ body, accountId, accessToken, marketplaceId, categoryId, deps });
+    // list_item PUBLISH is routed by the injected-deps listing handler, which gates
+    // the listing flag BEFORE loading the seller token (a disabled publish makes
+    // zero credential/provider calls). A confirmation phrase can never bypass it.
+    const pub = await routeListingWithToken("list_item", body, accountId, marketplaceId, categoryId, deps);
     return reply(pub.body, pub.httpStatus);
   }
 
   if (operation === "revise_item" && body.action === "reconcile") {
-    const rec = await handleReconcile({ body, accountId, accessToken, marketplaceId: "", categoryId: "", deps });
+    const rec = await routeListingWithToken("reconcile", body, accountId, "", "", deps);
     return reply(rec.body, rec.httpStatus);
   }
+
+  // Remaining seller ops load the token now (their flag gates follow).
+  const tokShared = await deps.loadAccessToken(accountId);
+  if (!tokShared.ok) return unavailable(operation, "Connected eBay account");
+  const accessToken = tokShared.token;
 
   if (operation === "revise_item") {
     if (!deps.flagEnabled(MUTATION_FLAGS.listing)) return mutationDisabled("revise_item", "listing");
@@ -888,51 +971,17 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
       return reply({ status: "success", mode: "sales_applied", sales_applied: a.applied ?? 0, skipped_stale: a.skipped_stale ?? 0, skipped_unmatched: a.skipped_unmatched ?? 0 });
     }
 
-    // DEFAULT: non-destructive inbound sync. Fetch → resolve SKU→slab mappings
-    // (one batched query) → PERSIST orders + lines (never touches slab inventory
-    // or sold_comps). The parent api-run is recorded ONLY after every required
-    // write (persist + cursor) succeeds; a cursor failure makes the parent error.
-    const t0 = Date.now();
-    const data = await ebayFetch("/sell/fulfillment/v1/order?limit=200", accessToken);
-    const fetchedOrders = Array.isArray(data.orders) ? data.orders.length : 0;
-    const skus = skusFromOrders(data.orders);
-    const mappingBySku = new Map<string, string>();
-    if (skus.length) {
-      const { data: rows, error: mapErr } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
-      // A failed mapping read must NOT masquerade as "no mappings" (all-unmatched).
-      if (mapErr) {
-        await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "mapping_lookup_failed");
-        return reply({ status: "error", error_code: "mapping_lookup_failed" }, 500);
-      }
-      for (const m of (rows ?? []) as Array<{ sku: string; slab_id: string | null }>) {
-        if (m.sku && m.slab_id) mappingBySku.set(m.sku, m.slab_id);
-      }
+    // DEFAULT: non-destructive, COMPLETE-pagination inbound sync via the shared
+    // watermark orchestrator (single-flight lease → fail-closed paginated fetch →
+    // idempotent persist → durable watermark advance). It NEVER touches slab
+    // inventory or sold_comps and NEVER calls APPLY_SALES. Proposed sales are
+    // derived ONLY from successfully persisted lines.
+    let proposedSales: unknown[] = [];
+    const r = await runOrderSync(accountId, accessToken, { ...realSyncDeps(admin), collectProposedSales: (s) => { proposedSales = s; } });
+    if (r.status === "success") {
+      return reply(syncBody(r, { mode: "synced", proposed_sales: proposedSales, proposed_sale_count: proposedSales.length, orders_synced: r.durableTotal ?? 0, source_label: "Seller’s Completed Sale", message: `${r.recordsFetched ?? 0} fetched · ${r.recordsPersisted ?? 0} persisted · ${r.deduplicated ?? 0} deduped · ${proposedSales.length} proposed sale(s).` }));
     }
-    const { shaped, proposed_sales, order_count, line_item_count } = shapeEbayOrders(data.orders, mappingBySku);
-
-    const { data: persisted, error: persistErr } = await admin.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shaped });
-    if (persistErr) {
-      await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "orders_persist_failed");
-      return reply({ status: "error", error_code: "orders_persist_failed" }, 500);
-    }
-    const p = (persisted && typeof persisted === "object" ? persisted : {}) as { orders?: number; line_items?: number; matched?: number; unmatched?: number };
-    const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "orders", p_count: p.orders ?? 0 });
-    if (curErr) {
-      await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "orders_cursor_persist_failed");
-      return reply({ status: "error", error_code: "orders_cursor_persist_failed" }, 500);
-    }
-    const runOk = await recordApiRun(admin, accountId, "order_sync", "success", Date.now() - t0, null);
-    if (!runOk) return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
-    return reply({
-      status: "success", mode: "synced",
-      fetched_orders: fetchedOrders, valid_orders: order_count, fetched_lines: line_item_count,
-      persisted_orders: p.orders ?? 0, persisted_lines: p.line_items ?? 0,
-      matched: p.matched ?? 0, unmatched: p.unmatched ?? 0,
-      orders_synced: p.orders ?? 0, line_items_synced: p.line_items ?? 0, // back-compat aliases
-      proposed_sales, proposed_sale_count: proposed_sales.length,
-      message: `${fetchedOrders} fetched · ${p.orders ?? 0} persisted · ${p.matched ?? 0} matched · ${p.unmatched ?? 0} unmatched · ${proposed_sales.length} proposed sale(s).`,
-      source_label: "Seller’s Completed Sale",
-    });
+    return reply(syncBody(r), r.httpStatus);
   }
 
   if (operation === "fulfillment") {
@@ -953,34 +1002,15 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
   }
 
   if (operation === "finances_sync") {
-    // Inbound finance sync is READ-only (recording fees/payouts), so it is not
-    // gated by a mutation flag. The Finances API is on the apiz gateway, NOT api.*.
-    const t0 = Date.now();
-    const data = await ebayFetchBase(ebayApizBase(MODE), "/sell/finances/v1/transaction?limit=200", accessToken);
-    const fetched = Array.isArray(data.transactions) ? data.transactions.length : 0;
-    const shaped = shapeEbayFinanceTransactions(data.transactions); // valid (non-empty transaction id)
-    const { data: result, error } = await admin.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: shaped });
-    if (error) {
-      await recordApiRun(admin, accountId, "finances_sync", "error", Date.now() - t0, "finances_apply_failed");
-      return reply({ status: "error", error_code: "finances_apply_failed" }, 500);
+    // Inbound finance sync is READ-only (recording fees/payouts). COMPLETE-pagination
+    // via the shared watermark orchestrator (apiz gateway). It NEVER issues a refund,
+    // creates a payout, moves money, or alters a slab/sold comp. Unknown enum /
+    // CustomCode values are preserved; durable totals track unique rows.
+    const r = await runFinanceSync(accountId, accessToken, realSyncDeps(admin));
+    if (r.status === "success") {
+      return reply(syncBody(r, { financial_transactions_synced: r.recordsPersisted ?? 0, financial_transactions_total: r.durableTotal ?? null, note: "Fees/payouts stored privately; the watermark reflects durable unique rows. Unknown enum/CustomCode values preserved." }));
     }
-    const r = (result && typeof result === "object" ? result : {}) as { transactions?: number; total?: number };
-    const durableTotal = r.total ?? null; // CONFIRMED unique rows for the account
-    // The cursor tracks the DURABLE unique-row total, never the processed count
-    // (so 8 fetched + 1 duplicate → cursor 7, not 8).
-    const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "finances", p_count: durableTotal ?? 0 });
-    if (curErr) {
-      await recordApiRun(admin, accountId, "finances_sync", "error", Date.now() - t0, "finances_cursor_persist_failed");
-      return reply({ status: "error", error_code: "finances_cursor_persist_failed" }, 500);
-    }
-    const runOk = await recordApiRun(admin, accountId, "finances_sync", "success", Date.now() - t0, null);
-    if (!runOk) return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
-    return reply({
-      status: "success",
-      fetched, valid: shaped.length, processed: r.transactions ?? 0, confirmed_total: durableTotal,
-      financial_transactions_synced: r.transactions ?? 0, financial_transactions_total: durableTotal, // back-compat
-      note: "Fees/payouts stored privately; the cursor reflects durable unique rows. Unknown enum/CustomCode values preserved in raw_response.",
-    });
+    return reply(syncBody(r), r.httpStatus);
   }
 
   return unavailable(operation, "eBay seller API capability");

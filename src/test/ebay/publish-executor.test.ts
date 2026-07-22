@@ -29,11 +29,18 @@ const item = (over: Partial<NormalizedInventoryItem> = {}): NormalizedInventoryI
 });
 const okDisc = (offers: OfferSummary[]): OffersDiscovery => ({ ok: true, offers, pagesFetched: 1, providerTotal: offers.length, providerSize: offers.length, deduplicatedCount: 0 });
 const failDisc = (errorCode: string): OffersDiscovery => ({ ok: false, errorCode, httpStatus: null, safeProviderErrorId: null, pagesFetched: 0 });
-const storedIntent = (over: Partial<StoredIntent> = {}): StoredIntent => ({
-  id: "INTENT", status: "preparing", fingerprint: FP, fingerprintVersion: 3, offerId: null, listingId: null,
-  intendedState: JSON.parse(JSON.stringify(intended)), imageManifest: JSON.parse(JSON.stringify(manifest)),
-  imagesSubmittedAt: null, verificationMethod: null, ...over,
-});
+const storedIntent = (over: Partial<StoredIntent> = {}): StoredIntent => {
+  const s: StoredIntent = {
+    id: "INTENT", status: "preparing", fingerprint: FP, fingerprintVersion: 3, offerId: null, listingId: null,
+    intendedState: JSON.parse(JSON.stringify(intended)), imageManifest: JSON.parse(JSON.stringify(manifest)),
+    imagesSubmittedAt: null, verificationMethod: null, providerImageEvidence: null, updatedAt: "2026-07-22T00:00:00Z", ...over,
+  };
+  // Default genuine provenance when submission time is set (our own recorded offer).
+  if (s.imagesSubmittedAt && s.providerImageEvidence === null && !("providerImageEvidence" in over)) {
+    s.providerImageEvidence = { method: "submitted_only", offer_id: s.offerId ?? undefined, listing_id: s.listingId };
+  }
+  return s;
+};
 
 interface Cfg {
   intent?: StoredIntent | null; loadOk?: boolean; disc?: OffersDiscovery; inv?: InventoryItemResult;
@@ -89,11 +96,24 @@ describe("executePublish — NO mutation after block/verification/failure/lease-
   noMut("failed preparing persistence", { writePreparingOk: false });
   noMut("lease lost before PUT", { disc: okDisc([]), assertLease: [false] });
 
-  it("FORGED stored snapshot (fingerprint mismatch) → block BEFORE any provider read", async () => {
+  it("FORGED snapshot on a LIVE intent → existing_intent_missing_verified_snapshot, block BEFORE any provider read", async () => {
     const { ops, spies } = mk({ intent: storedIntent({ status: "offer_created", offerId: "O1", fingerprint: "f".repeat(64) }) });
     const r = await executePublish(ops, ctx);
-    expect(r.status).toBe("fingerprint_mismatch");
+    expect(r.status).toBe("existing_intent_missing_verified_snapshot");
+    expect(r.errorCode).toBe("fingerprint_mismatch");
     expect(spies.discoverOffers).toHaveBeenCalledTimes(0);
+  });
+  it("MISSING snapshot on a LIVE intent → existing_intent_missing_verified_snapshot (never authorizes create_new)", async () => {
+    const { ops, spies } = mk({ intent: storedIntent({ status: "published", offerId: "O1", listingId: "L9", intendedState: null, imageManifest: null }) });
+    const r = await executePublish(ops, ctx);
+    expect(r.status).toBe("existing_intent_missing_verified_snapshot");
+    expect(spies.discoverOffers).toHaveBeenCalledTimes(0);
+    expect(spies.putInventoryItem).toHaveBeenCalledTimes(0);
+  });
+  it("MISSING snapshot on a terminal ARTIFACT-FREE legacy row → proceeds (replaceable)", async () => {
+    const { ops } = mk({ disc: okDisc([]), intent: storedIntent({ status: "blocked", offerId: null, listingId: null, intendedState: null, imageManifest: null }) });
+    const r = await executePublish(ops, ctx);
+    expect(r.status).toBe("success"); // create_new proceeds
   });
   it("failed preparing persistence → NO provider reads", async () => {
     const { spies } = { ...mk({ writePreparingOk: false }) };
