@@ -1,6 +1,41 @@
 import { describe, it, expect } from "vitest";
-import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, extractOfferIds, resolveOfferCreation, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
+import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, extractOfferIds, resolveOfferCreation, extractOfferSummaries, resolveExistingOffers, canonicalSkuFromInventoryNumber, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
+import { canonicalMarketplaceSku } from "../../lib/slabs/marketplace-sku";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "../../../supabase/functions/_shared/ebay-mutation-flags";
+
+describe("canonicalSkuFromInventoryNumber (server derivation matches the frontend)", () => {
+  it("produces GCV000047 for #47, identical to the frontend helper", () => {
+    for (const n of [1, 47, 48, 123456]) {
+      expect(canonicalSkuFromInventoryNumber(n)).toBe(canonicalMarketplaceSku({ inventory_number: n }));
+    }
+    expect(canonicalSkuFromInventoryNumber(48)).toBe("GCV000048");
+  });
+});
+
+describe("resolveExistingOffers (content-validated adoption)", () => {
+  const intended = { sku: "GCV000047", marketplaceId: "EBAY_US" };
+  const offer = (over: Record<string, unknown> = {}) => ({ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: null, ...over });
+
+  it("extracts summaries with the fields needed to judge compatibility", () => {
+    const s = extractOfferSummaries({ offers: [{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listing: { listingId: "L1" } }] });
+    expect(s).toEqual([{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "L1" }]);
+  });
+  it("creates when there is no COMPATIBLE offer (ignores wrong marketplace / auction)", () => {
+    expect(resolveExistingOffers([], intended).action).toBe("create");
+    expect(resolveExistingOffers([offer({ marketplaceId: "EBAY_GB" })], intended).action).toBe("create");
+    expect(resolveExistingOffers([offer({ format: "AUCTION" })], intended).action).toBe("create"); // never adopt an auction
+  });
+  it("adopts a single compatible UNPUBLISHED offer", () => {
+    expect(resolveExistingOffers([offer()], intended)).toEqual({ action: "adopt", offerId: "O1" });
+  });
+  it("reconciles a single compatible PUBLISHED offer instead of publishing again", () => {
+    expect(resolveExistingOffers([offer({ listingId: "L9" })], intended)).toEqual({ action: "reconcile_published", offerId: "O1", listingId: "L9" });
+  });
+  it("refuses when multiple compatible offers exist", () => {
+    const r = resolveExistingOffers([offer({ offerId: "A" }), offer({ offerId: "B" })], intended);
+    expect(r).toEqual({ action: "duplicate_offer_ambiguity", offerIds: ["A", "B"] });
+  });
+});
 
 describe("orderedImagePaths", () => {
   it("returns front then back, dropping empties", () => {
