@@ -12,28 +12,37 @@ describe("canonicalSkuFromInventoryNumber (server derivation matches the fronten
   });
 });
 
-describe("resolveExistingOffers (content-validated adoption)", () => {
-  const intended = { sku: "GCV000047", marketplaceId: "EBAY_US" };
-  const offer = (over: Record<string, unknown> = {}) => ({ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: null, ...over });
+describe("resolveExistingOffers (full content-validated adoption)", () => {
+  const intended = { sku: "GCV000047", marketplaceId: "EBAY_US", categoryId: "183454", merchantLocationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: 199.99, currency: "USD", availableQuantity: 1 };
+  // A summary that fully MATCHES `intended`.
+  const match = (over: Record<string, unknown> = {}) => ({ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: null, categoryId: "183454", merchantLocationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: "199.99", currency: "USD", availableQuantity: 1, listingDescription: "", listingOnHold: false, ...over });
 
-  it("extracts summaries with the fields needed to judge compatibility", () => {
-    const s = extractOfferSummaries({ offers: [{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listing: { listingId: "L1" } }] });
-    expect(s).toEqual([{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "L1" }]);
+  it("extracts full summaries from getOffers (policies, price, quantity, on-hold)", () => {
+    const s = extractOfferSummaries({ offers: [{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", categoryId: "183454", merchantLocationKey: "LOC-A", listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "199.99", currency: "USD" } }, availableQuantity: 1, listing: { listingId: "L1", listingOnHold: true } }] });
+    expect(s[0]).toMatchObject({ offerId: "O1", fulfillmentPolicyId: "F1", price: "199.99", availableQuantity: 1, listingId: "L1", listingOnHold: true });
   });
   it("creates when there is no COMPATIBLE offer (ignores wrong marketplace / auction)", () => {
     expect(resolveExistingOffers([], intended).action).toBe("create");
-    expect(resolveExistingOffers([offer({ marketplaceId: "EBAY_GB" })], intended).action).toBe("create");
-    expect(resolveExistingOffers([offer({ format: "AUCTION" })], intended).action).toBe("create"); // never adopt an auction
+    expect(resolveExistingOffers([match({ marketplaceId: "EBAY_GB" })], intended).action).toBe("create");
+    expect(resolveExistingOffers([match({ format: "AUCTION" })], intended).action).toBe("create");
   });
-  it("adopts a single compatible UNPUBLISHED offer", () => {
-    expect(resolveExistingOffers([offer()], intended)).toEqual({ action: "adopt", offerId: "O1" });
+  it("adopts a single compatible offer whose settings MATCH intent", () => {
+    expect(resolveExistingOffers([match()], intended)).toEqual({ action: "adopt", offerId: "O1" });
   });
-  it("reconciles a single compatible PUBLISHED offer instead of publishing again", () => {
-    expect(resolveExistingOffers([offer({ listingId: "L9" })], intended)).toEqual({ action: "reconcile_published", offerId: "O1", listingId: "L9" });
+  it("an unpublished compatible offer with CHANGED settings → existing_offer_inputs_changed (no silent adopt)", () => {
+    expect(resolveExistingOffers([match({ price: "150.00" })], intended)).toEqual({ action: "existing_offer_inputs_changed", offerId: "O1" });
+    expect(resolveExistingOffers([match({ fulfillmentPolicyId: "F-OTHER" })], intended).action).toBe("existing_offer_inputs_changed");
+    expect(resolveExistingOffers([match({ availableQuantity: 5 })], intended).action).toBe("existing_offer_inputs_changed");
+  });
+  it("a published compatible offer that matches → reconcile; changed → existing_listing_inputs_changed", () => {
+    expect(resolveExistingOffers([match({ listingId: "L9" })], intended)).toEqual({ action: "reconcile_published", offerId: "O1", listingId: "L9" });
+    expect(resolveExistingOffers([match({ listingId: "L9", price: "150.00" })], intended)).toEqual({ action: "existing_listing_inputs_changed", offerId: "O1", listingId: "L9" });
+  });
+  it("an on-hold listing → listing_on_hold (never republished)", () => {
+    expect(resolveExistingOffers([match({ listingOnHold: true })], intended)).toEqual({ action: "listing_on_hold", offerId: "O1" });
   });
   it("refuses when multiple compatible offers exist", () => {
-    const r = resolveExistingOffers([offer({ offerId: "A" }), offer({ offerId: "B" })], intended);
-    expect(r).toEqual({ action: "duplicate_offer_ambiguity", offerIds: ["A", "B"] });
+    expect(resolveExistingOffers([match({ offerId: "A" }), match({ offerId: "B" })], intended)).toEqual({ action: "duplicate_offer_ambiguity", offerIds: ["A", "B"] });
   });
 });
 
