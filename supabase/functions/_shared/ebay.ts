@@ -10,7 +10,8 @@ import {
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
-import { canonicalSkuFromInventoryNumber, extractOfferSummaries, hasFrontImage, listingFingerprint, orderedImagePaths, resolveExistingOffers, resolvePublishAction } from "./ebay-listing-core.ts";
+import { canonicalSkuFromInventoryNumber, hasFrontImage, listingFingerprint, orderedImagePaths, resolveExistingOffers, resolvePublishAction } from "./ebay-listing-core.ts";
+import { fetchAllOffersForSku, OFFER_MAX_PAGES, type OffersDiscovery } from "./ebay-offers.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -161,42 +162,17 @@ function ebayFetch(path: string, token: string, init: RequestInit = {}): Promise
   return ebayFetchBase(API, path, token, init);
 }
 
-// The single, shared, PAGINATED getOffers lookup used by both publish and
-// reconcile. A 404 means "no offers" ONLY when eBay's error id says so
-// (25702/25710/25713); any other failure — including an unrecognized 404 —
-// yields ok:false so it is never read as "none". Pagination follows the provider
-// `next` link but ONLY on the approved eBay API host, guards against loops, caps
-// pages, and dedupes by offerId.
-const EBAY_NO_OFFERS_ERROR_IDS = new Set([25702, 25710, 25713]);
-const OFFER_PAGE_LIMIT = 20;
-function sameEbayHost(url: string): boolean {
-  try { return new URL(url).host === new URL(API).host; } catch { return false; }
-}
-async function fetchAllOffersForSku(accessToken: string, sku: string): Promise<{ ok: boolean; http: number; summaries: ReturnType<typeof extractOfferSummaries>; pagesFetched: number }> {
-  let url: string | null = `${API}/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&limit=100`;
-  const seen = new Set<string>();
-  const byId = new Map<string, ReturnType<typeof extractOfferSummaries>[number]>();
-  let pages = 0;
-  while (url && pages < OFFER_PAGE_LIMIT) {
-    if (seen.has(url)) break;                 // pagination-loop guard
-    seen.add(url);
-    if (!sameEbayHost(url)) return { ok: false, http: 0, summaries: [], pagesFetched: pages }; // reject a foreign `next` host
-    let r: Response;
-    try { r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Content-Language": "en-US" } }); }
-    catch { return { ok: false, http: 0, summaries: [], pagesFetched: pages }; }
-    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!r.ok) {
-      if (r.status === 404) {
-        const errs = Array.isArray(data.errors) ? data.errors as Array<Record<string, unknown>> : [];
-        if (errs.some((e) => EBAY_NO_OFFERS_ERROR_IDS.has(Number(e.errorId)))) return { ok: true, http: 404, summaries: [], pagesFetched: pages };
-      }
-      return { ok: false, http: r.status, summaries: [], pagesFetched: pages };
-    }
-    pages += 1;
-    for (const s of extractOfferSummaries(data)) byId.set(s.offerId, s);
-    url = typeof data.next === "string" && data.next ? data.next : null;
-  }
-  return { ok: true, http: 200, summaries: [...byId.values()], pagesFetched: pages };
+// The shared, PAGINATED, FAIL-CLOSED getOffers discovery lives in ebay-offers.ts
+// (dependency-injected for testing). This thin wrapper binds the real fetch, the
+// approved API origin, and the server page cap.
+function discoverOffers(accessToken: string, sku: string): Promise<OffersDiscovery> {
+  return fetchAllOffersForSku({
+    fetchImpl: (url, init) => fetch(url, init),
+    apiOrigin: new URL(API).origin,
+    accessToken,
+    sku,
+    maxPages: OFFER_MAX_PAGES,
+  });
 }
 
 // Fence a long publish: prove THIS caller still holds its lease and extend it.
@@ -834,15 +810,18 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       // error (never treated as "none exist").
       // FENCE before the provider lookup.
       if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
-      const lookup = await fetchAllOffersForSku(accessToken, sku);
+      // Discovery FAILS CLOSED: a loop, page-cap, unsafe next url, incomplete
+      // provider result, or lookup failure all block offer creation — never a
+      // partial collection read as "complete/none".
+      const lookup = await discoverOffers(accessToken, sku);
       if (!lookup.ok) {
-        await admin.from("ebay_listing_intents").update({ status: "offer_lookup_failed", last_error: `provider_offer_lookup_failed:${lookup.http}`, updated_at: new Date().toISOString() }).eq("id", intentId);
-        return reply({ status: "error", error_code: "provider_lookup_failed", http: lookup.http || null, message: "Could not verify existing eBay offers for this SKU; refusing to create a possibly-duplicate offer." }, 502);
+        await admin.from("ebay_listing_intents").update({ status: "offer_discovery_failed", last_error: `${lookup.errorCode}:${lookup.httpStatus ?? ""}`, updated_at: new Date().toISOString() }).eq("id", intentId);
+        return reply({ status: "error", error_code: lookup.errorCode, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify existing eBay offers for this SKU; refusing to create a possibly-duplicate offer." }, 502);
       }
       // FULL content validation: compatibility (SKU+marketplace+FIXED_PRICE) AND a
       // field-by-field match against intent — never adopt/publish a stale offer.
       const intendedOffer = { sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId, price: priceValue, currency, availableQuantity: quantity };
-      const offerDecision = resolveExistingOffers(lookup.summaries, intendedOffer);
+      const offerDecision = resolveExistingOffers(lookup.offers, intendedOffer);
       if (offerDecision.action === "duplicate_offer_ambiguity") {
         await admin.from("ebay_listing_intents").update({ status: "duplicate_offer_ambiguity", last_error: `offer_ids:${offerDecision.offerIds.join(",")}`, updated_at: new Date().toISOString() }).eq("id", intentId);
         return reply({ status: "duplicate_offer_ambiguity", offer_ids: offerDecision.offerIds, message: "eBay already has multiple compatible offers for this SKU. Resolve them before publishing." }, 409);
@@ -930,15 +909,15 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const intent = intentRow as { id: string; slab_id: string | null; status: string } | null;
     if (!intent) return reply({ status: "error", error_code: "no_listing_intent", message: "No listing intent exists for this SKU." }, 404);
 
-    const lookup = await fetchAllOffersForSku(accessToken, sku);
+    const lookup = await discoverOffers(accessToken, sku);
     if (!lookup.ok) {
-      const code = lookup.http === 401 || lookup.http === 403 ? "authorization_failed" : "provider_lookup_failed";
-      return reply({ status: "error", error_code: code, http: lookup.http || null, message: "Could not verify the eBay offer for this SKU; cannot distinguish 'no offer' from a lookup failure." }, 502);
+      const code = lookup.httpStatus === 401 || lookup.httpStatus === 403 ? "authorization_failed" : lookup.errorCode;
+      return reply({ status: "error", error_code: code, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify the eBay offer for this SKU; cannot distinguish 'no offer' from a lookup/discovery failure." }, 502);
     }
-    if (lookup.summaries.length > 1) {
-      return reply({ status: "duplicate_offer_ambiguity", offer_ids: lookup.summaries.map((o) => o.offerId), message: "eBay has multiple offers for this SKU; resolve them before reconciling." }, 409);
+    if (lookup.offers.length > 1) {
+      return reply({ status: "duplicate_offer_ambiguity", offer_ids: lookup.offers.map((o) => o.offerId), message: "eBay has multiple offers for this SKU; resolve them before reconciling." }, 409);
     }
-    const live = lookup.summaries[0];
+    const live = lookup.offers[0];
     if (!live) return reply({ status: "error", error_code: "no_live_offer", message: "eBay confirms no offer exists for this SKU; nothing to reconcile." }, 404);
     const offerId = live.offerId; // ONLY the provider's offer id — never a stale local one
     const listingId = live.listingId;
