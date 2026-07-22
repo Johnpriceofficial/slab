@@ -141,6 +141,17 @@ describe("runOrderSync — fenced, batched order sync", () => {
     expect(r.errorCode).toBe("mapping_lookup_failed");
     expect(spies.persistOrders).toHaveBeenCalledTimes(0);
   });
+  it("a malformed order page (e.g. duplicate lineItemId) → NO mapping/persist/proposed-sales", async () => {
+    const malformed: PaginatedResult<RawOrder> = { ok: false, errorCode: "malformed_provider_response", httpStatus: 502, pagesFetched: 1 };
+    let proposed: unknown[] | undefined;
+    const { spies } = mk({ orderPage: malformed });
+    const r = await runOrderSync("ACC", "AT", deps(spies, (s) => { proposed = s; }));
+    expect(r.errorCode).toBe("malformed_provider_response");
+    expect(spies.resolveOrderMappings).toHaveBeenCalledTimes(0);
+    expect(spies.persistOrders).toHaveBeenCalledTimes(0);
+    expect(spies.syncComplete).toHaveBeenCalledTimes(0);
+    expect(proposed).toBeUndefined(); // collectProposedSales never invoked
+  });
 });
 
 describe("runFinanceSync — fenced, batched finance sync", () => {

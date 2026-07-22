@@ -38,6 +38,30 @@ describe("validateOrder / validateTransaction — strict item contracts", () => 
     expect(validateOrder({ orderId: "1", lineItems: [{ sku: "x" }] }).ok).toBe(false); // line missing lineItemId
     expect(validateOrder({ orderId: "1", lineItems: "nope" }).ok).toBe(false);
   });
+  it("strict line-item identity: lineItems must be a present array of uniquely-identified objects", () => {
+    // A present lineItems array is REQUIRED (a fulfillment order always carries lines).
+    expect(validateOrder({ orderId: "1" }).ok).toBe(false);                                   // missing lineItems
+    expect(validateOrder({ orderId: "1", lineItems: "nope" }).ok).toBe(false);                // non-array lineItems
+    expect(validateOrder({ orderId: "1", lineItems: [42] }).ok).toBe(false);                  // non-object line
+    expect(validateOrder({ orderId: "1", lineItems: [{ sku: "x" }] }).ok).toBe(false);        // line missing lineItemId
+    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "" }] }).ok).toBe(false);  // empty lineItemId
+    // A single valid line works.
+    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1", sku: "GCV000047" }] }).ok).toBe(true);
+    // Two distinct line ids work.
+    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1" }, { lineItemId: "L2" }] }).ok).toBe(true);
+  });
+  it("strict line-item identity: ANY repeated lineItemId in one order fails closed (identical OR conflicting)", () => {
+    const dup = (a: Record<string, unknown>, b: Record<string, unknown>) => validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1", ...a }, { lineItemId: "L1", ...b }] });
+    // identical duplicate copies → rejected (never two shaped lines)
+    expect(dup({ sku: "GCV000047", quantity: "1", total: { value: "10.00" } }, { sku: "GCV000047", quantity: "1", total: { value: "10.00" } }).ok).toBe(false);
+    // conflicting duplicates on slab-relevant data → rejected
+    expect(dup({ sku: "GCV000047" }, { sku: "GCV000099" }).ok).toBe(false);                    // different SKU
+    expect(dup({ quantity: "1" }, { quantity: "2" }).ok).toBe(false);                          // different quantity
+    expect(dup({ total: { value: "10.00" } }, { total: { value: "99.00" } }).ok).toBe(false);  // different price
+    expect(dup({ lineItemFulfillmentStatus: "FULFILLED" }, { lineItemFulfillmentStatus: "NOT_STARTED" }).ok).toBe(false); // different status
+    // three lines where the 3rd repeats the 1st → rejected
+    expect(validateOrder({ orderId: "1", lineItems: [{ lineItemId: "L1" }, { lineItemId: "L2" }, { lineItemId: "L1" }] }).ok).toBe(false);
+  });
   it("transaction requires a non-empty transactionId; unknown enums preserved, malformed amount rejected", () => {
     expect(validateTransaction(txn("T1")).ok).toBe(true);
     expect(validateTransaction({ transactionId: "T1", transactionStatus: "SOME_UNKNOWN_CODE" }).ok).toBe(true); // unknown enum kept
@@ -79,6 +103,11 @@ describe("fetchAllEbayOrders — pagination recovery matrix", () => {
       [ordersUrl(200)]: { status: 200, body: { orders: [order("A", "GCV000999")], total: 2, size: 1, offset: 200 } },
     });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
+  });
+  it("an order with a duplicate lineItemId in one page → malformed_provider_response (never reaches shaping)", async () => {
+    const dupOrder = { orderId: "A", lineItems: [{ lineItemId: "L1", sku: "GCV000047" }, { lineItemId: "L1", sku: "GCV000099" }] };
+    const { r } = await runOrders({ [ordersUrl()]: { status: 200, body: { orders: [dupOrder], total: 1, size: 1, offset: 0 } } });
+    expect(r).toMatchObject({ ok: false, errorCode: "malformed_provider_response" });
   });
   const failCases: Array<[string, Parameters<typeof mock>[0], string]> = [
     ["repeated next URL → pagination_loop", { [ordersUrl()]: { status: 200, body: { orders: [order("A")], total: 5, size: 1, offset: 0, next: ordersUrl() } } }, "pagination_loop"],
