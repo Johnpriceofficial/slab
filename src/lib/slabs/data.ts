@@ -373,6 +373,19 @@ export async function signedImageUrl(path: string | null, expiresSeconds = 3600)
   return data.signedUrl ?? null;
 }
 
+export type SlabImageState = "no_path" | "ready" | "signing_error";
+/**
+ * Resolve a stored image path into a TYPED state so the UI can distinguish "no
+ * stored image" from "signing failed" (both previously collapsed to a null URL
+ * that rendered as "No image"). A load failure is detected in the component.
+ */
+export async function signedImageState(path: string | null, expiresSeconds = 3600): Promise<{ state: SlabImageState; url: string | null }> {
+  if (!path) return { state: "no_path", url: null };
+  const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(path, expiresSeconds);
+  if (error || !data?.signedUrl) return { state: "signing_error", url: null };
+  return { state: "ready", url: data.signedUrl };
+}
+
 /* ------------------------- PriceCharting (server) ---------------------- */
 
 export interface PriceChartingSearchArgs {

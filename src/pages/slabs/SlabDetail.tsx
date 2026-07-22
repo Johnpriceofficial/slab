@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useId, useState } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -35,8 +35,8 @@ import {
 } from "@/lib/slabs/valuation-provenance";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import {
-  fetchSlabById, fetchAdjacentSlabs, signedImageUrl, updateSlab, refreshSlabPricing,
-  supabaseSlabDataAccess,
+  fetchSlabById, fetchAdjacentSlabs, signedImageState, updateSlab, refreshSlabPricing,
+  supabaseSlabDataAccess, type SlabImageState,
 } from "@/lib/slabs/data";
 import { centsToInputString, dollarsToCents } from "@/lib/slabs/format";
 import { VERIFICATION_STATUSES, DUPLICATE_STATUSES, LABEL_ACCURACY } from "@/lib/slabs/constants";
@@ -60,11 +60,11 @@ export default function SlabDetail() {
     enabled: !!slab,
   });
 
-  const { data: images } = useQuery({
+  const { data: images, isFetching: imagesLoading, refetch: refetchImages } = useQuery({
     queryKey: ["slab-images", id, slab?.front_image_path, slab?.back_image_path],
     queryFn: async () => ({
-      front: await signedImageUrl(slab?.front_image_path ?? null),
-      back: await signedImageUrl(slab?.back_image_path ?? null),
+      front: await signedImageState(slab?.front_image_path ?? null),
+      back: await signedImageState(slab?.back_image_path ?? null),
     }),
     enabled: !!slab,
   });
@@ -172,8 +172,8 @@ export default function SlabDetail() {
         <Card>
           <CardHeader><CardTitle>Photographs</CardTitle></CardHeader>
           <CardContent className="grid grid-cols-2 gap-3">
-            <SlabPhoto label="Front" url={images?.front ?? null} />
-            <SlabPhoto label="Back" url={images?.back ?? null} />
+            <SlabPhoto label="Front" img={images?.front} loading={imagesLoading} onRetry={() => refetchImages()} />
+            <SlabPhoto label="Back" img={images?.back} loading={imagesLoading} onRetry={() => refetchImages()} />
           </CardContent>
         </Card>
 
@@ -286,18 +286,37 @@ export default function SlabDetail() {
   );
 }
 
-function SlabPhoto({ label, url }: { label: string; url: string | null }) {
+// A stored image renders through a TYPED state so a signing/loading/load failure
+// is never silently shown as "No image" (which must mean: there is no stored path).
+function SlabPhoto({ label, img, loading, onRetry }: { label: string; img?: { state: SlabImageState; url: string | null }; loading: boolean; onRetry: () => void }) {
+  const [loadError, setLoadError] = useState(false);
+  // Reset the load-error flag whenever a new URL arrives (e.g. after Retry).
+  useEffect(() => { setLoadError(false); }, [img?.url]);
+
+  const effective: "loading" | "ready" | "no_path" | "signing_error" | "load_error" =
+    loadError ? "load_error"
+      : !img ? (loading ? "loading" : "no_path")
+        : img.state === "ready" ? "ready"
+          : img.state; // "no_path" | "signing_error"
+
+  if (effective === "ready" && img?.url) {
+    return (
+      <div>
+        <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
+        <img src={img.url} alt={label} onError={() => setLoadError(true)} className="w-full rounded border object-contain" />
+      </div>
+    );
+  }
+  const copy: Record<string, string> = { loading: "Loading image…", no_path: "No image", signing_error: "Image unavailable", load_error: "Image failed to load" };
+  const canRetry = effective === "signing_error" || effective === "load_error";
   return (
     <div>
       <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
-      {url ? (
-        <img src={url} alt={label} className="w-full rounded border object-contain" />
-      ) : (
-        <div className="flex h-40 flex-col items-center justify-center gap-1 rounded border bg-muted/30 text-muted-foreground">
-          <ImageOff className="h-6 w-6" />
-          <span className="text-xs">No image</span>
-        </div>
-      )}
+      <div className="flex h-40 flex-col items-center justify-center gap-1 rounded border bg-muted/30 text-muted-foreground">
+        <ImageOff className="h-6 w-6" />
+        <span className="text-xs">{copy[effective]}</span>
+        {canRetry && <button type="button" className="text-xs underline hover:opacity-80" onClick={() => { setLoadError(false); onRetry(); }}>Retry</button>}
+      </div>
     </div>
   );
 }

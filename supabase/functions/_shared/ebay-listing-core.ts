@@ -28,20 +28,53 @@ export interface ListingFingerprintFields {
   payment_policy_id: string;
   return_policy_id: string;
   condition: string;
-  image_count: number;
+  condition_description?: string;
+  quantity?: number;
+  front_image_path?: string | null;
+  back_image_path?: string | null;
+  aspects?: Record<string, unknown>;
+}
+
+export const LISTING_FINGERPRINT_VERSION = 2;
+
+// Stable, key-sorted canonicalization so aspect key order never changes the hash.
+function canonicalize(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonicalize);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) out[k] = canonicalize((v as Record<string, unknown>)[k]);
+    return out;
+  }
+  return v;
 }
 
 /**
- * A deterministic fingerprint of the exact listing inputs. Stored on the listing
- * intent so a repeat publish can tell "same listing, resume/reconcile" from
- * "inputs changed". Order-stable and side-effect free.
+ * A deterministic, VERSIONED fingerprint of the EXACT listing inputs — including
+ * aspects (canonicalized), quantity, condition description, and the actual image
+ * paths — so any change (e.g. swapping the front image while keeping one image)
+ * produces a different fingerprint. Stored on the intent to distinguish
+ * "same listing, resume/reconcile" from "inputs changed". Pure + order-stable.
  */
 export function listingFingerprint(f: ListingFingerprintFields): string {
-  return [
-    f.sku, f.title, f.description, f.price_value, f.currency, f.category_id,
-    f.merchant_location_key, f.fulfillment_policy_id, f.payment_policy_id,
-    f.return_policy_id, f.condition, f.image_count,
-  ].map((v) => String(v ?? "")).join("|");
+  const canonical = {
+    sku: f.sku ?? "",
+    title: f.title ?? "",
+    description: f.description ?? "",
+    price: f.price_value ?? 0,
+    currency: f.currency ?? "",
+    category: f.category_id ?? "",
+    location: f.merchant_location_key ?? "",
+    fulfillment: f.fulfillment_policy_id ?? "",
+    payment: f.payment_policy_id ?? "",
+    return: f.return_policy_id ?? "",
+    condition: f.condition ?? "",
+    condition_description: f.condition_description ?? "",
+    quantity: f.quantity ?? 1,
+    front_image: f.front_image_path ?? "",
+    back_image: f.back_image_path ?? "",
+    aspects: canonicalize(f.aspects ?? {}),
+  };
+  return `v${LISTING_FINGERPRINT_VERSION}|${JSON.stringify(canonical)}`;
 }
 
 export interface ListingIntentState {
@@ -63,6 +96,35 @@ export type PublishAction =
  * never silently re-published/changed, a stale offer is never silently reused,
  * and an unpersisted offer blocks retries until reconciled. Pure + fully tested.
  */
+// The offer ids eBay already has for a SKU (getOffers response). Pure extractor.
+export function extractOfferIds(offersResponse: unknown): string[] {
+  const offers = (offersResponse as { offers?: unknown } | null)?.offers;
+  if (!Array.isArray(offers)) return [];
+  return offers
+    .map((o) => String((o as { offerId?: unknown })?.offerId ?? "").trim())
+    .filter(Boolean);
+}
+
+export interface OfferLookup { ok: boolean; offerIds: string[] }
+export type OfferCreationDecision =
+  | { action: "provider_lookup_failed" }                     // lookup errored → do NOT create
+  | { action: "adopt"; offerId: string }                     // exactly one exists → reuse it
+  | { action: "duplicate_offer_ambiguity"; offerIds: string[] } // multiple → refuse
+  | { action: "create" };                                    // proven none → safe to create
+
+/**
+ * Provider-side offer idempotency: decide whether to create a new eBay offer for
+ * a SKU based on what eBay ALREADY has. A new offer is created ONLY after a
+ * successful lookup proves none exists — so a retry never duplicates an offer,
+ * even if every prior local write (offer_id persistence + recovery) failed. Pure.
+ */
+export function resolveOfferCreation(lookup: OfferLookup): OfferCreationDecision {
+  if (!lookup.ok) return { action: "provider_lookup_failed" };
+  if (lookup.offerIds.length === 1) return { action: "adopt", offerId: lookup.offerIds[0] };
+  if (lookup.offerIds.length > 1) return { action: "duplicate_offer_ambiguity", offerIds: lookup.offerIds };
+  return { action: "create" };
+}
+
 export function resolvePublishAction(existing: ListingIntentState | null, fingerprint: string): PublishAction {
   if (!existing) return { action: "proceed" };
   const sameInputs = existing.fingerprint === fingerprint;
