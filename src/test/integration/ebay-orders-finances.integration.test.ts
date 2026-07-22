@@ -82,7 +82,11 @@ suite("eBay orders/finances apply RPCs", () => {
     const res = await service.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shapedOrders() });
     expect(res.error).toBeNull();
     // 1 order, 2 lines, 1 matched (mapped SKU), 1 unmatched.
-    expect(res.data).toEqual({ orders: 1, line_items: 2, matched: 1, unmatched: 1 });
+    // C.8.1: ebay_orders_persist now ALSO returns confirmed durable totals read
+    // back from the private tables (idempotent under retries + overlap).
+    expect(res.data).toMatchObject({ orders: 1, line_items: 2, matched: 1, unmatched: 1 });
+    expect((res.data as { confirmed_order_total: number }).confirmed_order_total).toBe(1);
+    expect((res.data as { confirmed_line_total: number }).confirmed_line_total).toBe(2);
 
     // Persisting an order must NOT create a sold comp or touch inventory.
     const comps = await service.from("sold_comps").select("id").eq("external_sale_id", extId);
