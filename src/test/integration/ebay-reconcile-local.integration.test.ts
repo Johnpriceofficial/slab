@@ -25,8 +25,8 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
   let seq = 0;
 
   const FP = "fp-canonical";
-  const makeIntent = async (sku: string, fingerprint = FP, status = "preparing") => {
-    const { data } = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, fingerprint_version: 3, status }).select("id").single();
+  const makeIntent = async (sku: string, fingerprint = FP, status = "preparing", imagesSubmittedAt: string | null = null) => {
+    const { data } = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, fingerprint_version: 3, status, images_submitted_at: imagesSubmittedAt }).select("id").single();
     return data!.id as string;
   };
   const call = (over: Record<string, unknown>) => service.rpc("ebay_listing_reconcile_local", {
@@ -65,16 +65,26 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
     for (const id of userIds) await service.auth.admin.deleteUser(id).catch(() => {});
   });
 
-  it("service role: a valid call atomically writes the intent AND the mapping", async () => {
-    const id = await makeIntent("GCV000047");
+  it("service role: a valid call atomically writes the intent AND the mapping; advances method ONLY with prior provenance", async () => {
+    // Prior submission provenance present → method advances to provider_reference_match.
+    const id = await makeIntent("GCV000047", FP, "offer_created", "2026-07-20T00:00:00Z");
     const r = await call({ p_sku: "GCV000047", p_intent_id: id });
     expect((r.data as { ok?: boolean }).ok).toBe(true);
     const { data: intent } = await service.from("ebay_listing_intents").select("status, offer_id, images_submitted_at, image_verification_method").eq("id", id).single();
     expect(intent!.status).toBe("published");
-    expect(intent!.images_submitted_at).not.toBeNull();
+    expect(intent!.images_submitted_at).not.toBeNull(); // preserved, NOT fabricated
     expect(intent!.image_verification_method).toBe("provider_reference_match");
     const { data: map } = await service.from("ebay_listing_mappings").select("id, offer_id").eq("ebay_account_id", accountId).eq("sku", "GCV000047").maybeSingle();
     expect(map).not.toBeNull();
+  });
+
+  it("NEVER fabricates images_submitted_at: an intent with no prior provenance keeps it null", async () => {
+    const id = await makeIntent("GCV000048"); // no images_submitted_at
+    const r = await call({ p_sku: "GCV000048", p_intent_id: id });
+    expect((r.data as { ok?: boolean }).ok).toBe(true);
+    const { data: intent } = await service.from("ebay_listing_intents").select("images_submitted_at, image_verification_method").eq("id", id).single();
+    expect(intent!.images_submitted_at).toBeNull();
+    expect(intent!.image_verification_method).not.toBe("provider_reference_match");
   });
 
   it("stale fingerprint → rejected structurally, NO mapping written", async () => {

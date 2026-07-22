@@ -65,8 +65,10 @@ suite("ebay sync state + lease (durable watermark, single-flight, service-only)"
   it("sync-state + lease RPCs are denied to anon and authenticated; the state table is not writable by clients", async () => {
     expect((await adminClient.rpc("ebay_sync_state_commit", { p_account_id: accountId, p_resource_type: "orders", p_run_id: crypto.randomUUID(), p_high_watermark_at: null, p_pages: 0, p_records_fetched: 0, p_records_persisted: 0, p_durable_total: 0 })).error).not.toBeNull();
     expect((await adminClient.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: "orders", p_token: "x", p_ttl_seconds: 1 })).error).not.toBeNull();
-    // Admin may READ sync state (RLS select policy) but cannot INSERT/UPDATE it directly.
-    const write = await adminClient.from("ebay_sync_state").update({ high_watermark_at: "2000-01-01T00:00:00Z" }).eq("ebay_account_id", accountId);
-    expect(write.error).not.toBeNull();
+    // Admin may READ sync state (RLS select policy) but cannot mutate it: a direct
+    // update is RLS-filtered to zero rows, so the durable watermark is UNCHANGED.
+    await adminClient.from("ebay_sync_state").update({ high_watermark_at: "2000-01-01T00:00:00Z" }).eq("ebay_account_id", accountId);
+    const { data: row } = await service.from("ebay_sync_state").select("high_watermark_at").eq("ebay_account_id", accountId).eq("resource_type", "orders").single();
+    expect(new Date(row!.high_watermark_at as string).toISOString()).toBe("2026-07-20T00:00:00.000Z"); // committed value preserved
   });
 });
