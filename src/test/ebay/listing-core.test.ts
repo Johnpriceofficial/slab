@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { orderedImagePaths, hasFrontImage, listingFingerprint } from "../../../supabase/functions/_shared/ebay-listing-core";
+import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "../../../supabase/functions/_shared/ebay-mutation-flags";
 
 describe("orderedImagePaths", () => {
@@ -34,6 +34,33 @@ describe("listingFingerprint", () => {
     expect(listingFingerprint({ ...base, price_value: 11 })).not.toBe(listingFingerprint(base));
     expect(listingFingerprint({ ...base, title: "T2" })).not.toBe(listingFingerprint(base));
     expect(listingFingerprint({ ...base, image_count: 1 })).not.toBe(listingFingerprint(base));
+  });
+});
+
+describe("resolvePublishAction (fingerprint enforcement)", () => {
+  const fp = "FP-CURRENT";
+  const intent = (over: Partial<ListingIntentState>): ListingIntentState => ({ status: "preparing", offer_id: null, listing_id: null, fingerprint: fp, ...over });
+
+  it("no existing intent → proceed", () => {
+    expect(resolvePublishAction(null, fp)).toEqual({ action: "proceed" });
+  });
+  it("published + identical inputs → reconciled (return existing, no re-publish)", () => {
+    expect(resolvePublishAction(intent({ status: "published", offer_id: "O1", listing_id: "L1" }), fp).action).toBe("reconciled_existing");
+  });
+  it("published + CHANGED inputs → listing_inputs_changed (never silent re-publish)", () => {
+    expect(resolvePublishAction(intent({ status: "published", offer_id: "O1", listing_id: "L1", fingerprint: "OLD" }), fp).action).toBe("listing_inputs_changed");
+  });
+  it("in-flight offer + identical inputs → resume that offer (no duplicate)", () => {
+    expect(resolvePublishAction(intent({ status: "offer_created", offer_id: "O9", fingerprint: fp }), fp)).toEqual({ action: "resume", offerId: "O9" });
+  });
+  it("in-flight offer + CHANGED inputs → listing_inputs_changed (no stale reuse)", () => {
+    expect(resolvePublishAction(intent({ status: "offer_created", offer_id: "O9", fingerprint: "OLD" }), fp).action).toBe("listing_inputs_changed");
+  });
+  it("unpersisted prior offer → must reconcile before another publish", () => {
+    expect(resolvePublishAction(intent({ status: "offer_created_unpersisted", fingerprint: "OLD" }), fp).action).toBe("offer_created_unpersisted");
+  });
+  it("preparing intent with no offer yet → proceed", () => {
+    expect(resolvePublishAction(intent({ status: "preparing", offer_id: null }), fp).action).toBe("proceed");
   });
 });
 

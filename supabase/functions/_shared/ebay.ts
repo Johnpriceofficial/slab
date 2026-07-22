@@ -10,7 +10,7 @@ import {
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
-import { hasFrontImage, listingFingerprint, orderedImagePaths } from "./ebay-listing-core.ts";
+import { hasFrontImage, listingFingerprint, orderedImagePaths, resolvePublishAction } from "./ebay-listing-core.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -561,13 +561,21 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (acctErr) persistError = persistError ?? "account_update_failed";
     await recordRun("account_update", acctErr ? "error" : "success", null, Date.now() - tAcct, acctErr ? "account_update_failed" : null);
 
-    if (!persistError) {
-      const tCur = Date.now();
-      const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery", p_count: (resources.locations.count ?? 0) + (resources.fulfillment_policies.count ?? 0) + (resources.payment_policies.count ?? 0) + (resources.return_policies.count ?? 0) });
-      if (curErr) persistError = "cursor_persist_failed";
-      await recordRun("account_discovery_cursor", curErr ? "error" : "success", null, Date.now() - tCur, curErr ? "cursor_persist_failed" : null);
-    } else {
-      await recordRun("account_discovery_cursor", "error", null, 0, persistError);
+    // Discovery is COMPLETE only when EVERY provider fetch (identity, privileges,
+    // locations, all three policies) AND persistence succeeded. A partial run
+    // (any provider fetch failed) records only the attempt and PRESERVES the prior
+    // complete-discovery timestamp — a partial must never look like completion.
+    const discoveredCount = (resources.locations.count ?? 0) + (resources.fulfillment_policies.count ?? 0) + (resources.payment_policies.count ?? 0) + (resources.return_policies.count ?? 0);
+    const discoveryComplete = identityOk && priv.ok && loc.ok && groupFetched && !persistError;
+    const tAtt = Date.now();
+    const { error: attErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery_attempt", p_count: discoveredCount });
+    if (attErr && !persistError) persistError = "cursor_persist_failed";
+    await recordRun("account_discovery_attempt", attErr ? "error" : "success", null, Date.now() - tAtt, attErr ? "cursor_persist_failed" : null);
+    if (discoveryComplete && !attErr) {
+      const tCmp = Date.now();
+      const { error: cmpErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "account_discovery_complete", p_count: discoveredCount });
+      if (cmpErr) persistError = "cursor_persist_failed";
+      await recordRun("account_discovery_complete", cmpErr ? "error" : "success", null, Date.now() - tCmp, cmpErr ? "cursor_persist_failed" : null);
     }
 
     // A required-observability write failure is itself a durability failure.
@@ -597,30 +605,52 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const marketplaceId = String(body.marketplace_id ?? "EBAY_US");
     const categoryId = String(body.category_id ?? "");
     if (body.confirmation !== "PUBLISH") {
-      const [privileges, locations, fulfillment, payment, returns] = await Promise.all([
-        ebayFetch("/sell/account/v1/privilege", accessToken).catch(() => ({})),
-        ebayFetch("/sell/inventory/v1/location?limit=100", accessToken).catch(() => ({})),
-        ebayFetch(`/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
-        ebayFetch(`/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
-        ebayFetch(`/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken).catch(() => ({})),
+      // Preparation FAILS CLOSED: each requirement is fetched independently with
+      // its own success/HTTP captured — a failed provider call is NOT masked as an
+      // empty object. Only status "prepared" (all required resources ok) may let
+      // the client enable Publish; any failure yields "partial".
+      const probe = async (path: string): Promise<{ ok: boolean; http: number; data: Record<string, unknown> }> => {
+        try {
+          const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Content-Language": "en-US" } });
+          return { ok: r.ok, http: r.status, data: (await r.json().catch(() => ({}))) as Record<string, unknown> };
+        } catch { return { ok: false, http: 0, data: {} }; }
+      };
+      const [priv, loc, ful, pay, ret] = await Promise.all([
+        probe("/sell/account/v1/privilege"),
+        probe("/sell/inventory/v1/location?limit=100"),
+        probe(`/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+        probe(`/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+        probe(`/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
       ]);
-      let categoryRequirements: Record<string, unknown> | null = null;
-      let conditionPolicies: Record<string, unknown> | null = null;
+      let aspects: { ok: boolean; http: number; data: Record<string, unknown> } | null = null;
+      let conditions: { ok: boolean; http: number; data: Record<string, unknown> } | null = null;
       if (categoryId) {
-        const tree = await ebayFetch(`/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId)}`, accessToken);
-        categoryRequirements = await ebayFetch(`/commerce/taxonomy/v1/category_tree/${encodeURIComponent(String(tree.categoryTreeId))}/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`, accessToken);
-        conditionPolicies = await ebayFetch(`/sell/metadata/v1/marketplace/${encodeURIComponent(marketplaceId)}/get_item_condition_policies?filter=categoryIds:%7B${encodeURIComponent(categoryId)}%7D`, accessToken);
+        const tree = await probe(`/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId)}`);
+        if (tree.ok && tree.data.categoryTreeId) {
+          aspects = await probe(`/commerce/taxonomy/v1/category_tree/${encodeURIComponent(String(tree.data.categoryTreeId))}/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`);
+          conditions = await probe(`/sell/metadata/v1/marketplace/${encodeURIComponent(marketplaceId)}/get_item_condition_policies?filter=categoryIds:%7B${encodeURIComponent(categoryId)}%7D`);
+        } else {
+          aspects = { ok: false, http: tree.http, data: {} };
+          conditions = { ok: false, http: tree.http, data: {} };
+        }
       }
+      const rstat = (p: { ok: boolean; http: number } | null): { status: string; http: number | null } => p ? { status: p.ok ? "success" : "error", http: p.http || null } : { status: "not_requested", http: null };
+      const requiredOk = priv.ok && loc.ok && ful.ok && pay.ok && ret.ok && (categoryId ? Boolean(aspects?.ok && conditions?.ok) : true);
       return reply({
-        status: "confirmation_required",
+        status: requiredOk ? "prepared" : "partial",
         confirmation_phrase: "PUBLISH",
-        privileges,
-        inventory_locations: locations,
-        business_policies: { fulfillment, payment, return: returns },
-        category_aspects: categoryRequirements,
-        condition_policies: conditionPolicies,
-        message: "Resolve the current eBay category, aspects, condition policy, business policies, and inventory location, then explicitly confirm PUBLISH.",
-      }, 409);
+        resources: {
+          privileges: rstat(priv), inventory_locations: rstat(loc),
+          fulfillment_policies: rstat(ful), payment_policies: rstat(pay), return_policies: rstat(ret),
+          category_aspects: rstat(aspects), condition_policies: rstat(conditions),
+        },
+        privileges: priv.data, inventory_locations: loc.data,
+        business_policies: { fulfillment: ful.data, payment: pay.data, return: ret.data },
+        category_aspects: aspects?.data ?? null, condition_policies: conditions?.data ?? null,
+        message: requiredOk
+          ? "All listing requirements loaded. Review, resolve required aspects, and confirm PUBLISH."
+          : "Some listing requirements could not be loaded — Publish stays blocked. See per-resource status.",
+      });
     }
     // Publishing is a listing mutation: server flag gates it, and a confirmation
     // phrase cannot bypass a disabled flag.
@@ -651,18 +681,31 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     }
     if (imageUrls.length === 0) return reply({ status: "error", error_code: "front_image_required" }, 400);
 
-    // Durable intent BEFORE any eBay mutation. A prior fully-published intent for
-    // this (account, sku) is reconciled/resumed, never re-published as a duplicate.
-    const { data: existing } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
-    const existingIntent = existing as { id: string; status: string; offer_id: string | null; listing_id: string | null } | null;
-    if (existingIntent?.status === "published" && existingIntent.listing_id) {
-      return reply({ status: "success", reconciled: true, offer_id: existingIntent.offer_id, listing_id: existingIntent.listing_id, listing_status: "published" });
-    }
+    // Durable intent BEFORE any eBay mutation. A FAILED lookup is an error, never
+    // silently "no existing intent".
+    const { data: existing, error: lookupErr } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+    if (lookupErr) return reply({ status: "error", error_code: "listing_intent_lookup_failed" }, 500);
+    const existingIntent = existing as { id: string; status: string; offer_id: string | null; listing_id: string | null; fingerprint: string | null } | null;
     const fingerprint = listingFingerprint({ sku, title: String(body.title ?? ""), description: String(body.description ?? ""), price_value: priceValue, currency, category_id: categoryId, merchant_location_key: merchantLocationKey, fulfillment_policy_id: fulfillmentPolicyId, payment_policy_id: paymentPolicyId, return_policy_id: returnPolicyId, condition: String(body.condition ?? ""), image_count: imageUrls.length });
+
+    // Fingerprint enforcement (pure decision): never silently reuse a stale offer
+    // or re-publish over a live listing when inputs changed.
+    const decision = resolvePublishAction(existingIntent, fingerprint);
+    if (decision.action === "offer_created_unpersisted") {
+      return reply({ status: "offer_created_unpersisted", message: "A prior publish created an eBay offer that was not saved locally. Run reconcile (which recovers the offer by SKU) before publishing this SKU again." }, 409);
+    }
+    if (decision.action === "reconciled_existing") {
+      return reply({ status: "success", reconciled: true, offer_id: existingIntent?.offer_id, listing_id: existingIntent?.listing_id, listing_status: "published" });
+    }
+    if (decision.action === "listing_inputs_changed") {
+      return reply({ status: "listing_inputs_changed", offer_id: existingIntent?.offer_id, listing_id: existingIntent?.listing_id ?? undefined, message: "The listing inputs changed relative to the existing intent/listing for this SKU. Use an explicit revise flow — publish will not silently change a live listing or reuse a stale offer." }, 409);
+    }
+
     const { data: intentRow, error: intentErr0 } = await admin.from("ebay_listing_intents").upsert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, status: "preparing", last_error: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id").single();
     if (intentErr0 || !intentRow) return reply({ status: "error", error_code: "listing_intent_persist_failed" }, 500);
     const intentId = (intentRow as { id: string }).id;
-    let offerId = existingIntent?.offer_id ?? "";
+    // Resume an existing offer ONLY on a fingerprint match (decided above).
+    let offerId = decision.action === "resume" ? decision.offerId : "";
 
     const inventoryPayload = {
       availability: { shipToLocationAvailability: { quantity: Number(body.quantity ?? 1) } },
@@ -671,10 +714,14 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       product: { title: String(body.title ?? ""), description: String(body.description ?? ""), aspects: body.aspects ?? {}, imageUrls },
     };
     await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) });
-    await admin.from("ebay_listing_intents").update({ status: "inventory_created", updated_at: new Date().toISOString() }).eq("id", intentId);
+    // Inventory item PUT is idempotent by SKU, but the status transition is still
+    // checked; a lost transition returns error and a retry re-PUTs safely.
+    const { error: invErr } = await admin.from("ebay_listing_intents").update({ status: "inventory_created", updated_at: new Date().toISOString() }).eq("id", intentId);
+    if (invErr) return reply({ status: "error", error_code: "listing_intent_persist_failed" }, 500);
 
-    // Create the offer ONLY if we do not already have one for this intent, so a
-    // retried publish never creates a duplicate offer. Persist offer_id BEFORE publish.
+    // Create the offer ONLY if we do not already have one, so a retried publish
+    // never creates a duplicate offer. Persist offer_id BEFORE publish, and STOP
+    // if that persistence fails (a lost offer_id would risk a duplicate on retry).
     if (!offerId) {
       const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify({
         sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: Number(body.quantity ?? 1), categoryId, merchantLocationKey,
@@ -683,7 +730,12 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
       }) });
       offerId = String(offer.offerId ?? "");
       if (!offerId) { await admin.from("ebay_listing_intents").update({ status: "failed", last_error: "no_offer_id", updated_at: new Date().toISOString() }).eq("id", intentId); return reply({ status: "error", error_code: "offer_creation_failed" }, 502); }
-      await admin.from("ebay_listing_intents").update({ status: "offer_created", offer_id: offerId, updated_at: new Date().toISOString() }).eq("id", intentId);
+      const { error: ocErr } = await admin.from("ebay_listing_intents").update({ status: "offer_created", offer_id: offerId, updated_at: new Date().toISOString() }).eq("id", intentId);
+      if (ocErr) {
+        // Best-effort flag with the offer id so reconcile can recover it; block retries.
+        await admin.from("ebay_listing_intents").update({ status: "offer_created_unpersisted", last_error: `offer_id_persist_failed:${offerId}`, updated_at: new Date().toISOString() }).eq("id", intentId);
+        return reply({ status: "offer_created_unpersisted", offer_id: offerId, message: "An eBay offer was created but its ID could not be saved locally. Do NOT retry publish — run reconcile to recover the offer by SKU." }, 500);
+      }
     }
 
     const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" });
@@ -705,7 +757,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // the live offer, then repair the local mapping. No new external mutation.
     const sku = String(body.sku ?? "");
     if (!sku) return reply({ status: "error", error_code: "MISSING_SKU" }, 400);
-    const { data: intentRow } = await admin.from("ebay_listing_intents").select("id, slab_id, offer_id, listing_id, status").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+    const { data: intentRow, error: intentLookupErr } = await admin.from("ebay_listing_intents").select("id, slab_id, offer_id, listing_id, status").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+    if (intentLookupErr) return reply({ status: "error", error_code: "listing_intent_lookup_failed" }, 500);
     const intent = intentRow as { id: string; slab_id: string | null; offer_id: string | null; listing_id: string | null; status: string } | null;
     if (!intent) return reply({ status: "error", error_code: "no_listing_intent", message: "No listing intent exists for this SKU." }, 404);
     const offers = await ebayFetch(`/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}`, accessToken).catch(() => ({} as Record<string, unknown>));
@@ -714,10 +767,16 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const listingObj = live.listing && typeof live.listing === "object" ? live.listing as Record<string, unknown> : {};
     const listingId = listingObj.listingId != null ? String(listingObj.listingId) : (intent.listing_id ?? null);
     if (!offerId) return reply({ status: "error", error_code: "no_live_offer", message: "eBay reports no offer for this SKU; nothing to reconcile." }, 404);
-    const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: intent.slab_id, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" });
-    if (mapErr) return reply({ status: "error", error_code: "reconcile_persist_failed" }, 500);
-    await admin.from("ebay_listing_intents").update({ status: "published", offer_id: offerId, listing_id: listingId, last_error: null, updated_at: new Date().toISOString() }).eq("id", intent.id);
-    return reply({ status: "success", reconciled: true, offer_id: offerId, listing_id: listingId, listing_status: "published" });
+    // Recovered state reflects the provider: published (has a listing id) vs a
+    // created-but-unpublished offer. Only a published offer becomes a mapping.
+    const recoveredStatus = listingId ? "published" : "offer_created";
+    if (recoveredStatus === "published") {
+      const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: intent.slab_id, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" });
+      if (mapErr) return reply({ status: "error", error_code: "reconcile_persist_failed" }, 500);
+    }
+    const { error: intentUpdErr } = await admin.from("ebay_listing_intents").update({ status: recoveredStatus, offer_id: offerId, listing_id: listingId, last_error: null, updated_at: new Date().toISOString() }).eq("id", intent.id);
+    if (intentUpdErr) return reply({ status: "error", error_code: "reconcile_persist_failed" }, 500);
+    return reply({ status: "success", reconciled: true, offer_id: offerId, listing_id: listingId, listing_status: recoveredStatus });
   }
 
   if (operation === "revise_item") {
@@ -729,7 +788,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (body.price_value !== undefined) patch.pricingSummary = { price: { currency: String(body.currency ?? "USD"), value: Number(body.price_value).toFixed(2) } };
     if (body.quantity !== undefined) patch.availableQuantity = Number(body.quantity);
     await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, accessToken, { method: "PUT", body: JSON.stringify(patch) });
-    await admin.from("ebay_listing_mappings").update({ asking_price_cents: body.price_value === undefined ? undefined : Math.round(Number(body.price_value) * 100), last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    const { error: revMapErr } = await admin.from("ebay_listing_mappings").update({ asking_price_cents: body.price_value === undefined ? undefined : Math.round(Number(body.price_value) * 100), last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    if (revMapErr) return reply({ status: "revise_unmapped", offer_id: offerId, message: "eBay revise succeeded but the local mapping update failed." }, 500);
     return reply({ status: "success", offer_id: offerId, listing_status: "published" });
   }
 
@@ -738,7 +798,8 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     const needs = confirmation(body, "END"); if (needs) return needs;
     const offerId = String(body.offer_id ?? "");
     await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, accessToken, { method: "POST", body: "{}" });
-    await admin.from("ebay_listing_mappings").update({ listing_status: "ended", last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    const { error: endMapErr } = await admin.from("ebay_listing_mappings").update({ listing_status: "ended", last_synced_at: new Date().toISOString() }).eq("ebay_account_id", accountId).eq("offer_id", offerId);
+    if (endMapErr) return reply({ status: "end_unmapped", offer_id: offerId, message: "eBay withdraw succeeded but the local mapping update failed." }, 500);
     return reply({ status: "success", offer_id: offerId, listing_status: "ended" });
   }
 
@@ -761,34 +822,47 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
 
     // DEFAULT: non-destructive inbound sync. Fetch → resolve SKU→slab mappings
     // (one batched query) → PERSIST orders + lines (never touches slab inventory
-    // or sold_comps) → record the api-run and the orders cursor. Idempotent.
+    // or sold_comps). The parent api-run is recorded ONLY after every required
+    // write (persist + cursor) succeeds; a cursor failure makes the parent error.
     const t0 = Date.now();
     const data = await ebayFetch("/sell/fulfillment/v1/order?limit=200", accessToken);
+    const fetchedOrders = Array.isArray(data.orders) ? data.orders.length : 0;
     const skus = skusFromOrders(data.orders);
     const mappingBySku = new Map<string, string>();
     if (skus.length) {
-      const { data: rows } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
+      const { data: rows, error: mapErr } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
+      // A failed mapping read must NOT masquerade as "no mappings" (all-unmatched).
+      if (mapErr) {
+        await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "mapping_lookup_failed");
+        return reply({ status: "error", error_code: "mapping_lookup_failed" }, 500);
+      }
       for (const m of (rows ?? []) as Array<{ sku: string; slab_id: string | null }>) {
         if (m.sku && m.slab_id) mappingBySku.set(m.sku, m.slab_id);
       }
     }
-    const { shaped, proposed_sales } = shapeEbayOrders(data.orders, mappingBySku);
+    const { shaped, proposed_sales, order_count, line_item_count } = shapeEbayOrders(data.orders, mappingBySku);
 
     const { data: persisted, error: persistErr } = await admin.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shaped });
-    // Provider fetch success + persistence failure is NOT success.
-    const runOk = await recordApiRun(admin, accountId, "order_sync", persistErr ? "error" : "success", Date.now() - t0, persistErr ? "orders_persist_failed" : null);
-    if (persistErr) return reply({ status: "error", error_code: "orders_persist_failed" }, 500);
+    if (persistErr) {
+      await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "orders_persist_failed");
+      return reply({ status: "error", error_code: "orders_persist_failed" }, 500);
+    }
     const p = (persisted && typeof persisted === "object" ? persisted : {}) as { orders?: number; line_items?: number; matched?: number; unmatched?: number };
-    // Persistence success + cursor failure is NOT full success.
     const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "orders", p_count: p.orders ?? 0 });
-    if (curErr) return reply({ status: "error", error_code: "orders_cursor_persist_failed" }, 500);
+    if (curErr) {
+      await recordApiRun(admin, accountId, "order_sync", "error", Date.now() - t0, "orders_cursor_persist_failed");
+      return reply({ status: "error", error_code: "orders_cursor_persist_failed" }, 500);
+    }
+    const runOk = await recordApiRun(admin, accountId, "order_sync", "success", Date.now() - t0, null);
     if (!runOk) return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
     return reply({
       status: "success", mode: "synced",
-      orders_synced: p.orders ?? 0, line_items_synced: p.line_items ?? 0,
+      fetched_orders: fetchedOrders, valid_orders: order_count, fetched_lines: line_item_count,
+      persisted_orders: p.orders ?? 0, persisted_lines: p.line_items ?? 0,
       matched: p.matched ?? 0, unmatched: p.unmatched ?? 0,
+      orders_synced: p.orders ?? 0, line_items_synced: p.line_items ?? 0, // back-compat aliases
       proposed_sales, proposed_sale_count: proposed_sales.length,
-      message: `${p.orders ?? 0} order(s) persisted (${p.matched ?? 0} matched, ${p.unmatched ?? 0} unmatched). ${proposed_sales.length} proposed sale(s) — apply separately.`,
+      message: `${fetchedOrders} fetched · ${p.orders ?? 0} persisted · ${p.matched ?? 0} matched · ${p.unmatched ?? 0} unmatched · ${proposed_sales.length} proposed sale(s).`,
       source_label: "Seller’s Completed Sale",
     });
   }
@@ -815,15 +889,30 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // gated by a mutation flag. The Finances API is on the apiz gateway, NOT api.*.
     const t0 = Date.now();
     const data = await ebayFetchBase(ebayApizBase(MODE), "/sell/finances/v1/transaction?limit=200", accessToken);
-    const shaped = shapeEbayFinanceTransactions(data.transactions);
+    const fetched = Array.isArray(data.transactions) ? data.transactions.length : 0;
+    const shaped = shapeEbayFinanceTransactions(data.transactions); // valid (non-empty transaction id)
     const { data: result, error } = await admin.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: shaped });
-    const runOk = await recordApiRun(admin, accountId, "finances_sync", error ? "error" : "success", Date.now() - t0, error ? "finances_apply_failed" : null);
-    if (error) return reply({ status: "error", error_code: "finances_apply_failed" }, 500);
+    if (error) {
+      await recordApiRun(admin, accountId, "finances_sync", "error", Date.now() - t0, "finances_apply_failed");
+      return reply({ status: "error", error_code: "finances_apply_failed" }, 500);
+    }
     const r = (result && typeof result === "object" ? result : {}) as { transactions?: number; total?: number };
-    const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "finances", p_count: r.transactions ?? 0 });
-    if (curErr) return reply({ status: "error", error_code: "finances_cursor_persist_failed" }, 500);
+    const durableTotal = r.total ?? null; // CONFIRMED unique rows for the account
+    // The cursor tracks the DURABLE unique-row total, never the processed count
+    // (so 8 fetched + 1 duplicate → cursor 7, not 8).
+    const { error: curErr } = await admin.rpc("ebay_sync_cursor_touch", { p_account_id: accountId, p_resource_type: "finances", p_count: durableTotal ?? 0 });
+    if (curErr) {
+      await recordApiRun(admin, accountId, "finances_sync", "error", Date.now() - t0, "finances_cursor_persist_failed");
+      return reply({ status: "error", error_code: "finances_cursor_persist_failed" }, 500);
+    }
+    const runOk = await recordApiRun(admin, accountId, "finances_sync", "success", Date.now() - t0, null);
     if (!runOk) return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
-    return reply({ status: "success", financial_transactions_synced: r.transactions ?? 0, financial_transactions_total: r.total ?? null, note: "Actual fees and payouts are stored privately; unknown enum and CustomCode values are preserved in raw_response." });
+    return reply({
+      status: "success",
+      fetched, valid: shaped.length, processed: r.transactions ?? 0, confirmed_total: durableTotal,
+      financial_transactions_synced: r.transactions ?? 0, financial_transactions_total: durableTotal, // back-compat
+      note: "Fees/payouts stored privately; the cursor reflects durable unique rows. Unknown enum/CustomCode values preserved in raw_response.",
+    });
   }
 
   return unavailable(operation, "eBay seller API capability");

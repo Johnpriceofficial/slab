@@ -7,10 +7,24 @@ describe("ebayListingTitle", () => {
     variation: "Holo", rarity: "Rare Holo", grader: "PSA", grade_label: "GEM MT", grade: "10",
   };
 
-  it("assembles a rich title in display order and stays within 80 chars", () => {
+  it("assembles a rich title, dedupes overlapping variation/rarity, and stays within 80 chars", () => {
     const t = ebayListingTitle(full);
     expect(t.length).toBeLessThanOrEqual(80);
-    expect(t).toBe("2016 XY Evolutions Charizard #11 Holo Rare Holo PSA GEM MT 10");
+    // variation "Holo" is contained in rarity "Rare Holo" → the redundant "Holo" is dropped.
+    expect(t).toBe("2016 XY Evolutions Charizard #11 Rare Holo PSA GEM MT 10");
+  });
+
+  it("includes the language when known", () => {
+    const t = ebayListingTitle({ year: 2025, language: "Japanese", set_name: "Black Bolt", card_name: "Kyurem ex", card_number: "160/086", grader: "CGC", grade_label: "Pristine", grade: "10" });
+    expect(t).toContain("Japanese");
+    expect(t.length).toBeLessThanOrEqual(80);
+    expect(t).toContain("Kyurem ex");
+    expect(t).toContain("CGC Pristine 10");
+  });
+
+  it("does not duplicate an identical rarity/variation phrase (no doubled Super Rare)", () => {
+    const t = ebayListingTitle({ card_name: "Pikachu", variation: "Super Rare", rarity: "Super Rare", grader: "PSA", grade: "10" });
+    expect((t.match(/Super Rare/gi) ?? []).length).toBe(1);
   });
 
   it("always keeps the card name and the grade suffix", () => {
@@ -116,6 +130,11 @@ describe("evaluatePublishReadiness", () => {
 
   it("blocks when there is no front image", () => {
     expect(evaluatePublishReadiness({ ...ready, imageCount: 0 }).canPublish).toBe(false);
+  });
+
+  it("blocks when condition is empty (no GRADED default) — must be an explicit value", () => {
+    expect(evaluatePublishReadiness({ ...ready, condition: "" }).canPublish).toBe(false);
+    expect(evaluatePublishReadiness({ ...ready, condition: "  " }).canPublish).toBe(false);
   });
 
   it("blocks when a required category aspect is not provided, and lists it", () => {

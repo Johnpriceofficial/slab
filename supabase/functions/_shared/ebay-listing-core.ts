@@ -43,3 +43,35 @@ export function listingFingerprint(f: ListingFingerprintFields): string {
     f.return_policy_id, f.condition, f.image_count,
   ].map((v) => String(v ?? "")).join("|");
 }
+
+export interface ListingIntentState {
+  status: string;
+  offer_id: string | null;
+  listing_id: string | null;
+  fingerprint: string | null;
+}
+
+export type PublishAction =
+  | { action: "proceed" }                          // no existing intent, or none with an offer → create fresh
+  | { action: "resume"; offerId: string }          // same inputs + existing offer → reuse it (no dup)
+  | { action: "reconciled_existing" }              // already published with the same inputs
+  | { action: "listing_inputs_changed" }           // published, or in-flight offer, but inputs changed
+  | { action: "offer_created_unpersisted" };       // a prior offer's id was never saved → must reconcile first
+
+/**
+ * Fingerprint-enforced decision for a publish attempt. Ensures a live listing is
+ * never silently re-published/changed, a stale offer is never silently reused,
+ * and an unpersisted offer blocks retries until reconciled. Pure + fully tested.
+ */
+export function resolvePublishAction(existing: ListingIntentState | null, fingerprint: string): PublishAction {
+  if (!existing) return { action: "proceed" };
+  const sameInputs = existing.fingerprint === fingerprint;
+  if (existing.status === "offer_created_unpersisted") return { action: "offer_created_unpersisted" };
+  if (existing.status === "published" && existing.listing_id) {
+    return sameInputs ? { action: "reconciled_existing" } : { action: "listing_inputs_changed" };
+  }
+  if (existing.offer_id) {
+    return sameInputs ? { action: "resume", offerId: existing.offer_id } : { action: "listing_inputs_changed" };
+  }
+  return { action: "proceed" };
+}
