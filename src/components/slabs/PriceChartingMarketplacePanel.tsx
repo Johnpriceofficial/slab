@@ -11,11 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Loader2, RefreshCw, Store, Truck, Ban, RotateCcw } from "lucide-react";
 import { fetchPriceChartingOffers, invokePriceChartingMarketplace, syncAllPriceChartingOffers } from "@/lib/slabs/data";
 import { centsToInputString, formatCents } from "@/lib/slabs/format";
+import { canonicalMarketplaceSku } from "@/lib/slabs/marketplace-sku";
 import type { PriceChartingOffer, Slab } from "@/lib/slabs/types";
 
-function skuFor(slab: Slab): string {
-  return `GCV${String(slab.inventory_number).padStart(6, "0")}`;
-}
+const skuFor = canonicalMarketplaceSku;
 
 function generatedDescription(slab: Slab): string {
   return [slab.card_name, slab.set_name, slab.card_number ? `#${slab.card_number}` : null, slab.grader, slab.grade_label, slab.grade]
