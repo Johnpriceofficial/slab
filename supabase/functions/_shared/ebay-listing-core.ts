@@ -112,43 +112,111 @@ export function extractOfferIds(offersResponse: unknown): string[] {
     .filter(Boolean);
 }
 
-export interface OfferSummary { offerId: string; sku: string; marketplaceId: string; format: string; listingId: string | null }
+export interface OfferSummary {
+  offerId: string;
+  sku: string;
+  marketplaceId: string;
+  format: string;
+  listingId: string | null;
+  categoryId: string;
+  merchantLocationKey: string;
+  fulfillmentPolicyId: string;
+  paymentPolicyId: string;
+  returnPolicyId: string;
+  price: string;        // normalized to 2dp
+  currency: string;
+  availableQuantity: number | null;
+  listingDescription: string;
+  listingOnHold: boolean;
+}
 
-// Parse getOffers into typed summaries (offerId + the fields needed to judge
-// whether an existing offer is COMPATIBLE with the intended listing).
+const normPrice = (v: unknown): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : "";
+};
+
+// Parse getOffers into typed summaries carrying every field needed to judge
+// whether an existing offer MATCHES the intended listing (not just compatibility).
 export function extractOfferSummaries(offersResponse: unknown): OfferSummary[] {
   const offers = (offersResponse as { offers?: unknown } | null)?.offers;
   if (!Array.isArray(offers)) return [];
   return offers.map((o) => {
     const r = (o ?? {}) as Record<string, unknown>;
     const listing = r.listing && typeof r.listing === "object" ? r.listing as Record<string, unknown> : {};
+    const policies = r.listingPolicies && typeof r.listingPolicies === "object" ? r.listingPolicies as Record<string, unknown> : {};
+    const pricing = r.pricingSummary && typeof r.pricingSummary === "object" ? r.pricingSummary as Record<string, unknown> : {};
+    const price = pricing.price && typeof pricing.price === "object" ? pricing.price as Record<string, unknown> : {};
     return {
       offerId: String(r.offerId ?? "").trim(),
       sku: String(r.sku ?? "").trim(),
       marketplaceId: String(r.marketplaceId ?? "").trim(),
       format: String(r.format ?? "").trim(),
       listingId: listing.listingId != null ? String(listing.listingId) : null,
+      categoryId: String(r.categoryId ?? "").trim(),
+      merchantLocationKey: String(r.merchantLocationKey ?? "").trim(),
+      fulfillmentPolicyId: String(policies.fulfillmentPolicyId ?? "").trim(),
+      paymentPolicyId: String(policies.paymentPolicyId ?? "").trim(),
+      returnPolicyId: String(policies.returnPolicyId ?? "").trim(),
+      price: normPrice(price.value),
+      currency: String(price.currency ?? "").trim(),
+      availableQuantity: Number.isFinite(Number(r.availableQuantity)) ? Number(r.availableQuantity) : null,
+      listingDescription: String(r.listingDescription ?? ""),
+      listingOnHold: listing.listingOnHold === true,
     };
   }).filter((o) => o.offerId);
 }
 
+export interface IntendedOffer {
+  sku: string;
+  marketplaceId: string;
+  categoryId: string;
+  merchantLocationKey: string;
+  fulfillmentPolicyId: string;
+  paymentPolicyId: string;
+  returnPolicyId: string;
+  price: number;
+  currency: string;
+  availableQuantity: number;
+}
+
 export type OfferResolution =
-  | { action: "create" }                                        // no COMPATIBLE offer exists
-  | { action: "adopt"; offerId: string }                        // one compatible, unpublished
-  | { action: "reconcile_published"; offerId: string; listingId: string } // one compatible, already published
-  | { action: "duplicate_offer_ambiguity"; offerIds: string[] }; // >1 compatible
+  | { action: "create" }                                            // no COMPATIBLE offer exists
+  | { action: "adopt"; offerId: string }                            // one compatible+matching, unpublished
+  | { action: "existing_offer_inputs_changed"; offerId: string }    // compatible unpublished, inputs differ
+  | { action: "reconcile_published"; offerId: string; listingId: string } // compatible+matching, published
+  | { action: "existing_listing_inputs_changed"; offerId: string; listingId: string } // published, inputs differ
+  | { action: "listing_on_hold"; offerId: string }                  // compatible but on hold
+  | { action: "duplicate_offer_ambiguity"; offerIds: string[] };    // >1 compatible
+
+// Do the existing offer's settings MATCH what we intend to publish?
+function offerMatchesIntent(o: OfferSummary, i: IntendedOffer): boolean {
+  return o.categoryId === i.categoryId
+    && o.merchantLocationKey === i.merchantLocationKey
+    && o.fulfillmentPolicyId === i.fulfillmentPolicyId
+    && o.paymentPolicyId === i.paymentPolicyId
+    && o.returnPolicyId === i.returnPolicyId
+    && o.price === i.price.toFixed(2)
+    && o.currency === i.currency
+    && o.availableQuantity === i.availableQuantity;
+}
 
 /**
- * Decide what to do with the offers eBay already has, validating COMPATIBILITY
- * (same SKU + marketplace + FIXED_PRICE) before adopting — never blindly adopt an
- * auction offer or a wrong-marketplace offer. Pure.
+ * Decide what to do with the offers eBay already has. Compatibility (same SKU +
+ * marketplace + FIXED_PRICE) gates adoption; then a full content comparison
+ * prevents publishing/adopting a STALE offer whose settings differ from intent.
+ * Pure.
  */
-export function resolveExistingOffers(offers: OfferSummary[], intended: { sku: string; marketplaceId: string }): OfferResolution {
+export function resolveExistingOffers(offers: OfferSummary[], intended: IntendedOffer): OfferResolution {
   const compatible = offers.filter((o) => o.sku === intended.sku && o.marketplaceId === intended.marketplaceId && o.format === "FIXED_PRICE");
   if (compatible.length === 0) return { action: "create" };
   if (compatible.length > 1) return { action: "duplicate_offer_ambiguity", offerIds: compatible.map((o) => o.offerId) };
   const one = compatible[0];
-  return one.listingId ? { action: "reconcile_published", offerId: one.offerId, listingId: one.listingId } : { action: "adopt", offerId: one.offerId };
+  if (one.listingOnHold) return { action: "listing_on_hold", offerId: one.offerId };
+  const matches = offerMatchesIntent(one, intended);
+  if (one.listingId) {
+    return matches ? { action: "reconcile_published", offerId: one.offerId, listingId: one.listingId } : { action: "existing_listing_inputs_changed", offerId: one.offerId, listingId: one.listingId };
+  }
+  return matches ? { action: "adopt", offerId: one.offerId } : { action: "existing_offer_inputs_changed", offerId: one.offerId };
 }
 
 export interface OfferLookup { ok: boolean; offerIds: string[] }
