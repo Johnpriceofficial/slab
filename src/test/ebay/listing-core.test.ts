@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { orderedImagePaths, hasFrontImage, listingFingerprint, resolvePublishAction, extractOfferIds, resolveOfferCreation, extractOfferSummaries, resolveExistingOffers, canonicalSkuFromInventoryNumber, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
+import { orderedImagePaths, hasFrontImage, resolvePublishAction, extractOfferIds, resolveOfferCreation, extractOfferSummaries, resolveExistingOffers, canonicalSkuFromInventoryNumber, type ListingIntentState } from "../../../supabase/functions/_shared/ebay-listing-core";
 import { canonicalMarketplaceSku } from "../../lib/slabs/marketplace-sku";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "../../../supabase/functions/_shared/ebay-mutation-flags";
 
@@ -67,22 +67,6 @@ describe("hasFrontImage", () => {
     expect(hasFrontImage("   ")).toBe(false);
     expect(hasFrontImage(null)).toBe(false);
     expect(hasFrontImage(undefined)).toBe(false);
-  });
-});
-
-describe("listingFingerprint", () => {
-  const base = { sku: "GCV000047", title: "T", description: "D", price_value: 10, currency: "USD", category_id: "1", merchant_location_key: "L", fulfillment_policy_id: "F", payment_policy_id: "P", return_policy_id: "R", condition: "USED_VERY_GOOD", condition_description: "graded", quantity: 1, front_image_path: "slabs/47/front.jpg", back_image_path: "slabs/47/back.jpg", aspects: { Grade: "10", Grader: "PSA" } };
-  it("is versioned and deterministic for identical inputs (aspect key order irrelevant)", () => {
-    expect(listingFingerprint(base)).toMatch(/^v2\|/);
-    expect(listingFingerprint(base)).toBe(listingFingerprint({ ...base, aspects: { Grader: "PSA", Grade: "10" } }));
-  });
-  it("changes when the front image, an aspect value, quantity, or condition descriptor changes", () => {
-    // Swapping the front image while keeping ONE image must change the fingerprint.
-    expect(listingFingerprint({ ...base, front_image_path: "slabs/47/front-v2.jpg" })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, aspects: { Grade: "9", Grader: "PSA" } })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, quantity: 2 })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, condition_description: "graded gem" })).not.toBe(listingFingerprint(base));
-    expect(listingFingerprint({ ...base, price_value: 11 })).not.toBe(listingFingerprint(base));
   });
 });
 

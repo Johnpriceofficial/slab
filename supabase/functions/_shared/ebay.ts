@@ -10,10 +10,11 @@ import {
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
-import { canonicalSkuFromInventoryNumber, hasFrontImage, listingFingerprint, orderedImagePaths } from "./ebay-listing-core.ts";
+import { canonicalSkuFromInventoryNumber, hasFrontImage, orderedImagePaths } from "./ebay-listing-core.ts";
 import { fetchAllOffersForSku, OFFER_MAX_PAGES, type OffersDiscovery } from "./ebay-offers.ts";
-import { fetchInventoryItemForSku, INVENTORY_ITEM_TIMEOUT_MS, type InventoryItemResult } from "./ebay-inventory-item.ts";
-import { planPublish } from "./ebay-publish-coordinator.ts";
+import { fetchInventoryItemForSku, type InventoryItemResult } from "./ebay-inventory-item.ts";
+import { buildImageManifest, buildIntendedState, canonicalListingFingerprint, LISTING_FINGERPRINT_VERSION, type ImageRole } from "./ebay-intended-state.ts";
+import { type ExecResult, executePublish, executeReconcile, type PublishExecutorOps, type ReconcileOps, type StoredIntent } from "./ebay-publish-executor.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -177,18 +178,41 @@ function discoverOffers(accessToken: string, sku: string): Promise<OffersDiscove
   });
 }
 
-// The second provider READ: getInventoryItem, with a real AbortController timeout.
+// The second provider READ: getInventoryItem. The module owns the AbortController
+// timeout (it aborts the underlying request on timeout), so the wrapper just binds
+// the real fetch and forwards the module's abort signal to it.
 function discoverInventoryItem(accessToken: string, sku: string): Promise<InventoryItemResult> {
   return fetchInventoryItemForSku({
-    fetchImpl: (url, init) => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), INVENTORY_ITEM_TIMEOUT_MS);
-      return fetch(url, { ...init, signal: ctrl.signal as AbortSignal }).finally(() => clearTimeout(t));
-    },
+    fetchImpl: (url, init) => fetch(url, init as RequestInit),
     apiOrigin: new URL(API).origin,
     accessToken,
     sku,
   });
+}
+
+// SHA-256 of a stored image object's bytes — stable LOCAL image evidence for the
+// manifest/fingerprint (never a signed URL, which changes on every request).
+async function hashStorageObject(admin: AdminClient, path: string): Promise<string | null> {
+  const { data, error } = await admin.storage.from("slab-images").download(path);
+  if (error || !data) return null;
+  const buf = new Uint8Array(await data.arrayBuffer());
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Map an executor result to a response body (snake_case fields the UI expects).
+function execBody(r: ExecResult): Record<string, unknown> {
+  const b: Record<string, unknown> = { status: r.status };
+  if (r.errorCode) b.error_code = r.errorCode;
+  if (r.offerId) b.offer_id = r.offerId;
+  if (r.listingId !== undefined && r.listingId !== null) b.listing_id = r.listingId;
+  if (r.offerIds) b.offer_ids = r.offerIds;
+  if (r.imageEvidence) b.image_evidence = r.imageEvidence;
+  if (r.reconciled) b.reconciled = r.reconciled;
+  if (r.context) b.context = r.context;
+  if (r.message) b.message = r.message;
+  if (r.status === "success") b.listing_status = "published";
+  return b;
 }
 
 // Update a listing intent and PROVE persistence: no Supabase error AND exactly
@@ -204,6 +228,24 @@ async function assertLeaseHeld(admin: AdminClient, accountId: string, sku: strin
   const { data, error } = await admin.rpc("ebay_publish_lease_assert_and_extend", { p_account_id: accountId, p_sku: sku, p_token: token, p_ttl_seconds: 120 });
   if (error) return false;
   return (data as { held?: boolean } | null)?.held === true;
+}
+
+// Load the durable listing intent (with its snapshot columns) for the executor.
+async function loadStoredIntent(admin: AdminClient, accountId: string, sku: string): Promise<{ ok: true; intent: StoredIntent | null } | { ok: false }> {
+  const { data, error } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint, fingerprint_version, intended_state, image_manifest, provider_verified_at").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
+  if (error) return { ok: false };
+  const row = data as Record<string, unknown> | null;
+  const intent: StoredIntent | null = row
+    ? { id: String(row.id), status: String(row.status), fingerprint: (row.fingerprint as string | null) ?? null, fingerprintVersion: (row.fingerprint_version as number | null) ?? null, offerId: (row.offer_id as string | null) ?? null, listingId: (row.listing_id as string | null) ?? null, intendedState: row.intended_state, imageManifest: row.image_manifest, providerVerified: row.provider_verified_at != null }
+    : null;
+  return { ok: true, intent };
+}
+
+// Checked single-row update stamping the exact provider identity + verification
+// time onto the intent (drives "verified" image evidence on later reconciles).
+async function setProviderVerified(admin: AdminClient, intentId: string, offerId: string, listingId: string | null): Promise<boolean> {
+  const { data, error } = await admin.from("ebay_listing_intents").update({ status: "published", offer_id: offerId, listing_id: listingId, provider_verified_at: new Date().toISOString(), last_error: null, updated_at: new Date().toISOString() }).eq("id", intentId).select("id");
+  return !error && Array.isArray(data) && data.length === 1;
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification
@@ -757,158 +799,121 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     });
     if (policyMarketplaceMismatch) return reply({ status: "error", error_code: "policy_marketplace_mismatch", message: "A selected business policy belongs to a different marketplace." }, 400);
 
-    // Fresh signed image URLs immediately before the eBay mutation.
+    // Signed image URLs for the eBay PUT (fresh, short-lived) AND stable byte
+    // hashes for the DURABLE image manifest (role + storage path + SHA-256, never
+    // signed URLs, which change on every request and must not enter the fingerprint).
+    const orderedPaths = orderedImagePaths((slabRow as Record<string, unknown>).front_image_path, (slabRow as Record<string, unknown>).back_image_path);
     const imageUrls: string[] = [];
-    for (const path of orderedImagePaths((slabRow as Record<string, unknown>).front_image_path, (slabRow as Record<string, unknown>).back_image_path)) {
+    const manifestImages: Array<{ role: ImageRole; path: string; sha256: string }> = [];
+    const imageRoles: ImageRole[] = ["front", "back"];
+    for (let i = 0; i < orderedPaths.length; i++) {
+      const path = orderedPaths[i];
       const { data: signed, error: signErr } = await admin.storage.from("slab-images").createSignedUrl(path, 3600);
       if (signErr || !signed?.signedUrl) return reply({ status: "error", error_code: "image_url_generation_failed", message: "Could not generate a signed image URL for the listing." }, 502);
       imageUrls.push(signed.signedUrl);
+      const sha256 = await hashStorageObject(admin, path);
+      if (!sha256) return reply({ status: "error", error_code: "image_manifest_failed", message: "Could not read a listing image to build its durable manifest." }, 502);
+      manifestImages.push({ role: imageRoles[i] ?? "back", path, sha256 });
     }
     if (imageUrls.length === 0) return reply({ status: "error", error_code: "front_image_required" }, 400);
+    const manifest = buildImageManifest(manifestImages);
+    if (!manifest) return reply({ status: "error", error_code: "image_manifest_failed" }, 500);
 
-    // RACE-SAFE single-flight: acquire a per-(account, SKU) publish lease so two
-    // concurrent publishes cannot both pass the offer-existence check and each
-    // create an offer. Released in the finally below on EVERY path.
+    // Build the DURABLE canonical intended state + SHA-256 fingerprint (v3).
+    const conditionDescription = String(body.condition_description ?? "");
+    const aspects = (body.aspects && typeof body.aspects === "object" ? body.aspects : {}) as Record<string, unknown>;
+    const intendedState = buildIntendedState({
+      sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId,
+      price: priceValue, currency, availableQuantity: quantity, listingDescription: description,
+      title, description, condition, conditionDescription, conditionDescriptors: [], aspects,
+    });
+    if (!intendedState) return reply({ status: "error", error_code: "INCOMPLETE_LISTING", message: "The listing inputs are not complete/canonical." }, 400);
+    const fingerprint = await canonicalListingFingerprint(intendedState, manifest);
+
+    // RACE-SAFE single-flight lease (acquired here; the executor releases it on
+    // every path). A second concurrent publish for the SKU gets publish_in_progress.
     const leaseToken = crypto.randomUUID();
     const acq = await admin.rpc("ebay_publish_lease_acquire", { p_account_id: accountId, p_sku: sku, p_token: leaseToken, p_ttl_seconds: 120 });
     if (acq.error) return reply({ status: "error", error_code: "lease_acquire_failed" }, 500);
     if (!(acq.data as { acquired?: boolean } | null)?.acquired) return reply({ status: "publish_in_progress", message: "Another publish for this SKU is already in progress." }, 409);
-    try {
-    // Durable intent lookup (checked). A prior offer whose id was never saved must
-    // be reconciled (provider lookup) before any publish for this SKU.
-    const { data: existing, error: lookupErr } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
-    if (lookupErr) return reply({ status: "error", error_code: "listing_intent_lookup_failed" }, 500);
-    const existingIntent = existing as { id: string; status: string; offer_id: string | null; listing_id: string | null; fingerprint: string | null } | null;
-    if (existingIntent?.status === "offer_created_unpersisted") {
-      return reply({ status: "offer_created_unpersisted", message: "A prior publish created an eBay offer that was not saved locally. Run reconcile (which recovers the offer by SKU) before publishing this SKU again." }, 409);
-    }
-    const conditionDescription = String(body.condition_description ?? "");
-    const aspects = (body.aspects && typeof body.aspects === "object" ? body.aspects : {}) as Record<string, unknown>;
-    const fingerprint = listingFingerprint({
-      sku, title, description, price_value: priceValue, currency, category_id: categoryId,
-      merchant_location_key: merchantLocationKey, fulfillment_policy_id: fulfillmentPolicyId,
-      payment_policy_id: paymentPolicyId, return_policy_id: returnPolicyId, condition,
-      condition_description: conditionDescription, quantity,
-      front_image_path: String((slabRow as Record<string, unknown>).front_image_path ?? ""),
-      back_image_path: (slabRow as Record<string, unknown>).back_image_path ? String((slabRow as Record<string, unknown>).back_image_path) : "",
-      aspects,
-    });
-    const { data: intentRow, error: intentErr0 } = await admin.from("ebay_listing_intents").upsert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, status: "preparing", last_error: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id").single();
-    if (intentErr0 || !intentRow) return reply({ status: "error", error_code: "listing_intent_persist_failed" }, 500);
-    const intentId = (intentRow as { id: string }).id;
 
-    // READ-ALL-THEN-DECIDE: every provider read (getOffers → getInventoryItem) and
-    // the complete state comparison happen in the coordinator, which returns a
-    // PLAN. NO provider mutation occurs before an allowed mutation plan is returned.
-    const intended = {
-      sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId,
-      price: priceValue, currency, availableQuantity: quantity, listingDescription: description,
-      title, description, condition, conditionDescription, conditionDescriptors: [] as string[], aspects, imageCount: imageUrls.length, fingerprint,
-    };
-    const plan = await planPublish({
+    // The REAL orchestration lives in the injected-ops executor (same code path the
+    // handler-side-effect tests drive): read-all-then-decide via the shared state
+    // engine, every provider step lease-fenced, every single-row write checked.
+    const inventoryPayload = { availability: { shipToLocationAvailability: { quantity } }, condition, conditionDescription: conditionDescription || undefined, product: { title, description, aspects, imageUrls } };
+    const offerPayload = { sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: quantity, categoryId, merchantLocationKey, listingDescription: description, pricingSummary: { price: { currency, value: priceValue.toFixed(2) } }, listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId } };
+    const ops: PublishExecutorOps = {
+      loadIntent: () => loadStoredIntent(admin, accountId, sku),
+      writePreparing: async (snap) => {
+        const { data, error } = await admin.from("ebay_listing_intents").upsert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint: snap.fingerprint, fingerprint_version: snap.fingerprintVersion, intended_state: snap.intendedState, image_manifest: snap.imageManifest, status: "preparing", last_error: null, provider_verified_at: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+        if (error || !Array.isArray(data) || data.length !== 1) return { ok: false };
+        return { ok: true, intentId: String((data[0] as { id: string }).id) };
+      },
+      recordStatus: (id, status, err) => recordIntentStatus(admin, id, status, err),
+      recordOfferCreated: async (id, offerId) => {
+        const { data, error } = await admin.from("ebay_listing_intents").update({ status: "offer_created", offer_id: offerId, provider_verified_at: new Date().toISOString(), last_error: `offer:${offerId}`, updated_at: new Date().toISOString() }).eq("id", id).select("id");
+        return !error && Array.isArray(data) && data.length === 1;
+      },
+      setProviderVerified: (id, offerId, listingId) => setProviderVerified(admin, id, offerId, listingId),
+      upsertMapping: async (m) => {
+        const { data, error } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: m.offerId, listing_id: m.listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+        return !error && Array.isArray(data) && data.length === 1;
+      },
       discoverOffers: (s) => discoverOffers(accessToken, s),
       fetchInventoryItem: (s) => discoverInventoryItem(accessToken, s),
-    }, intended, existingIntent);
-
-    // BLOCK: NO mutation. Record the reason (checked) and return the classification.
-    if (plan.action === "block") {
-      if (!(await recordIntentStatus(admin, intentId, "blocked", plan.errorCode))) return reply({ status: "error", error_code: "intent_persist_failed", context: plan.errorCode }, 500);
-      const providerFailure = ["provider_lookup_failed", "invalid_provider_response", "provider_redirect_rejected", "pagination_loop", "pagination_limit_exceeded", "incomplete_provider_result", "inconsistent_provider_pagination", "unsafe_pagination_url", "invalid_api_origin", "inventory_item_lookup_failed", "provider_timeout"].includes(plan.errorCode);
-      return reply({ status: plan.errorCode, error_code: plan.errorCode, offer_id: plan.offerId, listing_id: plan.listingId }, providerFailure ? 502 : 409);
-    }
-
-    // RECONCILE LOCAL ONLY: an exact ALREADY-published offer — repair the mapping,
-    // NO provider mutation.
-    if (plan.action === "reconcile_local_only") {
-      const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: plan.offerId, listing_id: plan.listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
-      const persisted = await recordIntentStatus(admin, intentId, "published", "reconciled_local");
-      if (mapErr || !persisted) return reply({ status: "published_unmapped", offer_id: plan.offerId, listing_id: plan.listingId, message: "eBay already has a live listing for this SKU but the local mapping write failed — run reconcile." }, 500);
-      return reply({ status: "success", reconciled: true, offer_id: plan.offerId, listing_id: plan.listingId, listing_status: "published" });
-    }
-
-    // MUTATION PLANS — only now do we mutate the provider, fencing before each step.
-    let offerId = plan.action === "put_resume_publish" ? plan.offerId : "";
-    const inventoryPayload = { availability: { shipToLocationAvailability: { quantity } }, condition, conditionDescription: body.condition_description ?? undefined, product: { title, description, aspects: body.aspects ?? {}, imageUrls } };
-    if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost", message: "The publish lease was lost or superseded; aborting before any eBay mutation." }, 409);
-    await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) });
-    if (!(await recordIntentStatus(admin, intentId, "inventory_created", "inventory_put"))) return reply({ status: "error", error_code: "intent_persist_failed" }, 500);
-
-    if (!offerId) {
-      if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
-      const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify({
-        sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: quantity, categoryId, merchantLocationKey,
-        listingDescription: description, pricingSummary: { price: { currency, value: priceValue.toFixed(2) } },
-        listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId },
-      }) });
-      offerId = String(offer.offerId ?? "");
-      if (!offerId) { await recordIntentStatus(admin, intentId, "failed", "no_offer_id"); return reply({ status: "error", error_code: "offer_creation_failed" }, 502); }
-      if (!(await recordIntentStatus(admin, intentId, "offer_created", `offer:${offerId}`))) {
-        await recordIntentStatus(admin, intentId, "offer_created_unpersisted", `offer_id_persist_failed:${offerId}`);
-        return reply({ status: "offer_created_unpersisted", offer_id: offerId, message: "An eBay offer exists but its ID could not be saved locally. Run reconcile; a retry will re-adopt it (no duplicate) via the provider lookup." }, 500);
-      }
-    }
-
-    if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
-    const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" });
-    const listingId = published.listingId ? String(published.listingId) : null;
-    const publishedOk = await recordIntentStatus(admin, intentId, "published", "published");
-    const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
-    if (!publishedOk || mapErr) {
-      await recordIntentStatus(admin, intentId, "published_unmapped", "local_persist_failed");
-      return reply({ status: "published_unmapped", offer_id: offerId, listing_id: listingId, message: "The eBay listing is LIVE but local reconciliation failed. The listing was NOT withdrawn — run reconcile to repair the local mapping." }, 500);
-    }
-    return reply({ status: "success", offer_id: offerId, listing_id: listingId, listing_status: "published" });
-    } finally {
-      // Release the publish lease on EVERY path (success, error, or throw), and
-      // record a safe diagnostic if the release did not remove our row.
-      const rel = await admin.rpc("ebay_publish_lease_release", { p_account_id: accountId, p_sku: sku, p_token: leaseToken });
-      if (rel.error || !(rel.data as { released?: boolean } | null)?.released) {
-        await admin.rpc("ebay_api_run_record", { p_account_id: accountId, p_operation: "publish_lease_release", p_status: "error", p_http_status: null, p_request_id: null, p_latency_ms: 0, p_error_code: "lease_release_unconfirmed" });
-      }
-    }
+      assertLease: () => assertLeaseHeld(admin, accountId, sku, leaseToken),
+      putInventoryItem: async () => {
+        try { await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) }); return { ok: true }; }
+        catch { return { ok: false }; }
+      },
+      createOffer: async () => {
+        try { const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify(offerPayload) }); return { ok: true, offerId: offer.offerId ? String(offer.offerId) : null }; }
+        catch { return { ok: false, offerId: null }; }
+      },
+      publishOffer: async (offerId) => {
+        try { const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" }); return { ok: true, listingId: published.listingId ? String(published.listingId) : null }; }
+        catch { return { ok: false, listingId: null }; }
+      },
+      recordApiRun: (op, status, code) => recordApiRun(admin, accountId, op, status, 0, code),
+      releaseLease: async () => {
+        const rel = await admin.rpc("ebay_publish_lease_release", { p_account_id: accountId, p_sku: sku, p_token: leaseToken });
+        if (rel.error) return { released: false };
+        return { released: (rel.data as { released?: boolean } | null)?.released === true };
+      },
+    };
+    const result = await executePublish(ops, { intended: intendedState, manifest, fingerprint, fingerprintVersion: LISTING_FINGERPRINT_VERSION });
+    return reply(execBody(result), result.httpStatus);
   }
 
   if (operation === "revise_item" && body.action === "reconcile") {
-    // Reconcile from the PROVIDER, using the server-derived canonical SKU (never
-    // trust body.sku), the shared paginated getOffers, and NEVER a stale local
-    // offer id as proof — the offer id comes only from eBay's response.
+    // Reconcile through the SAME state engine as publish, using the DURABLE
+    // intended-state snapshot (never request-body values) as the source of truth,
+    // and the server-derived canonical SKU. A mapping is written ONLY for an exact
+    // already-published match — never merely because getOffers returned one offer.
     const slabId = String(body.slab_id ?? "");
     const clientSku = String(body.sku ?? "");
     if (!slabId) return reply({ status: "error", error_code: "MISSING_SLAB", message: "slab_id is required to reconcile." }, 400);
     const { data: slabRow, error: slabErr } = await admin.from("slabs").select("inventory_number").eq("id", slabId).maybeSingle();
     if (slabErr) return reply({ status: "error", error_code: "slab_lookup_failed" }, 500);
     if (!slabRow) return reply({ status: "error", error_code: "slab_not_found" }, 404);
-    const inv = Number((slabRow as Record<string, unknown>).inventory_number);
-    if (!Number.isFinite(inv)) return reply({ status: "error", error_code: "slab_missing_inventory_number" }, 500);
-    const sku = canonicalSkuFromInventoryNumber(inv);
+    const invNum = Number((slabRow as Record<string, unknown>).inventory_number);
+    if (!Number.isFinite(invNum)) return reply({ status: "error", error_code: "slab_missing_inventory_number" }, 500);
+    const sku = canonicalSkuFromInventoryNumber(invNum);
     if (clientSku && clientSku !== sku) return reply({ status: "error", error_code: "canonical_sku_mismatch" }, 400);
 
-    const { data: intentRow, error: intentLookupErr } = await admin.from("ebay_listing_intents").select("id, slab_id, status").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
-    if (intentLookupErr) return reply({ status: "error", error_code: "listing_intent_lookup_failed" }, 500);
-    const intent = intentRow as { id: string; slab_id: string | null; status: string } | null;
-    if (!intent) return reply({ status: "error", error_code: "no_listing_intent", message: "No listing intent exists for this SKU." }, 404);
-
-    const lookup = await discoverOffers(accessToken, sku);
-    if (!lookup.ok) {
-      const code = lookup.httpStatus === 401 || lookup.httpStatus === 403 ? "authorization_failed" : lookup.errorCode;
-      if (!(await recordIntentStatus(admin, intent.id, "offer_discovery_failed", `${lookup.errorCode}:${lookup.httpStatus ?? ""}`))) return reply({ status: "error", error_code: "intent_persist_failed", context: code }, 500);
-      return reply({ status: "error", error_code: code, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify the eBay offer for this SKU; cannot distinguish 'no offer' from a lookup/discovery failure." }, 502);
-    }
-    if (lookup.offers.length > 1) {
-      return reply({ status: "duplicate_offer_ambiguity", offer_ids: lookup.offers.map((o) => o.offerId), message: "eBay has multiple offers for this SKU; resolve them before reconciling." }, 409);
-    }
-    const live = lookup.offers[0];
-    if (!live) return reply({ status: "error", error_code: "no_live_offer", message: "eBay confirms no offer exists for this SKU; nothing to reconcile." }, 404);
-    const offerId = live.offerId; // ONLY the provider's offer id — never a stale local one
-    const listingId = live.listingId;
-    const recoveredStatus = listingId ? "published" : "offer_created";
-    if (recoveredStatus === "published") {
-      const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: intent.slab_id, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" });
-      if (mapErr) return reply({ status: "error", error_code: "reconcile_persist_failed" }, 500);
-    }
-    const { error: intentUpdErr } = await admin.from("ebay_listing_intents").update({ status: recoveredStatus, offer_id: offerId, listing_id: listingId, last_error: null, updated_at: new Date().toISOString() }).eq("id", intent.id);
-    if (intentUpdErr) return reply({ status: "error", error_code: "reconcile_persist_failed" }, 500);
-    return reply({ status: "success", reconciled: true, offer_id: offerId, listing_id: listingId, listing_status: recoveredStatus });
+    const reconcileOps: ReconcileOps = {
+      loadIntent: () => loadStoredIntent(admin, accountId, sku),
+      recordStatus: (id, status, err) => recordIntentStatus(admin, id, status, err),
+      setProviderVerified: (id, offerId, listingId) => setProviderVerified(admin, id, offerId, listingId),
+      upsertMapping: async (m) => {
+        const { data, error } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: m.offerId, listing_id: m.listingId, listing_status: "published", last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+        return !error && Array.isArray(data) && data.length === 1;
+      },
+      discoverOffers: (s) => discoverOffers(accessToken, s),
+      fetchInventoryItem: (s) => discoverInventoryItem(accessToken, s),
+    };
+    const result = await executeReconcile(reconcileOps);
+    return reply(execBody(result), result.httpStatus);
   }
 
   if (operation === "revise_item") {

@@ -23,66 +23,10 @@ export function hasFrontImage(front: unknown): boolean {
   return nonEmpty(front);
 }
 
-export interface ListingFingerprintFields {
-  sku: string;
-  title: string;
-  description: string;
-  price_value: number;
-  currency: string;
-  category_id: string;
-  merchant_location_key: string;
-  fulfillment_policy_id: string;
-  payment_policy_id: string;
-  return_policy_id: string;
-  condition: string;
-  condition_description?: string;
-  quantity?: number;
-  front_image_path?: string | null;
-  back_image_path?: string | null;
-  aspects?: Record<string, unknown>;
-}
-
-export const LISTING_FINGERPRINT_VERSION = 2;
-
-// Stable, key-sorted canonicalization so aspect key order never changes the hash.
-function canonicalize(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(canonicalize);
-  if (v && typeof v === "object") {
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v as Record<string, unknown>).sort()) out[k] = canonicalize((v as Record<string, unknown>)[k]);
-    return out;
-  }
-  return v;
-}
-
-/**
- * A deterministic, VERSIONED fingerprint of the EXACT listing inputs — including
- * aspects (canonicalized), quantity, condition description, and the actual image
- * paths — so any change (e.g. swapping the front image while keeping one image)
- * produces a different fingerprint. Stored on the intent to distinguish
- * "same listing, resume/reconcile" from "inputs changed". Pure + order-stable.
- */
-export function listingFingerprint(f: ListingFingerprintFields): string {
-  const canonical = {
-    sku: f.sku ?? "",
-    title: f.title ?? "",
-    description: f.description ?? "",
-    price: f.price_value ?? 0,
-    currency: f.currency ?? "",
-    category: f.category_id ?? "",
-    location: f.merchant_location_key ?? "",
-    fulfillment: f.fulfillment_policy_id ?? "",
-    payment: f.payment_policy_id ?? "",
-    return: f.return_policy_id ?? "",
-    condition: f.condition ?? "",
-    condition_description: f.condition_description ?? "",
-    quantity: f.quantity ?? 1,
-    front_image: f.front_image_path ?? "",
-    back_image: f.back_image_path ?? "",
-    aspects: canonicalize(f.aspects ?? {}),
-  };
-  return `v${LISTING_FINGERPRINT_VERSION}|${JSON.stringify(canonical)}`;
-}
+// The listing fingerprint was replaced by the canonical SHA-256 fingerprint over
+// the durable intended state + image manifest — see ebay-intended-state.ts
+// (canonicalListingFingerprint, LISTING_FINGERPRINT_VERSION = 3). The old weak
+// `v2|JSON.stringify` serialization is gone.
 
 export interface ListingIntentState {
   status: string;

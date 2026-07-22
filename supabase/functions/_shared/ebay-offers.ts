@@ -67,13 +67,51 @@ export function validateNextUrl(next: string, apiOrigin: string, sku: string): {
 }
 
 const isNonNegInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const nonEmptyStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 
-// A successful 2xx getOffers body MUST have the expected schema; a malformed 2xx
-// is NEVER read as "zero offers". Returns the raw offers array or null (invalid).
-function strictOffersArray(data: Record<string, unknown>): unknown[] | null {
+/**
+ * Strict per-offer contract for a getOffers result. Every field the state engine
+ * relies on must be present and correctly typed, and the offer's SKU must EXACTLY
+ * equal the server-derived canonical SKU we queried for. A malformed or
+ * different-SKU offer is REJECTED (never normalized into empty strings), so a
+ * page carrying one fails the whole response as `invalid_provider_response`.
+ */
+export function validateOfferForSku(o: unknown, sku: string): boolean {
+  if (!isObj(o)) return false;
+  if (!nonEmptyStr(o.offerId)) return false;
+  if (o.sku !== sku) return false;                       // exact canonical SKU only
+  if (!nonEmptyStr(o.marketplaceId)) return false;
+  if (!nonEmptyStr(o.format)) return false;
+  if (!nonEmptyStr(o.categoryId)) return false;
+  if (!nonEmptyStr(o.merchantLocationKey)) return false;
+  if (!isObj(o.listingPolicies)) return false;
+  const lp = o.listingPolicies;
+  if (!nonEmptyStr(lp.fulfillmentPolicyId) || !nonEmptyStr(lp.paymentPolicyId) || !nonEmptyStr(lp.returnPolicyId)) return false;
+  if (!isObj(o.pricingSummary) || !isObj(o.pricingSummary.price)) return false;
+  const price = o.pricingSummary.price;
+  if (typeof price.value !== "number" && typeof price.value !== "string") return false;
+  const pv = Number(price.value);
+  if (!Number.isFinite(pv) || pv < 0) return false;
+  if (!nonEmptyStr(price.currency)) return false;
+  if (!isNonNegInt(o.availableQuantity)) return false;   // present, non-negative safe integer (rejects fractional/negative)
+  if (typeof o.listingDescription !== "string") return false;
+  if (o.listing !== undefined) {
+    if (!isObj(o.listing)) return false;
+    const listing = o.listing;
+    if (listing.listingId !== undefined && typeof listing.listingId !== "string" && typeof listing.listingId !== "number") return false;
+    if (listing.listingOnHold !== undefined && typeof listing.listingOnHold !== "boolean") return false;
+  }
+  return true;
+}
+
+// A successful 2xx getOffers body MUST have the expected schema AND every offer
+// must strictly satisfy the canonical-SKU offer contract; a malformed 2xx is
+// NEVER read as "zero offers". Returns the raw offers array or null (invalid).
+function strictOffersArray(data: Record<string, unknown>, sku: string): unknown[] | null {
   if (!data || typeof data !== "object" || !Array.isArray(data.offers)) return null;
   for (const o of data.offers) {
-    if (!o || typeof o !== "object" || typeof (o as { offerId?: unknown }).offerId !== "string" || !(o as { offerId: string }).offerId) return null;
+    if (!validateOfferForSku(o, sku)) return null;
   }
   for (const key of ["total", "size", "limit", "offset"] as const) {
     if (data[key] !== undefined && !isNonNegInt(data[key])) return null;
@@ -146,7 +184,7 @@ export async function fetchAllOffersForSku(args: OffersDiscoveryArgs): Promise<O
     // A successful 2xx with a malformed/missing offers array or bad pagination
     // types is invalid — NEVER silently read as "zero offers".
     if (data === null) return fail("invalid_provider_response");
-    const rawOffers = strictOffersArray(data);
+    const rawOffers = strictOffersArray(data, sku);
     if (rawOffers === null) return fail("invalid_provider_response");
     // Every successful getOffers response must report a total (so completeness is
     // always checkable, even on a single page), and next/prev/href — when present
