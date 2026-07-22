@@ -34,6 +34,8 @@ export interface Slab {
   language: string | null;
   rarity: string | null;
   variation: string | null;
+  /** Trading-card game / franchise, e.g. "Pokemon". Leads the eBay listing title. Additive/nullable. */
+  game_or_franchise?: string | null;
   label_description: string | null;
   label_accuracy: string | null;
   verification_status: string | null;

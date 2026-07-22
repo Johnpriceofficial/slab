@@ -50,6 +50,7 @@ function baseSlab(num: number, input: SlabInput, frontExt: string, backExt: stri
     card_number: input.card_number,
     year: input.year,
     language: input.language,
+    game_or_franchise: null,
     rarity: input.rarity,
     variation: input.variation,
     label_description: input.label_description,
