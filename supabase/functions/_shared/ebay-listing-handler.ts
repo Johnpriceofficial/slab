@@ -20,6 +20,7 @@ export interface ReconcileBinding { accountId: string; slabId: string; sku: stri
 
 export interface ListingDeps {
   flagEnabled: (name: string) => boolean;
+  loadAccessToken: (accountId: string) => Promise<{ ok: true; token: string } | { ok: false }>;
   loadSlabForListing: (slabId: string) => Promise<{ ok: true; slab: { inventoryNumber: number; frontImagePath: string | null; backImagePath: string | null } | null } | { ok: false }>;
   verifyListingOwnership: (a: { accountId: string; marketplaceId: string; merchantLocationKey: string; fulfillmentPolicyId: string; paymentPolicyId: string; returnPolicyId: string }) => Promise<{ ok: true } | { ok: false; errorCode: string; httpStatus: number }>;
   signImageUrl: (path: string) => Promise<string | null>;
@@ -58,6 +59,24 @@ export interface ListingHandlerArgs {
   marketplaceId: string;
   categoryId: string;
   deps: ListingDeps;
+}
+
+/**
+ * Route a listing operation, GATING the listing-mutation flag for list_item
+ * PUBLISH BEFORE the seller access token is loaded/refreshed. A disabled publish
+ * therefore makes ZERO OAuth token requests, zero credential access, zero provider
+ * calls, and zero writes — and a confirmation phrase cannot bypass it. This is the
+ * SAME routing the deployed handler delegates to (handleEbay is a thin wrapper).
+ */
+export async function routeListingWithToken(operation: "list_item" | "reconcile", body: Record<string, unknown>, accountId: string, marketplaceId: string, categoryId: string, deps: ListingDeps): Promise<HandlerResponse> {
+  if (operation === "list_item" && !deps.flagEnabled(EBAY_MUTATION_FLAGS.listing)) {
+    // Gate BEFORE the token — no credential access on a disabled publish.
+    return resp({ status: "mutation_disabled", operation: "list_item", kind: "listing", message: "eBay listing mutations are disabled by server configuration." }, 403);
+  }
+  const tok = await deps.loadAccessToken(accountId);
+  if (tok.ok === false) return resp({ status: "unavailable", operation, capability: "Connected eBay account", message: "eBay is not connected or the seller token could not be loaded." }, 503);
+  const args = { body, accountId, accessToken: tok.token, marketplaceId, categoryId, deps };
+  return operation === "list_item" ? handlePublish(args) : handleReconcile(args);
 }
 
 /** list_item PUBLISH: gate on the listing flag, validate, derive the canonical SKU,

@@ -25,14 +25,15 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
   let seq = 0;
 
   const FP = "fp-canonical";
-  const makeIntent = async (sku: string, fingerprint = FP, status = "preparing") => {
-    const { data } = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, fingerprint_version: 3, status }).select("id").single();
+  const makeIntent = async (sku: string, fingerprint = FP, status = "preparing", imagesSubmittedAt: string | null = null) => {
+    const { data } = await service.from("ebay_listing_intents").insert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, fingerprint_version: 3, status, images_submitted_at: imagesSubmittedAt }).select("id").single();
     return data!.id as string;
   };
   const call = (over: Record<string, unknown>) => service.rpc("ebay_listing_reconcile_local", {
     p_account_id: accountId, p_slab_id: slabId, p_sku: "GCV000047", p_intent_id: "", p_offer_id: `O-${seq++}`,
     p_listing_id: "L9", p_listing_status: "published", p_asking_price_cents: 19999, p_currency: "USD",
-    p_expected_fingerprint: FP, p_expected_fingerprint_version: 3, ...over,
+    p_expected_fingerprint: FP, p_expected_fingerprint_version: 3,
+    p_expected_status: null, p_expected_offer_id: null, p_expected_listing_id: null, p_expected_updated_at: null, ...over,
   });
 
   beforeAll(async () => {
@@ -64,16 +65,26 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
     for (const id of userIds) await service.auth.admin.deleteUser(id).catch(() => {});
   });
 
-  it("service role: a valid call atomically writes the intent AND the mapping", async () => {
-    const id = await makeIntent("GCV000047");
+  it("service role: a valid call atomically writes the intent AND the mapping; advances method ONLY with prior provenance", async () => {
+    // Prior submission provenance present → method advances to provider_reference_match.
+    const id = await makeIntent("GCV000047", FP, "offer_created", "2026-07-20T00:00:00Z");
     const r = await call({ p_sku: "GCV000047", p_intent_id: id });
     expect((r.data as { ok?: boolean }).ok).toBe(true);
     const { data: intent } = await service.from("ebay_listing_intents").select("status, offer_id, images_submitted_at, image_verification_method").eq("id", id).single();
     expect(intent!.status).toBe("published");
-    expect(intent!.images_submitted_at).not.toBeNull();
+    expect(intent!.images_submitted_at).not.toBeNull(); // preserved, NOT fabricated
     expect(intent!.image_verification_method).toBe("provider_reference_match");
     const { data: map } = await service.from("ebay_listing_mappings").select("id, offer_id").eq("ebay_account_id", accountId).eq("sku", "GCV000047").maybeSingle();
     expect(map).not.toBeNull();
+  });
+
+  it("NEVER fabricates images_submitted_at: an intent with no prior provenance keeps it null", async () => {
+    const id = await makeIntent("GCV000048"); // no images_submitted_at
+    const r = await call({ p_sku: "GCV000048", p_intent_id: id });
+    expect((r.data as { ok?: boolean }).ok).toBe(true);
+    const { data: intent } = await service.from("ebay_listing_intents").select("images_submitted_at, image_verification_method").eq("id", id).single();
+    expect(intent!.images_submitted_at).toBeNull();
+    expect(intent!.image_verification_method).not.toBe("provider_reference_match");
   });
 
   it("stale fingerprint → rejected structurally, NO mapping written", async () => {
@@ -103,9 +114,18 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
     expect(map).toBeNull();
   });
 
+  it("a stale optimistic-concurrency fence (wrong expected updated_at) → stale_intent, NO writes", async () => {
+    const id = await makeIntent("GCV000053");
+    const r = await call({ p_sku: "GCV000053", p_intent_id: id, p_expected_status: "preparing", p_expected_offer_id: null, p_expected_listing_id: null, p_expected_updated_at: "1999-01-01T00:00:00Z" });
+    expect(r.data).toMatchObject({ ok: false, error_code: "stale_intent" });
+    const { data: map } = await service.from("ebay_listing_mappings").select("id").eq("ebay_account_id", accountId).eq("sku", "GCV000053").maybeSingle();
+    expect(map).toBeNull();
+  });
+
   it("anon and authenticated cannot execute the RPC", async () => {
+    const rpcArgs = { p_account_id: accountId, p_slab_id: slabId, p_sku: "x", p_intent_id: "00000000-0000-0000-0000-000000000000", p_offer_id: "x", p_listing_id: "", p_listing_status: "published", p_asking_price_cents: 1, p_currency: "USD", p_expected_fingerprint: "x", p_expected_fingerprint_version: 3, p_expected_status: null, p_expected_offer_id: null, p_expected_listing_id: null, p_expected_updated_at: null };
     const anon = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `rl-anon-${stamp}` } });
-    expect((await anon.rpc("ebay_listing_reconcile_local", { p_account_id: accountId, p_slab_id: slabId, p_sku: "x", p_intent_id: "00000000-0000-0000-0000-000000000000", p_offer_id: "x", p_listing_id: "", p_listing_status: "published", p_asking_price_cents: 1, p_currency: "USD", p_expected_fingerprint: "x", p_expected_fingerprint_version: 3 })).error).not.toBeNull();
-    expect((await adminClient.rpc("ebay_listing_reconcile_local", { p_account_id: accountId, p_slab_id: slabId, p_sku: "x", p_intent_id: "00000000-0000-0000-0000-000000000000", p_offer_id: "x", p_listing_id: "", p_listing_status: "published", p_asking_price_cents: 1, p_currency: "USD", p_expected_fingerprint: "x", p_expected_fingerprint_version: 3 })).error).not.toBeNull();
+    expect((await anon.rpc("ebay_listing_reconcile_local", rpcArgs)).error).not.toBeNull();
+    expect((await adminClient.rpc("ebay_listing_reconcile_local", rpcArgs)).error).not.toBeNull();
   });
 });

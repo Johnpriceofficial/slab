@@ -12,7 +12,7 @@
 // state was recorded). Final local persistence is ATOMIC (one transactional RPC).
 
 import { evaluateLocalIntent, type LocalIntentRecord } from "./ebay-local-intent.ts";
-import { type DurableLocal, type EngineDecision, evaluateProviderState, type VerificationMethod } from "./ebay-provider-state-engine.ts";
+import { type DurableLocal, type EngineDecision, evaluateProviderState, type ProviderImageEvidence, type VerificationMethod } from "./ebay-provider-state-engine.ts";
 import { type ImageManifestV1, type IntendedStateV1, LISTING_FINGERPRINT_VERSION, verifyDurableIntendedSnapshot } from "./ebay-intended-state.ts";
 import type { OffersDiscovery } from "./ebay-offers.ts";
 import type { InventoryItemResult } from "./ebay-inventory-item.ts";
@@ -28,7 +28,13 @@ export interface StoredIntent {
   imageManifest: unknown;
   imagesSubmittedAt: string | null;
   verificationMethod: VerificationMethod | null;
+  providerImageEvidence: ProviderImageEvidence | null;
+  updatedAt: string | null;                 // row version for optimistic-concurrency fencing
 }
+
+// Statuses that indicate a live or in-flight listing whose durable snapshot MUST
+// verify before we act; anything not here and artifact-free is a replaceable row.
+const LIVE_INFLIGHT_STATUSES = new Set(["preparing", "inventory_created", "offer_created", "offer_created_unpersisted", "published", "published_unmapped"]);
 
 export interface PreparingSnapshot {
   intendedState: IntendedStateV1;
@@ -49,6 +55,14 @@ export interface ReconcileLocalArgs {
   askingPriceCents: number;
   fingerprint: string;
   fingerprintVersion: number;
+  // Optimistic-concurrency fence (reconcile only): the expected CURRENT intent
+  // state read at load time. A concurrent publish that changed any of these makes
+  // the reconcile stale → the RPC rejects without writing. null skips the check
+  // (the publish path holds the single-flight lease, so it needs no version fence).
+  expectedStatus?: string | null;
+  expectedOfferId?: string | null;
+  expectedListingId?: string | null;
+  expectedUpdatedAt?: string | null;
 }
 
 export interface PublishExecutorOps {
@@ -105,13 +119,23 @@ export async function executePublish(ops: PublishExecutorOps, ctx: PublishContex
 
     // 1) CRYPTOGRAPHICALLY verify any stored snapshot BEFORE trusting it. A forged /
     // altered / stale snapshot blocks with NO provider read and NO preparing write.
+    // A LIVE or IN-FLIGHT intent (or one carrying an offer/listing artifact) MUST
+    // present a VALID snapshot — a missing/invalid snapshot on such a row fails
+    // closed (never authorizes create_new). Only a terminal, artifact-free legacy
+    // row with no snapshot may be replaced.
     let verifiedManifest: ImageManifestV1 | null = null;
-    if (existing && existing.intendedState != null) {
-      const v = await verifyDurableIntendedSnapshot({ intendedState: existing.intendedState, imageManifest: existing.imageManifest, fingerprint: existing.fingerprint, fingerprintVersion: existing.fingerprintVersion });
-      if (v.outcome !== "valid" && v.outcome !== "missing_intended_state") {
-        return { status: v.outcome, errorCode: v.outcome, httpStatus: 409, message: "The stored listing snapshot failed verification; refusing to act on unverified durable state." };
+    if (existing) {
+      const isLiveish = LIVE_INFLIGHT_STATUSES.has(existing.status) || !!existing.offerId || !!existing.listingId;
+      const hasSnapshot = existing.intendedState != null || existing.imageManifest != null;
+      if (hasSnapshot || isLiveish) {
+        const v = await verifyDurableIntendedSnapshot({ intendedState: existing.intendedState, imageManifest: existing.imageManifest, fingerprint: existing.fingerprint, fingerprintVersion: existing.fingerprintVersion });
+        if (v.outcome !== "valid") {
+          const code = isLiveish ? "existing_intent_missing_verified_snapshot" : v.outcome;
+          return { status: code, errorCode: v.outcome, httpStatus: 409, message: "The existing listing intent has no valid verified snapshot; refusing to act on unverified durable state." };
+        }
+        verifiedManifest = v.manifest;
       }
-      if (v.outcome === "valid") verifiedManifest = v.manifest;
+      // else: terminal, artifact-free, snapshot-free legacy row → replaceable.
     }
 
     // 2) Pre-read local-intent gate.
@@ -135,7 +159,7 @@ export async function executePublish(ops: PublishExecutorOps, ctx: PublishContex
     // 4) Read-all-then-decide via the shared engine. Durable local state comes ONLY
     // from the VERIFIED snapshot.
     const local: DurableLocal | null = existing
-      ? { status: existing.status, fingerprint: verifiedManifest ? ctx.fingerprint : existing.fingerprint, offerId: existing.offerId, listingId: existing.listingId, manifest: verifiedManifest, imagesSubmittedAt: existing.imagesSubmittedAt, verificationMethod: existing.verificationMethod }
+      ? { status: existing.status, fingerprint: verifiedManifest ? ctx.fingerprint : existing.fingerprint, offerId: existing.offerId, listingId: existing.listingId, manifest: verifiedManifest, imagesSubmittedAt: existing.imagesSubmittedAt, verificationMethod: existing.verificationMethod, providerImageEvidence: existing.providerImageEvidence }
       : null;
     const res = await evaluateProviderState({ discoverOffers: ops.discoverOffers, fetchInventoryItem: ops.fetchInventoryItem }, { intended: ctx.intended, manifest: ctx.manifest, fingerprint: ctx.fingerprint, local });
 
@@ -247,7 +271,7 @@ export async function executeReconcile(ops: ReconcileOps): Promise<ExecResult> {
     return { status: "reconcile_requires_intended_state", errorCode: v.outcome, httpStatus: 409, message: "No VALID durable intended-state snapshot exists for this SKU; reconcile cannot verify provider state against intent." };
   }
 
-  const local: DurableLocal = { status: intent.status, fingerprint: v.fingerprint, offerId: intent.offerId, listingId: intent.listingId, manifest: v.manifest, imagesSubmittedAt: intent.imagesSubmittedAt, verificationMethod: intent.verificationMethod };
+  const local: DurableLocal = { status: intent.status, fingerprint: v.fingerprint, offerId: intent.offerId, listingId: intent.listingId, manifest: v.manifest, imagesSubmittedAt: intent.imagesSubmittedAt, verificationMethod: intent.verificationMethod, providerImageEvidence: intent.providerImageEvidence };
   const res = await evaluateProviderState({ discoverOffers: ops.discoverOffers, fetchInventoryItem: ops.fetchInventoryItem }, { intended: v.intended, manifest: v.manifest, fingerprint: v.fingerprint, local });
 
   if (res.providerFailure) {
@@ -258,7 +282,11 @@ export async function executeReconcile(ops: ReconcileOps): Promise<ExecResult> {
   }
 
   if (res.decision === "reconcile_exact_published" || res.decision === "already_published_exact") {
-    const r = await ops.reconcileLocal({ intentId: intent.id, offerId: res.offerId!, listingId: res.listingId ?? null, listingStatus: "published", askingPriceCents: Math.round(Number(v.intended.price) * 100), fingerprint: v.fingerprint, fingerprintVersion: LISTING_FINGERPRINT_VERSION });
+    // Reconcile does NOT hold the publish lease, so it fences optimistically: the
+    // RPC verifies the intent still matches the state we READ (status/offer/listing
+    // + updated_at). A racing publish that advanced the row makes this reconcile
+    // stale → the RPC rejects without changing the intent or mapping.
+    const r = await ops.reconcileLocal({ intentId: intent.id, offerId: res.offerId!, listingId: res.listingId ?? null, listingStatus: "published", askingPriceCents: Math.round(Number(v.intended.price) * 100), fingerprint: v.fingerprint, fingerprintVersion: LISTING_FINGERPRINT_VERSION, expectedStatus: intent.status, expectedOfferId: intent.offerId, expectedListingId: intent.listingId, expectedUpdatedAt: intent.updatedAt });
     if (r.ok) return { status: "success", reconciled: true, offerId: res.offerId, listingId: res.listingId, httpStatus: 200 };
     const marker = await ops.recordStatus(intent.id, "published_unmapped", "reconcile_local_persist_failed");
     if (marker.ok) return { status: "published_unmapped", offerId: res.offerId, listingId: res.listingId, httpStatus: 500, message: "eBay has a live listing for this SKU but the atomic local write failed — retry reconcile." };

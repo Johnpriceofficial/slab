@@ -27,8 +27,15 @@ const item = (over: Partial<NormalizedInventoryItem> = {}): NormalizedInventoryI
   title: "2016 Charizard PSA 10", description: "Graded.", aspects: { Grade: ["10"], Grader: ["PSA"] }, imageCount: 2, quantity: 1, ...over,
 });
 const okDisc = (offers: OfferSummary[]): OffersDiscovery => ({ ok: true, offers, pagesFetched: 1, providerTotal: offers.length, providerSize: offers.length, deduplicatedCount: 0 });
-// Our OWN recorded listing (durable identity present): images_submitted, unchanged manifest+fp.
-const ours = (over: Partial<DurableLocal> = {}): DurableLocal => ({ status: "offer_created", fingerprint: FP, offerId: "O1", listingId: null, manifest, imagesSubmittedAt: "2026-07-22T00:00:00Z", verificationMethod: "submitted_only", ...over });
+// Our OWN recorded listing (durable identity + GENUINE submission provenance).
+const ours = (over: Partial<DurableLocal> = {}): DurableLocal => {
+  const base: DurableLocal = { status: "offer_created", fingerprint: FP, offerId: "O1", listingId: null, manifest, imagesSubmittedAt: "2026-07-22T00:00:00Z", verificationMethod: "submitted_only", providerImageEvidence: null, ...over };
+  // Default the evidence to match the (possibly overridden) offer/listing identity.
+  if (base.providerImageEvidence === null && "providerImageEvidence" in over === false) {
+    base.providerImageEvidence = { method: "submitted_only", offer_id: base.offerId ?? undefined, listing_id: base.listingId };
+  }
+  return base;
+};
 
 function ops(disc: OffersDiscovery, inv?: InventoryItemResult) {
   const discoverOffers = vi.fn(async () => disc);
@@ -48,10 +55,15 @@ describe("evaluateImageEvidence — HONEST (never `verified` from count/identity
   it("identity mismatch → unverifiable (not verified)", () => {
     expect(evaluateImageEvidence(ctx(ours()), 2, "OTHER", null)).toEqual({ evidence: "unverifiable", method: "unverifiable" });
   });
-  it("our unchanged listing → unverifiable with provider_reference_match (NEVER verified)", () => {
+  it("our unchanged listing WITH genuine provenance → unverifiable + provider_reference_match (NEVER verified)", () => {
     const r = evaluateImageEvidence(ctx(ours()), 2, "O1", null);
     expect(r).toEqual({ evidence: "unverifiable", method: "provider_reference_match" });
     expect(r.evidence).not.toBe("verified"); // current eBay API exposes no content hash
+  });
+  it("our listing WITHOUT submission provenance (no images_submitted_at / no evidence) → unverifiable (no manufactured provenance)", () => {
+    expect(evaluateImageEvidence(ctx(ours({ imagesSubmittedAt: null })), 2, "O1", null).method).toBe("unverifiable");
+    expect(evaluateImageEvidence(ctx(ours({ providerImageEvidence: null })), 2, "O1", null).method).toBe("unverifiable");
+    expect(evaluateImageEvidence(ctx(ours({ providerImageEvidence: { method: "submitted_only", offer_id: "DIFFERENT" } })), 2, "O1", null).method).toBe("unverifiable");
   });
   it("local fingerprint changed → mismatch", () => {
     expect(evaluateImageEvidence(ctx(ours({ fingerprint: "OLD" })), 2, "O1", null).evidence).toBe("mismatch");
