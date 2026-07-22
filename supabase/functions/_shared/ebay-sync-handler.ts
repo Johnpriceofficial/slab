@@ -1,25 +1,32 @@
-// The REAL order/finance sync orchestration behind injected domain dependencies —
-// the same routing the deployed ebay-order-sync / ebay-finances-sync entrypoints
-// delegate to (handleEbay is a thin wrapper). It binds the shared fail-closed
-// paginator + watermark orchestrator to durable persistence, sync-state, and the
-// single-flight sync lease. Ordinary order sync NEVER marks a slab sold, creates a
-// sold comp, mutates a listing, or calls APPLY_SALES; finance sync NEVER moves
-// money. Fully unit-testable (all provider/DB ops injected).
+// The REAL order/finance sync orchestration behind injected domain dependencies
+// (C.8.1-hardened): a FENCED single-flight lease (asserted before mapping lookup
+// and before every bounded persistence batch, and verified under lock at atomic
+// completion), a run identity, deterministic bounded batching, and confirmed
+// durable totals. Ordinary order sync NEVER marks a slab sold, creates a sold comp,
+// mutates a listing, or calls APPLY_SALES; finance sync NEVER moves money. Fully
+// unit-testable (all provider/DB ops injected).
 
 import { shapeEbayFinanceTransactions, shapeEbayOrders } from "./ebay-orders-core.ts";
 import type { PaginatedResult } from "./ebay-pagination-core.ts";
 import type { RawOrder } from "./ebay-orders-pagination.ts";
 import type { RawTransaction } from "./ebay-finances-pagination.ts";
-import { DEFAULT_OVERLAP_MS, runSync, type SyncOps, type SyncResult } from "./ebay-sync-orchestrator.ts";
+import { type CompleteArgs, DEFAULT_OVERLAP_MS, runSync, type SyncOps, type SyncResult } from "./ebay-sync-orchestrator.ts";
+
+// Server-controlled deterministic batch sizes (bounded so larger real-world
+// results cannot exceed a single query/payload).
+export const SKU_BATCH = 200;
+export const ORDER_BATCH = 100;
+export const FINANCE_BATCH = 100;
+const DEFAULT_INITIAL_WINDOW_MS = 90 * 24 * 60 * 60 * 1000; // 90d bounded initial sync
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
-// The newest VALID (parseable, not-future) provider timestamp among records.
+function chunk<T>(a: T[], n: number): T[][] { const out: T[][] = []; for (let i = 0; i < a.length; i += n) out.push(a.slice(i, i + n)); return out; }
 function maxValidTs(values: Array<string | undefined>, nowMs: number): string | null {
   let best: number | null = null, bestStr: string | null = null;
   for (const v of values) {
     if (!v) continue;
     const t = Date.parse(v);
-    if (!Number.isFinite(t) || t > nowMs) continue;         // malformed or future → ignored (never corrupts the watermark)
+    if (!Number.isFinite(t) || t > nowMs) continue;
     if (best === null || t > best) { best = t; bestStr = v; }
   }
   return bestStr;
@@ -29,34 +36,30 @@ export interface SyncHandlerDeps {
   fetchOrders: (accessToken: string, query: Record<string, string>) => Promise<PaginatedResult<RawOrder>>;
   fetchFinances: (accessToken: string, query: Record<string, string>) => Promise<PaginatedResult<RawTransaction>>;
   resolveOrderMappings: (accountId: string, skus: string[]) => Promise<{ ok: true; bySku: Map<string, string> } | { ok: false }>;
-  persistOrders: (accountId: string, shaped: unknown[]) => Promise<{ ok: true; durableTotal: number | null; persisted: number } | { ok: false }>;
+  persistOrders: (accountId: string, shaped: unknown[]) => Promise<{ ok: true; durableTotal: number | null; durableLines?: number | null; persisted: number } | { ok: false }>;
   persistFinances: (accountId: string, shaped: unknown[]) => Promise<{ ok: true; durableTotal: number | null; persisted: number } | { ok: false }>;
   leaseAcquire: (accountId: string, resource: string, token: string) => Promise<{ acquired: boolean; error: boolean }>;
+  leaseAssert: (accountId: string, resource: string, token: string) => Promise<boolean>;
   leaseRelease: (accountId: string, resource: string, token: string) => Promise<{ released: boolean }>;
-  syncStateLoad: (accountId: string, resource: string) => Promise<{ ok: true; highWatermarkAt: string | null } | { ok: false }>;
-  syncStateCommit: (accountId: string, resource: string, args: { runId: string; highWatermarkAt: string | null; pagesFetched: number; recordsFetched: number; recordsPersisted: number; durableTotal: number | null }) => Promise<{ ok: boolean }>;
-  syncStateFail: (accountId: string, resource: string, runId: string, errorCode: string) => Promise<{ ok: boolean }>;
+  syncBegin: (accountId: string, resource: string) => Promise<{ ok: true; runId: string; highWatermarkAt: string | null } | { ok: false }>;
+  syncComplete: (accountId: string, resource: string, token: string, args: CompleteArgs) => Promise<{ ok: boolean; errorCode?: string }>;
+  syncFail: (accountId: string, resource: string, runId: string, errorCode: string) => Promise<{ ok: boolean }>;
   recordApiRun: (accountId: string, operation: string, status: string, errorCode: string | null) => Promise<{ ok: boolean }>;
-  // Optional: receive the proposed-sale audit rows derived from the shaped orders
-  // (surfaced by the handler to the UI; APPLY_SALES stays a separate operation).
   collectProposedSales?: (sales: unknown[]) => void;
   now: () => number;
   uuid: () => string;
   overlapMs?: number;
-  initialWindowMs?: number;   // bounded first-sync range
+  initialWindowMs?: number;
 }
 
-const DEFAULT_INITIAL_WINDOW_MS = 90 * 24 * 60 * 60 * 1000; // 90d bounded initial sync
-
-// Shared SyncOps built with a PER-RUN lease token (a local ref — never shared
-// module state, so concurrent order + finance runs cannot clobber each other).
 function commonOps(accountId: string, resource: string, deps: SyncHandlerDeps, tokenRef: { current: string }) {
   return {
     acquireLease: async () => { tokenRef.current = deps.uuid(); return deps.leaseAcquire(accountId, resource, tokenRef.current); },
+    assertLease: () => deps.leaseAssert(accountId, resource, tokenRef.current),
     releaseLease: () => deps.leaseRelease(accountId, resource, tokenRef.current),
-    loadSyncState: async () => { const s = await deps.syncStateLoad(accountId, resource); return s.ok ? { ok: true as const, state: { highWatermarkAt: s.highWatermarkAt } } : { ok: false as const }; },
-    commitSyncState: (args: { runId: string; highWatermarkAt: string | null; pagesFetched: number; recordsFetched: number; recordsPersisted: number; durableTotal: number | null }) => deps.syncStateCommit(accountId, resource, args),
-    recordFailure: (runId: string, errorCode: string) => deps.syncStateFail(accountId, resource, runId, errorCode),
+    beginRun: async () => { const b = await deps.syncBegin(accountId, resource); return b.ok ? { ok: true as const, state: { highWatermarkAt: b.highWatermarkAt }, runId: b.runId } : { ok: false as const }; },
+    complete: (args: CompleteArgs) => deps.syncComplete(accountId, resource, tokenRef.current, args),
+    recordFailure: (runId: string, errorCode: string) => deps.syncFail(accountId, resource, runId, errorCode),
     recordApiRun: (status: string, errorCode: string | null) => deps.recordApiRun(accountId, `${resource}_sync`, status, errorCode),
     now: deps.now,
     uuid: deps.uuid,
@@ -66,35 +69,62 @@ function commonOps(accountId: string, resource: string, deps: SyncHandlerDeps, t
 
 export async function runOrderSync(accountId: string, accessToken: string, deps: SyncHandlerDeps): Promise<SyncResult> {
   const tokenRef = { current: "" };
+  const common = commonOps(accountId, "orders", deps, tokenRef);
   const initialFrom = new Date(Math.max(0, deps.now() - (deps.initialWindowMs ?? DEFAULT_INITIAL_WINDOW_MS))).toISOString();
   const ops: SyncOps<RawOrder> = {
-    ...commonOps(accountId, "orders", deps, tokenRef),
+    ...common,
     fetchAllPages: (query) => deps.fetchOrders(accessToken, query),
     persist: async (orders) => {
+      // 1) Resolve SKU→slab mappings in bounded, lease-fenced batches.
       const skus = [...new Set(orders.flatMap((o) => (Array.isArray(o.lineItems) ? o.lineItems : []).map((li) => str((li as Record<string, unknown>).sku)).filter(Boolean)))];
-      const mapRes = skus.length ? await deps.resolveOrderMappings(accountId, skus) : { ok: true as const, bySku: new Map<string, string>() };
-      if (mapRes.ok === false) return { ok: false, errorCode: "mapping_lookup_failed" };
-      const { shaped, proposed_sales } = shapeEbayOrders(orders, mapRes.bySku);
-      const p = await deps.persistOrders(accountId, shaped);
-      if (p.ok) deps.collectProposedSales?.(proposed_sales); // only from successfully persisted lines
-      return p.ok ? { ok: true, durableTotal: p.durableTotal, persisted: p.persisted } : { ok: false, errorCode: "orders_persist_failed" };
+      const bySku = new Map<string, string>();
+      for (const batch of chunk(skus, SKU_BATCH)) {
+        if (!(await common.assertLease())) return { ok: false, errorCode: "sync_lease_lost" };
+        const m = await deps.resolveOrderMappings(accountId, batch);
+        if (m.ok === false) return { ok: false, errorCode: "mapping_lookup_failed" };
+        for (const [k, v] of m.bySku) bySku.set(k, v);
+      }
+      const { shaped, proposed_sales } = shapeEbayOrders(orders, bySku);
+      // 2) Persist in bounded, lease-fenced batches; the CONFIRMED durable total is
+      // read back from the private tables (idempotent under retries + overlap).
+      let persisted = 0, confirmed: number | null = null, confirmedLines: number | null = null;
+      for (const batch of chunk(shaped, ORDER_BATCH)) {
+        if (!(await common.assertLease())) return { ok: false, errorCode: "sync_lease_lost" };
+        const p = await deps.persistOrders(accountId, batch);
+        if (p.ok === false) return { ok: false, errorCode: "orders_persist_failed" };
+        persisted += p.persisted; confirmed = p.durableTotal; confirmedLines = p.durableLines ?? null;
+      }
+      // Empty result still needs a confirmed durable total.
+      if (shaped.length === 0) { const p = await deps.persistOrders(accountId, []); if (p.ok) { confirmed = p.durableTotal; confirmedLines = p.durableLines ?? null; } }
+      deps.collectProposedSales?.(proposed_sales);
+      return { ok: true, durableTotal: confirmed, durableSecondary: confirmedLines, persisted };
     },
+    // Fulfillment getOrders `lastmodifieddate` filter is aligned with the watermark
+    // (which uses lastModifiedDate), so an older order modified recently is captured.
     extractWatermark: (orders) => maxValidTs(orders.map((o) => str(o.lastModifiedDate) || str(o.creationDate)), deps.now()),
-    buildQuery: (from) => ({ limit: "200", filter: `creationdate:[${from ?? initialFrom}..]` }),
+    buildQuery: (from) => ({ limit: "200", filter: `lastmodifieddate:[${from ?? initialFrom}..]` }),
   };
   return runSync(ops);
 }
 
 export async function runFinanceSync(accountId: string, accessToken: string, deps: SyncHandlerDeps): Promise<SyncResult> {
   const tokenRef = { current: "" };
+  const common = commonOps(accountId, "finances", deps, tokenRef);
   const initialFrom = new Date(Math.max(0, deps.now() - (deps.initialWindowMs ?? DEFAULT_INITIAL_WINDOW_MS))).toISOString();
   const ops: SyncOps<RawTransaction> = {
-    ...commonOps(accountId, "finances", deps, tokenRef),
+    ...common,
     fetchAllPages: (query) => deps.fetchFinances(accessToken, query),
     persist: async (txns) => {
       const shaped = shapeEbayFinanceTransactions(txns);
-      const p = await deps.persistFinances(accountId, shaped);
-      return p.ok ? { ok: true, durableTotal: p.durableTotal, persisted: p.persisted } : { ok: false, errorCode: "finances_persist_failed" };
+      let persisted = 0, confirmed: number | null = null;
+      for (const batch of chunk(shaped, FINANCE_BATCH)) {
+        if (!(await common.assertLease())) return { ok: false, errorCode: "sync_lease_lost" };
+        const p = await deps.persistFinances(accountId, batch);
+        if (p.ok === false) return { ok: false, errorCode: "finances_persist_failed" };
+        persisted += p.persisted; confirmed = p.durableTotal;
+      }
+      if (shaped.length === 0) { const p = await deps.persistFinances(accountId, []); if (p.ok) confirmed = p.durableTotal; }
+      return { ok: true, durableTotal: confirmed, persisted };
     },
     extractWatermark: (txns) => maxValidTs(txns.map((t) => str(t.transactionDate)), deps.now()),
     buildQuery: (from) => ({ limit: "200", filter: `transactionDate:[${from ?? initialFrom}..]` }),

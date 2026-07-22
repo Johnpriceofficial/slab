@@ -19,8 +19,11 @@ const canon = (v: unknown): string => {
 export type RawOrder = Record<string, unknown>;
 
 /** Strict order contract: non-empty orderId, and every line item a plain object
- *  with a non-empty lineItemId. The canonical form (id/status + ordered line-item
- *  id/sku/qty) drives cross-page dedup and conflicting-duplicate detection. */
+ *  with a non-empty lineItemId. The canonical form covers ALL persisted +
+ *  decision-relevant fields (every status, creation/modification dates, pricing
+ *  summary, cancellation state, and per-line id/sku/listing/qty/total/fulfillment/
+ *  payment) with lines normalized by lineItemId, so two different orders can never
+ *  be silently treated as identical. */
 export function validateOrder(raw: unknown): ItemValidation<RawOrder> {
   if (!isObj(raw)) return { ok: false };
   const orderId = raw.orderId;
@@ -28,12 +31,26 @@ export function validateOrder(raw: unknown): ItemValidation<RawOrder> {
   const rawLines = raw.lineItems;
   if (rawLines !== undefined && !Array.isArray(rawLines)) return { ok: false };
   const lines = Array.isArray(rawLines) ? rawLines : [];
-  const canonLines: unknown[] = [];
+  const canonLines: Array<Record<string, unknown>> = [];
   for (const li of lines) {
     if (!isObj(li) || typeof li.lineItemId !== "string" || !li.lineItemId) return { ok: false };
-    canonLines.push({ id: li.lineItemId, sku: str(li.sku), qty: str(li.quantity ?? "") });
+    canonLines.push({
+      id: li.lineItemId, sku: li.sku ?? null, listingId: li.legacyItemId ?? li.listingMarketplaceId ?? null,
+      qty: li.quantity ?? null, lineTotal: li.total ?? li.lineItemCost ?? null,
+      fulfillment: li.lineItemFulfillmentStatus ?? null, payment: li.paymentStatus ?? null,
+    });
   }
-  const canonical = canon({ orderId, status: str(raw.orderFulfillmentStatus) || str(raw.orderPaymentStatus), lines: canonLines });
+  canonLines.sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+  const canonical = canon({
+    orderId,
+    fulfillmentStatus: raw.orderFulfillmentStatus ?? null,
+    paymentStatus: raw.orderPaymentStatus ?? null,
+    cancelState: isObj(raw.cancelStatus) ? (raw.cancelStatus.cancelState ?? null) : null,
+    creationDate: raw.creationDate ?? null,
+    lastModifiedDate: raw.lastModifiedDate ?? null,
+    pricing: raw.pricingSummary ?? null,
+    lines: canonLines,
+  });
   return { ok: true, id: orderId, item: raw, canonical };
 }
 

@@ -39,32 +39,45 @@ suite("ebay sync state + lease (durable watermark, single-flight, service-only)"
     for (const id of userIds) await service.auth.admin.deleteUser(id).catch(() => {});
   });
 
-  it("load initializes an idle row (null watermark); commit advances it; fail retains it", async () => {
+  const complete = (runId: string, token: string, wm: string) => service.rpc("ebay_sync_complete", { p_account_id: accountId, p_resource_type: "orders", p_run_id: runId, p_lease_token: token, p_high_watermark_at: wm, p_overlap_start_at: null, p_pages: 2, p_records_fetched: 5, p_records_persisted: 5, p_durable_total: 5, p_latency_ms: 10 });
+
+  it("load stamps a run_id; ATOMIC complete (lease-fenced) advances the watermark; fail retains it", async () => {
+    await service.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: "orders", p_token: "owner", p_ttl_seconds: 120 });
     const loaded = await service.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: "orders" });
+    const runId = (loaded.data as { run_id: string; high_watermark_at: string | null }).run_id;
+    expect(runId).toBeTruthy();
     expect((loaded.data as { high_watermark_at?: string | null }).high_watermark_at ?? null).toBeNull();
-    const committed = await service.rpc("ebay_sync_state_commit", { p_account_id: accountId, p_resource_type: "orders", p_run_id: crypto.randomUUID(), p_high_watermark_at: "2026-07-20T00:00:00Z", p_pages: 2, p_records_fetched: 5, p_records_persisted: 5, p_durable_total: 5 });
-    expect((committed.data as { ok?: boolean }).ok).toBe(true);
+    // A stale runner (wrong run_id) cannot complete.
+    expect((await complete(crypto.randomUUID(), "owner", "2026-07-20T00:00:00Z")).data).toMatchObject({ ok: false, error_code: "stale_runner" });
+    // A lease-less runner cannot complete.
+    expect((await complete(runId, "not-owner", "2026-07-20T00:00:00Z")).data).toMatchObject({ ok: false, error_code: "lease_lost" });
+    // The active runner holding the lease completes atomically.
+    expect((await complete(runId, "owner", "2026-07-20T00:00:00Z")).data).toMatchObject({ ok: true });
     const reload = await service.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: "orders" });
     expect(new Date((reload.data as { high_watermark_at: string }).high_watermark_at).toISOString()).toBe("2026-07-20T00:00:00.000Z");
-    // A failed run must NOT move the watermark.
-    await service.rpc("ebay_sync_state_fail", { p_account_id: accountId, p_resource_type: "orders", p_run_id: crypto.randomUUID(), p_error_code: "provider_timeout" });
+    // A failed run (active run_id) retains the watermark.
+    const run2 = (reload.data as { run_id: string }).run_id;
+    expect((await service.rpc("ebay_sync_state_fail", { p_account_id: accountId, p_resource_type: "orders", p_run_id: run2, p_error_code: "provider_timeout" })).data).toMatchObject({ ok: true });
     const afterFail = await service.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: "orders" });
     expect(new Date((afterFail.data as { high_watermark_at: string }).high_watermark_at).toISOString()).toBe("2026-07-20T00:00:00.000Z");
   });
 
-  it("the sync lease is single-flight and release is token-scoped + checked", async () => {
+  it("the sync lease is single-flight, assert-and-extend is token-scoped, release is checked", async () => {
     const [a, b] = await Promise.all([
       service.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: "finances", p_token: "tok-A", p_ttl_seconds: 120 }),
       service.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: "finances", p_token: "tok-B", p_ttl_seconds: 120 }),
     ]);
     expect([a.data, b.data].filter((r) => (r as { acquired?: boolean })?.acquired)).toHaveLength(1);
+    const owner = ((a.data as { acquired?: boolean })?.acquired ? "tok-A" : "tok-B");
+    expect((await service.rpc("ebay_sync_lease_assert_and_extend", { p_account_id: accountId, p_resource_type: "finances", p_token: owner, p_ttl_seconds: 120 })).data).toMatchObject({ held: true });
+    expect((await service.rpc("ebay_sync_lease_assert_and_extend", { p_account_id: accountId, p_resource_type: "finances", p_token: "not-owner", p_ttl_seconds: 120 })).data).toMatchObject({ held: false });
     const wrong = await service.rpc("ebay_sync_lease_release", { p_account_id: accountId, p_resource_type: "finances", p_token: "not-owner" });
     expect((wrong.data as { released?: boolean }).released).toBe(false);
   });
 
   it("sync-state + lease RPCs are denied to anon and authenticated; the state table is not writable by clients", async () => {
-    expect((await adminClient.rpc("ebay_sync_state_commit", { p_account_id: accountId, p_resource_type: "orders", p_run_id: crypto.randomUUID(), p_high_watermark_at: null, p_pages: 0, p_records_fetched: 0, p_records_persisted: 0, p_durable_total: 0 })).error).not.toBeNull();
-    expect((await adminClient.rpc("ebay_sync_lease_acquire", { p_account_id: accountId, p_resource_type: "orders", p_token: "x", p_ttl_seconds: 1 })).error).not.toBeNull();
+    expect((await adminClient.rpc("ebay_sync_complete", { p_account_id: accountId, p_resource_type: "orders", p_run_id: crypto.randomUUID(), p_lease_token: "x", p_high_watermark_at: null, p_overlap_start_at: null, p_pages: 0, p_records_fetched: 0, p_records_persisted: 0, p_durable_total: 0, p_latency_ms: 0 })).error).not.toBeNull();
+    expect((await adminClient.rpc("ebay_sync_lease_assert_and_extend", { p_account_id: accountId, p_resource_type: "orders", p_token: "x", p_ttl_seconds: 1 })).error).not.toBeNull();
     // Admin may READ sync state (RLS select policy) but cannot mutate it: a direct
     // update is RLS-filtered to zero rows, so the durable watermark is UNCHANGED.
     await adminClient.from("ebay_sync_state").update({ high_watermark_at: "2000-01-01T00:00:00Z" }).eq("ebay_account_id", accountId);

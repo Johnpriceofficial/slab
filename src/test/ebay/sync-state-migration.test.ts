@@ -4,6 +4,9 @@ import { join } from "node:path";
 
 const STATE = readFileSync(join(process.cwd(), "supabase/migrations/20260827000000_ebay_sync_state.sql"), "utf8");
 const LEASE = readFileSync(join(process.cwd(), "supabase/migrations/20260828000000_ebay_sync_lease.sql"), "utf8");
+const FENCE = readFileSync(join(process.cwd(), "supabase/migrations/20260829000000_ebay_sync_lease_fencing.sql"), "utf8");
+const ATOMIC = readFileSync(join(process.cwd(), "supabase/migrations/20260830000000_ebay_sync_atomic_complete.sql"), "utf8");
+const TOTALS = readFileSync(join(process.cwd(), "supabase/migrations/20260831000000_ebay_orders_persist_confirmed_totals.sql"), "utf8");
 
 describe("20260827 durable sync state", () => {
   it("creates a per-account/resource state table with a watermark + status, RLS enabled", () => {
@@ -34,5 +37,35 @@ describe("20260828 single-flight sync lease", () => {
     expect(LEASE).toMatch(/grant execute on function public\.ebay_sync_lease_acquire\([^)]*\) to service_role/);
     expect(LEASE).toMatch(/grant execute on function public\.ebay_sync_lease_release\([^)]*\) to service_role/);
     expect(LEASE).not.toMatch(/to authenticated;/);
+  });
+});
+
+describe("C.8.1 hardening migrations", () => {
+  it("20260829 adds lease assert-and-extend (fencing), service_role-only", () => {
+    expect(FENCE).toMatch(/create or replace function public\.ebay_sync_lease_assert_and_extend/);
+    expect(FENCE).toMatch(/pg_advisory_xact_lock/);
+    expect(FENCE).toMatch(/expires_at > v_now/);
+    expect(FENCE).toMatch(/grant execute on function public\.ebay_sync_lease_assert_and_extend\([^)]*\) to service_role/);
+    expect(FENCE).not.toMatch(/to authenticated;/);
+  });
+  it("20260830 stamps run_id on load, adds ATOMIC lease-fenced ebay_sync_complete, fail-by-run_id, drops the old commit", () => {
+    expect(ATOMIC).toMatch(/drop function if exists public\.ebay_sync_state_commit/);
+    expect(ATOMIC).toMatch(/run_id = gen_random_uuid\(\)/);
+    expect(ATOMIC).toMatch(/create or replace function public\.ebay_sync_complete/);
+    expect(ATOMIC).toMatch(/error_code', 'lease_lost'/);      // lease fence at completion
+    expect(ATOMIC).toMatch(/error_code', 'stale_runner'/);    // run-id fence
+    expect(ATOMIC).toMatch(/insert into public\.ebay_api_runs/); // success audit in the same txn
+    expect(ATOMIC).toMatch(/status = 'running' and run_id is not distinct from p_run_id/); // fail: active runner only
+    for (const fn of ["ebay_sync_complete", "ebay_sync_state_fail", "ebay_sync_state_load"]) {
+      expect(ATOMIC).toMatch(new RegExp(`grant execute on function public\\.${fn}\\([^)]*\\) to service_role`));
+    }
+    expect(ATOMIC).not.toMatch(/to authenticated;/);
+  });
+  it("20260831 makes ebay_orders_persist return CONFIRMED durable totals from the private tables", () => {
+    expect(TOTALS).toMatch(/create or replace function public\.ebay_orders_persist/);
+    expect(TOTALS).toMatch(/confirmed_order_total/);
+    expect(TOTALS).toMatch(/confirmed_line_total/);
+    expect(TOTALS).toMatch(/count\(\*\) into v_confirmed_orders from private\.ebay_orders where ebay_account_id = p_account_id/);
+    expect(TOTALS).toMatch(/grant execute on function public\.ebay_orders_persist\([^)]*\) to service_role/);
   });
 });

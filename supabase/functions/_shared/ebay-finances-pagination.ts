@@ -19,7 +19,10 @@ export type RawTransaction = Record<string, unknown>;
 
 /** Strict transaction contract: non-empty transactionId; amount (when present) a
  *  plain object; date/status/type (when present) strings — unknown enum values are
- *  preserved as-is, never rejected or reinterpreted. */
+ *  preserved as-is, never rejected or reinterpreted. The canonical form covers ALL
+ *  persisted + decision-relevant fields (id, order id, type/status/date, amount,
+ *  fee-basis, booking entry, payout/reference) so two different transactions can
+ *  never be silently treated as identical. */
 export function validateTransaction(raw: unknown): ItemValidation<RawTransaction> {
   if (!isObj(raw)) return { ok: false };
   const id = raw.transactionId;
@@ -28,8 +31,19 @@ export function validateTransaction(raw: unknown): ItemValidation<RawTransaction
   for (const k of ["transactionDate", "transactionStatus", "transactionType"] as const) {
     if (raw[k] !== undefined && typeof raw[k] !== "string") return { ok: false };
   }
-  const amount = isObj(raw.amount) ? { value: str(raw.amount.value), currency: str(raw.amount.currency) } : null;
-  const canonical = canon({ id, date: str(raw.transactionDate), status: str(raw.transactionStatus), type: str(raw.transactionType), amount });
+  const canonical = canon({
+    id,
+    orderId: raw.orderId ?? (isObj(raw.references) ? raw.references : null),
+    type: raw.transactionType ?? null,
+    status: raw.transactionStatus ?? null,
+    date: raw.transactionDate ?? null,
+    amount: raw.amount ?? null,
+    feeBasis: raw.totalFeeBasisAmount ?? null,
+    bookingEntry: raw.bookingEntry ?? null,
+    payoutId: raw.payoutId ?? null,
+    references: raw.references ?? null,
+    feeType: raw.feeType ?? null,
+  });
   return { ok: true, id, item: raw, canonical };
 }
 

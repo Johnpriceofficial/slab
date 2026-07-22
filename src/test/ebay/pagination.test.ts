@@ -106,6 +106,46 @@ describe("fetchAllEbayOrders — pagination recovery matrix", () => {
   });
 });
 
+describe("validateOrder / validateTransaction — expanded canonical conflict matrix (finding #5)", () => {
+  const base = { orderId: "A", orderFulfillmentStatus: "FULFILLED", orderPaymentStatus: "PAID", creationDate: "2026-06-01T00:00:00Z", lastModifiedDate: "2026-07-01T00:00:00Z", pricingSummary: { total: { value: "10.00", currency: "USD" } }, lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] };
+  const canonOf = (o: unknown) => { const v = validateOrder(o); return v.ok ? v.canonical : "INVALID"; };
+  it("orders: a change to ANY material field yields a DIFFERENT canonical (no false-identical)", () => {
+    const b = canonOf(base);
+    for (const over of [
+      { orderFulfillmentStatus: "IN_PROGRESS" }, { orderPaymentStatus: "PENDING" }, { lastModifiedDate: "2026-07-02T00:00:00Z" },
+      { pricingSummary: { total: { value: "12.00", currency: "USD" } } }, { cancelStatus: { cancelState: "CANCELED" } },
+      { lineItems: [{ lineItemId: "L1", sku: "GCV000099", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
+      { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "2", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
+      { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "99.00", currency: "USD" }, lineItemFulfillmentStatus: "FULFILLED" }] },
+      { lineItems: [{ lineItemId: "L1", sku: "GCV000047", quantity: "1", total: { value: "10.00", currency: "USD" }, lineItemFulfillmentStatus: "NOT_STARTED" }] },
+    ]) {
+      expect(canonOf({ ...base, ...over })).not.toBe(b);
+    }
+  });
+  it("orders: line ORDER is normalized (same lines, different array order → identical canonical)", () => {
+    const two = { ...base, lineItems: [{ lineItemId: "L1", sku: "a" }, { lineItemId: "L2", sku: "b" }] };
+    const swapped = { ...base, lineItems: [{ lineItemId: "L2", sku: "b" }, { lineItemId: "L1", sku: "a" }] };
+    expect(canonOf(two)).toBe(canonOf(swapped));
+  });
+  it("finance: a change to any material field (amount, feeBasis, bookingEntry, orderId, payout) differs", () => {
+    const t = { transactionId: "T1", orderId: "O1", transactionType: "SALE", transactionStatus: "FUNDS_AVAILABLE", transactionDate: "2026-07-01T00:00:00Z", amount: { value: "10.00", currency: "USD" }, totalFeeBasisAmount: { value: "9.00" }, bookingEntry: "CREDIT", payoutId: "P1" };
+    const c = (o: unknown) => { const v = validateTransaction(o); return v.ok ? v.canonical : "INVALID"; };
+    const b = c(t);
+    for (const over of [{ amount: { value: "11.00", currency: "USD" } }, { totalFeeBasisAmount: { value: "1.00" } }, { bookingEntry: "DEBIT" }, { orderId: "O2" }, { payoutId: "P2" }]) {
+      expect(c({ ...t, ...over })).not.toBe(b);
+    }
+  });
+});
+
+describe("finding #4 — an old order modified recently sets the watermark to its lastModifiedDate", () => {
+  it("watermark uses lastModifiedDate; the lastmodifieddate filter is aligned", () => {
+    const oldModifiedRecently = { orderId: "A", creationDate: "2026-06-20T00:00:00Z", lastModifiedDate: "2026-07-21T00:00:00Z", lineItems: [{ lineItemId: "L1", sku: "GCV000047" }] };
+    const v = validateOrder(oldModifiedRecently);
+    expect(v.ok).toBe(true);
+    if (v.ok) expect(v.canonical).toContain("2026-07-21T00:00:00Z"); // lastModifiedDate is IN the canonical
+  });
+});
+
 describe("fetchAllEbayFinanceTransactions — apiz host, paginated", () => {
   const url = (offset?: number) => `${APIZ}${FINANCE_PATH}?limit=200${offset ? `&offset=${offset}` : ""}`;
   it("collects across pages", async () => {

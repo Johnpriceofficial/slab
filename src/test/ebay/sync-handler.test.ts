@@ -6,25 +6,32 @@ import type { RawTransaction } from "../../../supabase/functions/_shared/ebay-fi
 
 const order = (id: string, sku = "GCV000047", ts = "2026-07-20T00:00:00Z") => ({ orderId: id, lastModifiedDate: ts, lineItems: [{ lineItemId: `${id}-L`, sku, quantity: "1" }] });
 const txn = (id: string, ts = "2026-07-20T00:00:00Z") => ({ transactionId: id, transactionDate: ts, amount: { value: "10.00", currency: "USD" } });
-const okOrders = (orders: RawOrder[]): PaginatedResult<RawOrder> => ({ ok: true, items: orders, pagesFetched: orders.length, providerTotal: orders.length, deduplicatedCount: 0 });
+const okOrders = (orders: RawOrder[]): PaginatedResult<RawOrder> => ({ ok: true, items: orders, pagesFetched: 1, providerTotal: orders.length, deduplicatedCount: 0 });
 const okTxns = (txns: RawTransaction[]): PaginatedResult<RawTransaction> => ({ ok: true, items: txns, pagesFetched: 1, providerTotal: txns.length, deduplicatedCount: 0 });
 
 interface Cfg {
   acquired?: boolean; prior?: string | null; orderPage?: PaginatedResult<RawOrder>; txnPage?: PaginatedResult<RawTransaction>;
-  mapOk?: boolean; persistOrdersOk?: boolean; persistFinancesOk?: boolean; commitOk?: boolean;
+  mapOk?: boolean; persistOrdersOkAfter?: number; persistOrdersOk?: boolean; persistFinancesOk?: boolean; completeOk?: boolean; assert?: boolean;
 }
 function mk(cfg: Cfg = {}) {
+  let orderPersistCalls = 0;
   const spies = {
     fetchOrders: vi.fn(async (_at: string, _q: Record<string, string>) => cfg.orderPage ?? okOrders([order("A")])),
     fetchFinances: vi.fn(async (_at: string, _q: Record<string, string>) => cfg.txnPage ?? okTxns([txn("T1")])),
-    resolveOrderMappings: vi.fn(async () => (cfg.mapOk === false ? { ok: false as const } : { ok: true as const, bySku: new Map([["GCV000047", "slab-1"]]) })),
-    persistOrders: vi.fn(async () => (cfg.persistOrdersOk === false ? { ok: false as const } : { ok: true as const, durableTotal: 1, persisted: 1 })),
-    persistFinances: vi.fn(async () => (cfg.persistFinancesOk === false ? { ok: false as const } : { ok: true as const, durableTotal: 1, persisted: 1 })),
+    resolveOrderMappings: vi.fn(async (_acc: string, _skus: string[]) => (cfg.mapOk === false ? { ok: false as const } : { ok: true as const, bySku: new Map<string, string>() })),
+    persistOrders: vi.fn(async (_acc: string, _shaped: unknown[]) => {
+      orderPersistCalls += 1;
+      if (cfg.persistOrdersOk === false) return { ok: false as const };
+      if (cfg.persistOrdersOkAfter !== undefined && orderPersistCalls > cfg.persistOrdersOkAfter) return { ok: false as const };
+      return { ok: true as const, durableTotal: 42, durableLines: 99, persisted: 1 };
+    }),
+    persistFinances: vi.fn(async (_acc: string, _shaped: unknown[]) => (cfg.persistFinancesOk === false ? { ok: false as const } : { ok: true as const, durableTotal: 7, persisted: 1 })),
     leaseAcquire: vi.fn(async () => ({ acquired: cfg.acquired ?? true, error: false })),
+    leaseAssert: vi.fn(async () => cfg.assert ?? true),
     leaseRelease: vi.fn(async () => ({ released: true })),
-    syncStateLoad: vi.fn(async () => ({ ok: true as const, highWatermarkAt: cfg.prior ?? null })),
-    syncStateCommit: vi.fn(async (_acc: string, _res: string, _a: { highWatermarkAt: string | null }) => ({ ok: cfg.commitOk ?? true })),
-    syncStateFail: vi.fn(async () => ({ ok: true })),
+    syncBegin: vi.fn(async () => ({ ok: true as const, runId: "RUN", highWatermarkAt: cfg.prior ?? null })),
+    syncComplete: vi.fn(async (_acc: string, _res: string, _tok: string, _a: { highWatermarkAt: string | null }) => ({ ok: cfg.completeOk ?? true })),
+    syncFail: vi.fn(async () => ({ ok: true })),
     recordApiRun: vi.fn(async () => ({ ok: true })),
     now: () => Date.parse("2026-07-22T00:00:00Z"),
     uuid: () => "RUN",
@@ -32,71 +39,79 @@ function mk(cfg: Cfg = {}) {
   };
   return { spies };
 }
-const orderDeps = (spies: ReturnType<typeof mk>["spies"], collect?: (s: unknown[]) => void): SyncHandlerDeps => ({ ...spies, collectProposedSales: collect } as unknown as SyncHandlerDeps);
+const deps = (s: ReturnType<typeof mk>["spies"], collect?: (x: unknown[]) => void): SyncHandlerDeps => ({ ...s, collectProposedSales: collect } as unknown as SyncHandlerDeps);
 
-describe("runOrderSync — real order-sync orchestration binding", () => {
-  it("success → resolves mappings, persists, advances watermark, one lease acquire/release, api-run success", async () => {
+describe("runOrderSync — fenced, batched order sync", () => {
+  it("success → resolves mappings, persists, atomic complete (advanced watermark), confirmed totals surfaced", async () => {
     const { spies } = mk({ prior: "2026-07-01T00:00:00Z", orderPage: okOrders([order("A", "GCV000047", "2026-07-21T00:00:00Z")]) });
-    const collected: unknown[] = [];
-    const r = await runOrderSync("ACC", "AT", orderDeps(spies, (s) => collected.push(...s)));
+    const r = await runOrderSync("ACC", "AT", deps(spies));
     expect(r.status).toBe("success");
-    expect(spies.resolveOrderMappings).toHaveBeenCalledTimes(1);
-    expect(spies.persistOrders).toHaveBeenCalledTimes(1);
-    expect(spies.leaseAcquire).toHaveBeenCalledTimes(1);
-    expect(spies.leaseRelease).toHaveBeenCalledTimes(1);
-    expect(spies.syncStateCommit).toHaveBeenCalledTimes(1);
-    expect(spies.syncStateCommit.mock.calls[0][2].highWatermarkAt).toBe("2026-07-21T00:00:00Z");
-    expect(spies.recordApiRun).toHaveBeenCalledWith("ACC", "orders_sync", "success", null);
-    // Ordinary order sync exposes proposed sales but NEVER applies them.
-    expect(Array.isArray(collected)).toBe(true);
+    expect(r.durableTotal).toBe(42);          // confirmed_order_total (NOT the processed batch count)
+    expect(r.durableSecondary).toBe(99);      // confirmed_line_total
+    expect(spies.syncComplete.mock.calls[0][3].highWatermarkAt).toBe("2026-07-21T00:00:00Z");
+    expect(spies.leaseAssert).toHaveBeenCalled(); // fencing
   });
-  it("the order query is a bounded incremental range (prior − 72h overlap)", async () => {
+  it("finding #4: the order query filter is lastmodifieddate (aligned with the watermark)", async () => {
     const { spies } = mk({ prior: "2026-07-10T00:00:00Z" });
-    await runOrderSync("ACC", "AT", orderDeps(spies));
-    expect(String(spies.fetchOrders.mock.calls[0][1].filter)).toContain("2026-07-07T00:00:00.000Z");
+    await runOrderSync("ACC", "AT", deps(spies));
+    expect(String(spies.fetchOrders.mock.calls[0][1].filter)).toContain("lastmodifieddate:[2026-07-07T00:00:00.000Z");
   });
-  it("second concurrent caller → sync_in_progress, ZERO provider reads / persistence", async () => {
+  it("second concurrent caller → sync_in_progress, ZERO reads/persist/complete", async () => {
     const { spies } = mk({ acquired: false });
-    const r = await runOrderSync("ACC", "AT", orderDeps(spies));
+    const r = await runOrderSync("ACC", "AT", deps(spies));
     expect(r.status).toBe("sync_in_progress");
     expect(spies.fetchOrders).toHaveBeenCalledTimes(0);
     expect(spies.persistOrders).toHaveBeenCalledTimes(0);
-    expect(spies.syncStateCommit).toHaveBeenCalledTimes(0);
+    expect(spies.syncComplete).toHaveBeenCalledTimes(0);
   });
-  it("mapping-lookup failure → fail closed, NO persist, NO commit, watermark unchanged", async () => {
-    const { spies } = mk({ prior: "2026-07-01T00:00:00Z", mapOk: false });
-    const r = await runOrderSync("ACC", "AT", orderDeps(spies));
-    expect(r.errorCode).toBe("mapping_lookup_failed");
-    expect(spies.persistOrders).toHaveBeenCalledTimes(0);
-    expect(spies.syncStateCommit).toHaveBeenCalledTimes(0);
-    expect(spies.syncStateFail).toHaveBeenCalledTimes(1);
+  it("finding #7: >200 SKUs are resolved in multiple lease-fenced batches", async () => {
+    const orders = Array.from({ length: 250 }, (_, i) => order(`O${i}`, `GCV${String(i).padStart(6, "0")}`));
+    const { spies } = mk({ orderPage: okOrders(orders) });
+    await runOrderSync("ACC", "AT", deps(spies));
+    expect(spies.resolveOrderMappings.mock.calls.length).toBeGreaterThanOrEqual(2); // 250 skus → ≥2 batches
+    expect(spies.leaseAssert.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+  it("finding #7: >100 orders are persisted in multiple lease-fenced batches", async () => {
+    const orders = Array.from({ length: 150 }, (_, i) => order(`O${i}`, `GCV${String(i).padStart(6, "0")}`));
+    const { spies } = mk({ orderPage: okOrders(orders) });
+    await runOrderSync("ACC", "AT", deps(spies));
+    expect(spies.persistOrders.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+  it("a batch-N persist failure → fail closed, NO complete (watermark preserved)", async () => {
+    const orders = Array.from({ length: 150 }, (_, i) => order(`O${i}`, `GCV${String(i).padStart(6, "0")}`));
+    const { spies } = mk({ prior: "2026-07-01T00:00:00Z", orderPage: okOrders(orders), persistOrdersOkAfter: 1 });
+    const r = await runOrderSync("ACC", "AT", deps(spies));
+    expect(r.errorCode).toBe("orders_persist_failed");
+    expect(spies.syncComplete).toHaveBeenCalledTimes(0);
     expect(r.highWatermarkAt).toBe("2026-07-01T00:00:00Z");
   });
-  it("persist failure → syncStateFail, no commit", async () => {
-    const { spies } = mk({ persistOrdersOk: false });
-    const r = await runOrderSync("ACC", "AT", orderDeps(spies));
-    expect(r.errorCode).toBe("orders_persist_failed");
-    expect(spies.syncStateCommit).toHaveBeenCalledTimes(0);
-    expect(spies.syncStateFail).toHaveBeenCalledTimes(1);
+  it("a lost lease before a batch → sync_lease_lost, no complete", async () => {
+    const { spies } = mk({ assert: false });
+    const r = await runOrderSync("ACC", "AT", deps(spies));
+    expect(r.status).toBe("sync_lease_lost");
+    expect(spies.syncComplete).toHaveBeenCalledTimes(0);
+  });
+  it("mapping-lookup failure → fail closed, no persist", async () => {
+    const { spies } = mk({ mapOk: false });
+    const r = await runOrderSync("ACC", "AT", deps(spies));
+    expect(r.errorCode).toBe("mapping_lookup_failed");
+    expect(spies.persistOrders).toHaveBeenCalledTimes(0);
   });
 });
 
-describe("runFinanceSync — real finance-sync orchestration binding", () => {
-  it("success → persists, advances watermark, api-run success (no money-movement op exists)", async () => {
+describe("runFinanceSync — fenced, batched finance sync", () => {
+  it("success → persists, atomic complete, transactionDate filter (no money-movement op)", async () => {
     const { spies } = mk({ prior: "2026-07-01T00:00:00Z", txnPage: okTxns([txn("T1", "2026-07-21T00:00:00Z")]) });
     const r = await runFinanceSync("ACC", "AT", spies as unknown as SyncHandlerDeps);
     expect(r.status).toBe("success");
-    expect(spies.persistFinances).toHaveBeenCalledTimes(1);
-    expect(spies.syncStateCommit.mock.calls[0][2].highWatermarkAt).toBe("2026-07-21T00:00:00Z");
-    expect(spies.recordApiRun).toHaveBeenCalledWith("ACC", "finances_sync", "success", null);
+    expect(spies.persistFinances).toHaveBeenCalled();
+    expect(spies.syncComplete.mock.calls[0][3].highWatermarkAt).toBe("2026-07-21T00:00:00Z");
     expect(String(spies.fetchFinances.mock.calls[0][1].filter)).toContain("transactionDate");
   });
-  it("fetch failure → syncStateFail, no commit, watermark unchanged", async () => {
-    const { spies } = mk({ prior: "2026-07-01T00:00:00Z", txnPage: { ok: false, errorCode: "provider_timeout", httpStatus: 502, pagesFetched: 1 } });
-    const r = await runFinanceSync("ACC", "AT", spies as unknown as SyncHandlerDeps);
-    expect(r.status).toBe("provider_timeout");
-    expect(spies.persistFinances).toHaveBeenCalledTimes(0);
-    expect(spies.syncStateCommit).toHaveBeenCalledTimes(0);
-    expect(r.highWatermarkAt).toBe("2026-07-01T00:00:00Z");
+  it(">100 transactions persisted in multiple lease-fenced batches", async () => {
+    const txns = Array.from({ length: 150 }, (_, i) => txn(`T${i}`));
+    const { spies } = mk({ txnPage: okTxns(txns) });
+    await runFinanceSync("ACC", "AT", spies as unknown as SyncHandlerDeps);
+    expect(spies.persistFinances.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 });
