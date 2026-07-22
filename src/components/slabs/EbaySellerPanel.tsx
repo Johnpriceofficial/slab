@@ -50,7 +50,9 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     fulfillmentPolicyId: "",
     paymentPolicyId: "",
     returnPolicyId: "",
-    condition: "GRADED",
+    // No default condition: it must be an eBay-supported value the operator
+    // selects from the loaded condition policy, so Publish stays blocked until set.
+    condition: "",
   });
   // Any listing-input change invalidates a prior preparation — the fetched
   // requirements no longer match the current inputs, so Publish must re-block.
@@ -148,13 +150,15 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
     setActiveOperation("prepare_listing");
     const result = await ebaySellerOperation("ebay-list-item", listingPayload);
     setActiveOperation(null);
-    // Ready ONLY on the confirmation_required requirements. An error clears
-    // readiness and keeps Publish disabled with the exact failed resource.
-    if (result.status === "confirmation_required") {
+    // Ready ONLY when the server reports every required resource loaded
+    // (status "prepared"). A "partial" (any provider fetch failed) clears
+    // readiness and names the failed resource; Publish stays disabled.
+    if (result.status === "prepared") {
       setPrepared({ ok: true, failedResource: null, category_aspects: result.category_aspects, condition_policies: result.condition_policies });
     } else {
-      setPrepared({ ok: false, failedResource: result.error_code ?? result.message ?? "requirements_unavailable" });
-      toast.error(result.message ?? result.error_code ?? "eBay listing requirements are unavailable.");
+      const failed = result.resources ? (Object.entries(result.resources).find(([, r]) => (r as { status?: string })?.status === "error")?.[0] ?? null) : null;
+      setPrepared({ ok: false, failedResource: failed ?? result.error_code ?? result.message ?? "requirements_unavailable" });
+      toast.error(failed ? `eBay requirement failed to load: ${failed.replace(/_/g, " ")}` : (result.message ?? result.error_code ?? "eBay listing requirements are unavailable."));
     }
   };
   const publish = async () => {
@@ -217,7 +221,8 @@ export function EbaySellerPanel({ slab }: { slab: Slab }) {
         <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-account-sync")}>{activeOperation === "account_sync" ? "Checking…" : "Verify privileges"}</Button>
         <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-order-sync")}>{activeOperation === "order_sync" ? "Syncing orders…" : "Sync orders"}</Button>
         <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => sync("ebay-finances-sync")}>{activeOperation === "finances_sync" ? "Syncing fees…" : "Sync fees"}</Button></div>
-      <p>Privileges: {activeOperation === "account_sync" ? "Checking…" : connected.privilege_status === "verified" ? "Verified" : "Not verified"}{connected.connected_at ? ` · Connected ${connected.connected_at.slice(0, 16).replace("T", " ")}` : ""}{cursorFor("account_discovery")?.last_synced_at ? ` · Account discovery ${cursorFor("account_discovery")!.last_synced_at!.slice(0, 16).replace("T", " ")}${cursorFor("account_discovery")?.cursor_value ? ` (${cursorFor("account_discovery")!.cursor_value} records)` : ""}` : ""}</p>
+      <p>Privileges: {activeOperation === "account_sync" ? "Checking…" : connected.privilege_status === "verified" ? "Verified" : "Not verified"}{connected.connected_at ? ` · Connected ${connected.connected_at.slice(0, 16).replace("T", " ")}` : ""}</p>
+      <p className="text-xs text-muted-foreground">Discovery — last attempt: {cursorFor("account_discovery_attempt")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"} · last complete: {cursorFor("account_discovery_complete")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"}{cursorFor("account_discovery_complete")?.cursor_value ? ` (${cursorFor("account_discovery_complete")!.cursor_value} records)` : ""}</p>
       <p className="text-xs text-muted-foreground">Orders last synced: {cursorFor("orders")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"} · Finances last synced: {cursorFor("finances")?.last_synced_at?.slice(0, 16).replace("T", " ") ?? "never"}</p>
       {syncSummary && (
         <div className="rounded-md border p-3 text-xs">

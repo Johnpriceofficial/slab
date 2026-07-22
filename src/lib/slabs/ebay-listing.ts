@@ -9,6 +9,7 @@ export interface ListingSlab {
   set_name?: string | null;
   card_number?: string | null;
   year?: number | null;
+  language?: string | null;
   variation?: string | null;
   rarity?: string | null;
   grader?: string | null;
@@ -20,33 +21,52 @@ export interface ListingSlab {
 
 const clean = (s: unknown): string => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
 
+// Word-boundary phrase containment (case-insensitive), padded so "Holo" is found
+// inside "Rare Holo" but not inside "Holograph".
+const includesPhrase = (text: string, phrase: string): boolean =>
+  !!phrase && ` ${text.toLowerCase()} `.includes(` ${phrase.toLowerCase()} `);
+
 // NOTE: the SKU is intentionally NOT generated here — it is the single canonical
 // cross-marketplace value from marketplace-sku.ts (canonicalMarketplaceSku).
 
 /**
- * An optimized eBay title within eBay's 80-char cap. The card name and the
- * grade (grader + designation + grade) are always kept; lower-value tokens are
- * dropped in order (rarity → variation → card #→ year → set) until it fits, then
- * hard-truncated as a final guard.
+ * An optimized eBay title within eBay's 80-char cap. Language is included when
+ * known; overlapping rarity/variation phrases are deduplicated (no "Holo Rare
+ * Holo", no doubled "Super Rare"). The card name and the grade (grader +
+ * designation + grade) are always kept; lower-value tokens drop in order
+ * (rarity → variation → # → year → set → language) until it fits, then a final
+ * hard truncate guards the cap.
  */
 export function ebayListingTitle(slab: ListingSlab, max = 80): string {
   const cardName = clean(slab.card_name) || "Graded Card";
   const grade = [clean(slab.grader), clean(slab.grade_label), clean(slab.grade)].filter(Boolean).join(" ");
   const year = typeof slab.year === "number" ? String(slab.year) : "";
+  const language = clean(slab.language);
   const set = clean(slab.set_name);
   const num = clean(slab.card_number) ? `#${clean(slab.card_number)}` : "";
-  const variation = clean(slab.variation);
-  const rarity = clean(slab.rarity);
+
+  // Deduplicate variation vs rarity: when one phrase contains the other, keep the
+  // more specific (longer) one and drop the redundant one.
+  let variation = clean(slab.variation);
+  let rarity = clean(slab.rarity);
+  if (variation && rarity) {
+    if (includesPhrase(variation, rarity)) rarity = "";
+    else if (includesPhrase(rarity, variation)) variation = "";
+  }
 
   const build = (skip: ReadonlySet<string>): string => {
-    const segs = ([["year", year], ["set", set], ["name", cardName], ["num", num], ["var", variation], ["rarity", rarity]] as const)
+    const lead = ([["year", year], ["lang", language], ["set", set], ["name", cardName], ["num", num]] as const)
       .filter(([k, v]) => v && !skip.has(k))
-      .map(([, v]) => v);
-    if (grade) segs.push(grade);
-    return segs.join(" ").replace(/\s+/g, " ").trim();
+      .map(([, v]) => v)
+      .join(" ").replace(/\s+/g, " ").trim();
+    let out = lead;
+    // Only append variation/rarity if not already represented in the title.
+    if (variation && !skip.has("var") && !includesPhrase(out, variation)) out = `${out} ${variation}`.trim();
+    if (rarity && !skip.has("rarity") && !includesPhrase(out, rarity)) out = `${out} ${rarity}`.trim();
+    return (grade ? `${out} ${grade}` : out).replace(/\s+/g, " ").trim();
   };
 
-  const dropOrder = ["rarity", "var", "num", "year", "set"]; // name + grade never dropped
+  const dropOrder = ["rarity", "var", "num", "year", "set", "lang"]; // name + grade never dropped
   const skip = new Set<string>();
   let title = build(skip);
   for (const key of dropOrder) {
