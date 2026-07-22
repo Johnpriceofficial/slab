@@ -47,7 +47,7 @@ export function compareInventoryItem(item: NormalizedInventoryItem, i: IntendedL
     && item.conditionDescription.trim() === i.conditionDescription.trim()
     && item.title.trim() === i.title.trim()
     && item.description.trim() === i.description.trim()
-    && (item.quantity === null || item.quantity === i.availableQuantity)
+    && item.quantity === i.availableQuantity // a missing (null) provider quantity is NOT an exact match
     && canon(item.aspects) === canon(i.aspects)
     && canon(item.conditionDescriptors) === canon([...i.conditionDescriptors].sort());
   const imageEvidence: ImageEvidence = item.imageCount !== i.imageCount ? "mismatch" : "unverifiable";
@@ -65,11 +65,14 @@ export async function planPublish(ops: PublishOps, intended: IntendedListing, _e
 
   const offerDec = resolveExistingOffers(disc.offers, intended);
   if (offerDec.action === "duplicate_offer_ambiguity") return { action: "block", errorCode: "duplicate_offer_ambiguity" };
+  // An offer exists for the SKU but is incompatible (wrong marketplace/format):
+  // never create a second offer alongside it — require operator review.
+  if (offerDec.action === "incompatible_offer_exists") return { action: "block", errorCode: "incompatible_offer_exists" };
   if (offerDec.action === "listing_on_hold") return { action: "block", errorCode: "listing_on_hold", offerId: offerDec.offerId };
   if (offerDec.action === "existing_offer_inputs_changed") return { action: "block", errorCode: "existing_offer_inputs_changed", offerId: offerDec.offerId };
   if (offerDec.action === "existing_listing_inputs_changed") return { action: "block", errorCode: "existing_listing_inputs_changed", offerId: offerDec.offerId, listingId: offerDec.listingId };
 
-  // Zero COMPATIBLE offers after complete valid discovery → create our own.
+  // PROVEN zero offers for the SKU after complete valid discovery → create our own.
   if (offerDec.action === "create") return { action: "put_create_publish" };
 
   // adopt / reconcile_published → the inventory item MUST also be verified.
@@ -79,10 +82,11 @@ export async function planPublish(ops: PublishOps, intended: IntendedListing, _e
   const cmp = compareInventoryItem(inv.item, intended);
 
   if (offerDec.action === "reconcile_published") {
-    // Already live: we only repair the LOCAL mapping (no provider mutation). A
-    // content mismatch means the live listing differs from intent → do not touch.
-    return cmp.match ? { action: "reconcile_local_only", offerId: offerDec.offerId, listingId: offerDec.listingId }
-      : { action: "block", errorCode: "existing_listing_inputs_changed", offerId: offerDec.offerId, listingId: offerDec.listingId };
+    // Already live: only repair the LOCAL mapping (no provider mutation), and only
+    // when the item content matches AND the image evidence is not a mismatch.
+    if (!cmp.match || cmp.imageEvidence === "mismatch") return { action: "block", errorCode: "existing_listing_inputs_changed", offerId: offerDec.offerId, listingId: offerDec.listingId };
+    if (cmp.imageEvidence !== "verified") return { action: "block", errorCode: "existing_offer_requires_review", offerId: offerDec.offerId, listingId: offerDec.listingId };
+    return { action: "reconcile_local_only", offerId: offerDec.offerId, listingId: offerDec.listingId };
   }
 
   // adopt an UNPUBLISHED offer, which we would then PUBLISH — require an exact

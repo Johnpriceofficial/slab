@@ -177,10 +177,12 @@ export interface IntendedOffer {
   price: number;
   currency: string;
   availableQuantity: number;
+  listingDescription: string;
 }
 
 export type OfferResolution =
-  | { action: "create" }                                            // no COMPATIBLE offer exists
+  | { action: "create" }                                            // PROVEN zero offers for the SKU
+  | { action: "incompatible_offer_exists"; offerIds: string[] }     // offer(s) exist for the SKU but none compatible
   | { action: "adopt"; offerId: string }                            // one compatible+matching, unpublished
   | { action: "existing_offer_inputs_changed"; offerId: string }    // compatible unpublished, inputs differ
   | { action: "reconcile_published"; offerId: string; listingId: string } // compatible+matching, published
@@ -188,7 +190,8 @@ export type OfferResolution =
   | { action: "listing_on_hold"; offerId: string }                  // compatible but on hold
   | { action: "duplicate_offer_ambiguity"; offerIds: string[] };    // >1 compatible
 
-// Do the existing offer's settings MATCH what we intend to publish?
+// Do the existing offer's settings MATCH what we intend to publish? Includes the
+// offer's listing description (an outdated description is NOT an exact match).
 function offerMatchesIntent(o: OfferSummary, i: IntendedOffer): boolean {
   return o.categoryId === i.categoryId
     && o.merchantLocationKey === i.merchantLocationKey
@@ -197,18 +200,23 @@ function offerMatchesIntent(o: OfferSummary, i: IntendedOffer): boolean {
     && o.returnPolicyId === i.returnPolicyId
     && o.price === i.price.toFixed(2)
     && o.currency === i.currency
-    && o.availableQuantity === i.availableQuantity;
+    && o.availableQuantity === i.availableQuantity
+    && o.listingDescription.trim() === i.listingDescription.trim();
 }
 
 /**
  * Decide what to do with the offers eBay already has. Compatibility (same SKU +
  * marketplace + FIXED_PRICE) gates adoption; then a full content comparison
  * prevents publishing/adopting a STALE offer whose settings differ from intent.
- * Pure.
+ * An offer that exists for the SKU but is INCOMPATIBLE (wrong marketplace/format)
+ * BLOCKS creation — a new offer must never be created alongside it. Pure.
  */
 export function resolveExistingOffers(offers: OfferSummary[], intended: IntendedOffer): OfferResolution {
-  const compatible = offers.filter((o) => o.sku === intended.sku && o.marketplaceId === intended.marketplaceId && o.format === "FIXED_PRICE");
-  if (compatible.length === 0) return { action: "create" };
+  const forSku = offers.filter((o) => o.sku === intended.sku);
+  const compatible = forSku.filter((o) => o.marketplaceId === intended.marketplaceId && o.format === "FIXED_PRICE");
+  if (compatible.length === 0) {
+    return forSku.length > 0 ? { action: "incompatible_offer_exists", offerIds: forSku.map((o) => o.offerId) } : { action: "create" };
+  }
   if (compatible.length > 1) return { action: "duplicate_offer_ambiguity", offerIds: compatible.map((o) => o.offerId) };
   const one = compatible[0];
   if (one.listingOnHold) return { action: "listing_on_hold", offerId: one.offerId };

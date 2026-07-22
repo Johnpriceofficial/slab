@@ -9,6 +9,7 @@ const SKU = "GCV000047";
 const intended: IntendedListing = {
   sku: SKU, marketplaceId: "EBAY_US", categoryId: "183454", merchantLocationKey: "LOC-A",
   fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: 199.99, currency: "USD", availableQuantity: 1,
+  listingDescription: "Graded card.",
   title: "2016 XY Evolutions Charizard 11 PSA Gem Mt 10", description: "Graded card.",
   condition: "LIKE_NEW", conditionDescription: "Graded", conditionDescriptors: [], aspects: { Grade: "10" }, imageCount: 2, fingerprint: "fp",
 };
@@ -51,6 +52,14 @@ describe("planPublish — never plans a mutation after a failed read", () => {
     expect(plan.action).toBe("block");
     if (plan.action === "block") expect(plan.errorCode).toBe("duplicate_offer_ambiguity");
   });
+  it("an INCOMPATIBLE same-SKU offer (wrong marketplace) → block incompatible_offer_exists (never creates a second offer)", async () => {
+    const plan = await planPublish(ops(okDisc([matchingOffer({ marketplaceId: "EBAY_GB" })])), intended, null);
+    expect(plan.action === "block" && plan.errorCode).toBe("incompatible_offer_exists");
+  });
+  it("a compatible offer with a STALE listing description → existing_offer_inputs_changed (description IS compared)", async () => {
+    const plan = await planPublish(ops(okDisc([matchingOffer({ listingDescription: "old text" })]), { ok: true, present: true, item: matchingItem() }), intended, null);
+    expect(plan.action === "block" && plan.errorCode).toBe("existing_offer_inputs_changed");
+  });
   it("an on-hold listing → block listing_on_hold", async () => {
     const plan = await planPublish(ops(okDisc([matchingOffer({ listingOnHold: true })])), intended, null);
     expect(plan.action === "block" && plan.errorCode).toBe("listing_on_hold");
@@ -74,13 +83,21 @@ describe("planPublish — requires the inventory item to be verified", () => {
     const plan = await planPublish(ops(okDisc([matchingOffer()]), { ok: true, present: true, item: matchingItem({ title: "different" }) }), intended, null);
     expect(plan.action === "block" && plan.errorCode).toBe("existing_offer_inputs_changed");
   });
-  it("published exact offer + item match → reconcile_local_only (no re-publish)", async () => {
+  it("published exact content but UNVERIFIABLE image identity → existing_offer_requires_review (never reconciled blindly)", async () => {
     const plan = await planPublish(ops(okDisc([matchingOffer({ listingId: "L9" })]), { ok: true, present: true, item: matchingItem() }), intended, null);
-    expect(plan).toEqual({ action: "reconcile_local_only", offerId: "O1", listingId: "L9" });
+    expect(plan.action === "block" && plan.errorCode).toBe("existing_offer_requires_review");
+  });
+  it("published offer, inventory IMAGE COUNT mismatch → existing_listing_inputs_changed", async () => {
+    const plan = await planPublish(ops(okDisc([matchingOffer({ listingId: "L9" })]), { ok: true, present: true, item: matchingItem({ imageCount: 1 }) }), intended, null);
+    expect(plan.action === "block" && plan.errorCode).toBe("existing_listing_inputs_changed");
   });
   it("published offer, inventory content changed → existing_listing_inputs_changed", async () => {
     const plan = await planPublish(ops(okDisc([matchingOffer({ listingId: "L9" })]), { ok: true, present: true, item: matchingItem({ condition: "USED" }) }), intended, null);
     expect(plan.action === "block" && plan.errorCode).toBe("existing_listing_inputs_changed");
+  });
+  it("a null provider quantity is NOT an exact match → existing_offer_inputs_changed", async () => {
+    const plan = await planPublish(ops(okDisc([matchingOffer()]), { ok: true, present: true, item: matchingItem({ quantity: null }) }), intended, null);
+    expect(plan.action === "block" && plan.errorCode).toBe("existing_offer_inputs_changed");
   });
 });
 
@@ -120,8 +137,15 @@ describe("fetchInventoryItemForSku", () => {
     expect(await runInv("abort")).toMatchObject({ ok: false, errorCode: "provider_timeout" });
     expect(await runInv("throw")).toMatchObject({ ok: false, errorCode: "inventory_item_lookup_failed" });
   });
-  it("malformed 2xx (bad types) → invalid_provider_response; bad apiOrigin → invalid_api_origin", async () => {
+  it("malformed 2xx → invalid_provider_response: bad image type, provider-SKU mismatch, negative quantity", async () => {
     expect(await runInv({ status: 200, body: { product: { imageUrls: "nope" } } })).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+    expect(await runInv({ status: 200, body: { sku: "GCV999999", product: {} } })).toMatchObject({ ok: false, errorCode: "invalid_provider_response" }); // wrong SKU echoed
+    expect(await runInv({ status: 200, body: { availability: { shipToLocationAvailability: { quantity: -1 } } } })).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
     expect(await runInv({ status: 200, body: {} }, "https://evil.example.com")).toMatchObject({ ok: false, errorCode: "invalid_api_origin" });
+  });
+  it("the module enforces its own timeoutMs (a slow fetch → provider_timeout)", async () => {
+    const slow: InventoryFetchImpl = () => new Promise((res) => setTimeout(() => res({ ok: true, status: 200, json: async () => ({}) }), 50));
+    const r = await fetchInventoryItemForSku({ fetchImpl: slow, apiOrigin: O, accessToken: "AT", sku: SKU, timeoutMs: 1 });
+    expect(r).toMatchObject({ ok: false, errorCode: "provider_timeout" });
   });
 });

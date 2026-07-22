@@ -13,7 +13,7 @@ describe("canonicalSkuFromInventoryNumber (server derivation matches the fronten
 });
 
 describe("resolveExistingOffers (full content-validated adoption)", () => {
-  const intended = { sku: "GCV000047", marketplaceId: "EBAY_US", categoryId: "183454", merchantLocationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: 199.99, currency: "USD", availableQuantity: 1 };
+  const intended = { sku: "GCV000047", marketplaceId: "EBAY_US", categoryId: "183454", merchantLocationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: 199.99, currency: "USD", availableQuantity: 1, listingDescription: "" };
   // A summary that fully MATCHES `intended`.
   const match = (over: Record<string, unknown> = {}) => ({ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: null, categoryId: "183454", merchantLocationKey: "LOC-A", fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1", price: "199.99", currency: "USD", availableQuantity: 1, listingDescription: "", listingOnHold: false, ...over });
 
@@ -21,10 +21,11 @@ describe("resolveExistingOffers (full content-validated adoption)", () => {
     const s = extractOfferSummaries({ offers: [{ offerId: "O1", sku: "GCV000047", marketplaceId: "EBAY_US", format: "FIXED_PRICE", categoryId: "183454", merchantLocationKey: "LOC-A", listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "199.99", currency: "USD" } }, availableQuantity: 1, listing: { listingId: "L1", listingOnHold: true } }] });
     expect(s[0]).toMatchObject({ offerId: "O1", fulfillmentPolicyId: "F1", price: "199.99", availableQuantity: 1, listingId: "L1", listingOnHold: true });
   });
-  it("creates when there is no COMPATIBLE offer (ignores wrong marketplace / auction)", () => {
+  it("creates ONLY on a proven-empty result; a wrong-marketplace/auction SAME-SKU offer → incompatible_offer_exists", () => {
     expect(resolveExistingOffers([], intended).action).toBe("create");
-    expect(resolveExistingOffers([match({ marketplaceId: "EBAY_GB" })], intended).action).toBe("create");
-    expect(resolveExistingOffers([match({ format: "AUCTION" })], intended).action).toBe("create");
+    expect(resolveExistingOffers([match({ sku: "OTHER" })], intended).action).toBe("create"); // offer for a different SKU is irrelevant
+    expect(resolveExistingOffers([match({ marketplaceId: "EBAY_GB" })], intended).action).toBe("incompatible_offer_exists");
+    expect(resolveExistingOffers([match({ format: "AUCTION" })], intended).action).toBe("incompatible_offer_exists");
   });
   it("adopts a single compatible offer whose settings MATCH intent", () => {
     expect(resolveExistingOffers([match()], intended)).toEqual({ action: "adopt", offerId: "O1" });

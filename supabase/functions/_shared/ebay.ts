@@ -802,7 +802,7 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     // PLAN. NO provider mutation occurs before an allowed mutation plan is returned.
     const intended = {
       sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId,
-      price: priceValue, currency, availableQuantity: quantity,
+      price: priceValue, currency, availableQuantity: quantity, listingDescription: description,
       title, description, condition, conditionDescription, conditionDescriptors: [] as string[], aspects, imageCount: imageUrls.length, fingerprint,
     };
     const plan = await planPublish({
