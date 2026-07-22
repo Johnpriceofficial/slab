@@ -67,11 +67,11 @@ describe("fetchAllOffersForSku — apiOrigin + fails closed", () => {
     expect(r).toMatchObject({ ok: false, errorCode: "provider_lookup_failed", httpStatus: 404 });
   });
   it("repeated next → pagination_loop", async () => {
-    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], next: first } } });
+    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 9, next: first } } });
     expect(r).toMatchObject({ ok: false, errorCode: "pagination_loop" });
   });
   it("page beyond the cap → pagination_limit_exceeded", async () => {
-    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } }, [p2]: { status: 200, body: { offers: [offer("B")], next: p3 } } }, 2);
+    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 9, next: p2 } }, [p2]: { status: 200, body: { offers: [offer("B")], total: 9, next: p3 } } }, 2);
     expect(r).toMatchObject({ ok: false, errorCode: "pagination_limit_exceeded" });
   });
   it("total greater than collected → incomplete_provider_result", async () => {
@@ -79,8 +79,8 @@ describe("fetchAllOffersForSku — apiOrigin + fails closed", () => {
     expect(r).toMatchObject({ ok: false, errorCode: "incomplete_provider_result" });
   });
   it("page-two network failure / provider error → provider_lookup_failed", async () => {
-    expect((await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } }, [p2]: "throw" })).r).toMatchObject({ ok: false, errorCode: "provider_lookup_failed" });
-    expect((await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } }, [p2]: { status: 500, body: {} } })).r).toMatchObject({ ok: false, errorCode: "provider_lookup_failed", httpStatus: 500 });
+    expect((await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 9, next: p2 } }, [p2]: "throw" })).r).toMatchObject({ ok: false, errorCode: "provider_lookup_failed" });
+    expect((await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 9, next: p2 } }, [p2]: { status: 500, body: {} } })).r).toMatchObject({ ok: false, errorCode: "provider_lookup_failed", httpStatus: 500 });
   });
 
   for (const [name, badNext] of [
@@ -114,16 +114,48 @@ describe("fetchAllOffersForSku — incoherent pagination metadata", () => {
   });
   it("non-monotonic offset → inconsistent_provider_pagination", async () => {
     const { r } = await run({
-      [first]: { status: 200, body: { offers: [offer("A")], size: 1, offset: 100, next: p2 } },
+      [first]: { status: 200, body: { offers: [offer("A")], total: 9, size: 1, offset: 100, next: p2 } },
       [p2]: { status: 200, body: { offers: [offer("B")], size: 1, offset: 100 } }, // not advancing
     });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
   it("an offerId repeated across pages → inconsistent_provider_pagination (not silently deduped)", async () => {
     const { r } = await run({
-      [first]: { status: 200, body: { offers: [offer("A")], size: 1, offset: 0, next: p2 } },
+      [first]: { status: 200, body: { offers: [offer("A")], total: 9, size: 1, offset: 0, next: p2 } },
       [p2]: { status: 200, body: { offers: [offer("A")], size: 1, offset: 100 } },
     });
+    expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
+  });
+});
+
+describe("fetchAllOffersForSku — malformed 2xx fails closed (invalid_provider_response)", () => {
+  const cases: Array<[string, unknown]> = [
+    ["null body (unparseable JSON)", null],
+    ["non-object body", "not an object"],
+    ["missing offers field", { total: 0 }],
+    ["offers not an array", { offers: "nope" }],
+    ["offer entry missing offerId", { offers: [{ sku: SKU }] }],
+    ["offer entry not an object", { offers: ["x"] }],
+    ["non-integer total", { offers: [], total: "5" }],
+    ["negative offset", { offers: [], offset: -1 }],
+    ["non-safe-integer size", { offers: [], size: 1.5 }],
+  ];
+  for (const [name, body] of cases) {
+    it(`${name} → invalid_provider_response`, async () => {
+      const { r } = await run({ [first]: { status: 200, body } });
+      expect(r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+    });
+  }
+  it("a paginated page (has next) without a total → invalid_provider_response", async () => {
+    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } } });
+    expect(r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+  });
+  it("href not matching the current URL → inconsistent_provider_pagination", async () => {
+    const { r } = await run({ [first]: { status: 200, body: { offers: [], total: 0, href: `${O}${path}?sku=${SKU}&limit=999` } } });
+    expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
+  });
+  it("an unsafe prev URL → inconsistent_provider_pagination", async () => {
+    const { r } = await run({ [first]: { status: 200, body: { offers: [], total: 0, prev: "https://evil.example.com/x" } } });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
 });
