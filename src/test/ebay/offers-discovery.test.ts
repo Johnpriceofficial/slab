@@ -94,7 +94,7 @@ describe("fetchAllOffersForSku — apiOrigin + fails closed", () => {
     ["two sku params", `${O}${path}?sku=${SKU}&sku=OTHER`],
   ] as const) {
     it(`unsafe next URL (${name}) → unsafe_pagination_url`, async () => {
-      const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], next: badNext } } });
+      const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 9, next: badNext } } });
       expect(r).toMatchObject({ ok: false, errorCode: "unsafe_pagination_url" });
     });
   }
@@ -109,20 +109,20 @@ describe("fetchAllOffersForSku — incoherent pagination metadata", () => {
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
   it("size not equal to the page offer count → inconsistent_provider_pagination", async () => {
-    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], size: 5 } } });
+    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], total: 1, size: 5 } } });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
   it("non-monotonic offset → inconsistent_provider_pagination", async () => {
     const { r } = await run({
       [first]: { status: 200, body: { offers: [offer("A")], total: 9, size: 1, offset: 100, next: p2 } },
-      [p2]: { status: 200, body: { offers: [offer("B")], size: 1, offset: 100 } }, // not advancing
+      [p2]: { status: 200, body: { offers: [offer("B")], total: 9, size: 1, offset: 100 } }, // not advancing
     });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
   it("an offerId repeated across pages → inconsistent_provider_pagination (not silently deduped)", async () => {
     const { r } = await run({
       [first]: { status: 200, body: { offers: [offer("A")], total: 9, size: 1, offset: 0, next: p2 } },
-      [p2]: { status: 200, body: { offers: [offer("A")], size: 1, offset: 100 } },
+      [p2]: { status: 200, body: { offers: [offer("A")], total: 9, size: 1, offset: 100 } },
     });
     expect(r).toMatchObject({ ok: false, errorCode: "inconsistent_provider_pagination" });
   });
@@ -146,9 +146,14 @@ describe("fetchAllOffersForSku — malformed 2xx fails closed (invalid_provider_
       expect(r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
     });
   }
-  it("a paginated page (has next) without a total → invalid_provider_response", async () => {
-    const { r } = await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } } });
-    expect(r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+  it("any successful 2xx (even single-page) without a total → invalid_provider_response", async () => {
+    expect((await run({ [first]: { status: 200, body: { offers: [offer("A")], next: p2 } } })).r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+    expect((await run({ [first]: { status: 200, body: { offers: [] } } })).r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+  });
+  it("non-string next / prev / href → invalid_provider_response (never coerced to absent)", async () => {
+    expect((await run({ [first]: { status: 200, body: { offers: [], total: 0, next: 123 } } })).r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+    expect((await run({ [first]: { status: 200, body: { offers: [], total: 0, prev: {} } } })).r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
+    expect((await run({ [first]: { status: 200, body: { offers: [], total: 0, href: [] } } })).r).toMatchObject({ ok: false, errorCode: "invalid_provider_response" });
   });
   it("href not matching the current URL → inconsistent_provider_pagination", async () => {
     const { r } = await run({ [first]: { status: 200, body: { offers: [], total: 0, href: `${O}${path}?sku=${SKU}&limit=999` } } });

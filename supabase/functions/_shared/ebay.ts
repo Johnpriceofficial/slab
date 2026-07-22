@@ -10,8 +10,10 @@ import {
 import { persistRotatedRefreshToken } from "./ebay-credential-rotation.ts";
 import { EBAY_OAUTH_SCOPES, buildAuthorizeQuery, ebayApizBase, refreshScopeParam, resolveEbayCallback, resolveScopePersistence } from "./ebay-oauth-core.ts";
 import { shapeEbayFinanceTransactions, shapeEbayOrders, skusFromOrders } from "./ebay-orders-core.ts";
-import { canonicalSkuFromInventoryNumber, hasFrontImage, listingFingerprint, orderedImagePaths, resolveExistingOffers, resolvePublishAction } from "./ebay-listing-core.ts";
+import { canonicalSkuFromInventoryNumber, hasFrontImage, listingFingerprint, orderedImagePaths } from "./ebay-listing-core.ts";
 import { fetchAllOffersForSku, OFFER_MAX_PAGES, type OffersDiscovery } from "./ebay-offers.ts";
+import { fetchInventoryItemForSku, INVENTORY_ITEM_TIMEOUT_MS, type InventoryItemResult } from "./ebay-inventory-item.ts";
+import { planPublish } from "./ebay-publish-coordinator.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -172,6 +174,20 @@ function discoverOffers(accessToken: string, sku: string): Promise<OffersDiscove
     accessToken,
     sku,
     maxPages: OFFER_MAX_PAGES,
+  });
+}
+
+// The second provider READ: getInventoryItem, with a real AbortController timeout.
+function discoverInventoryItem(accessToken: string, sku: string): Promise<InventoryItemResult> {
+  return fetchInventoryItemForSku({
+    fetchImpl: (url, init) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), INVENTORY_ITEM_TIMEOUT_MS);
+      return fetch(url, { ...init, signal: ctrl.signal as AbortSignal }).finally(() => clearTimeout(t));
+    },
+    apiOrigin: new URL(API).origin,
+    accessToken,
+    sku,
   });
 }
 
@@ -758,132 +774,87 @@ export async function handleEbay(req: Request, operation: Operation): Promise<Re
     if (acq.error) return reply({ status: "error", error_code: "lease_acquire_failed" }, 500);
     if (!(acq.data as { acquired?: boolean } | null)?.acquired) return reply({ status: "publish_in_progress", message: "Another publish for this SKU is already in progress." }, 409);
     try {
-    // Durable intent BEFORE any eBay mutation. A FAILED lookup is an error, never
-    // silently "no existing intent".
+    // Durable intent lookup (checked). A prior offer whose id was never saved must
+    // be reconciled (provider lookup) before any publish for this SKU.
     const { data: existing, error: lookupErr } = await admin.from("ebay_listing_intents").select("id, status, offer_id, listing_id, fingerprint").eq("ebay_account_id", accountId).eq("sku", sku).maybeSingle();
     if (lookupErr) return reply({ status: "error", error_code: "listing_intent_lookup_failed" }, 500);
     const existingIntent = existing as { id: string; status: string; offer_id: string | null; listing_id: string | null; fingerprint: string | null } | null;
+    if (existingIntent?.status === "offer_created_unpersisted") {
+      return reply({ status: "offer_created_unpersisted", message: "A prior publish created an eBay offer that was not saved locally. Run reconcile (which recovers the offer by SKU) before publishing this SKU again." }, 409);
+    }
+    const conditionDescription = String(body.condition_description ?? "");
+    const aspects = (body.aspects && typeof body.aspects === "object" ? body.aspects : {}) as Record<string, unknown>;
     const fingerprint = listingFingerprint({
       sku, title, description, price_value: priceValue, currency, category_id: categoryId,
       merchant_location_key: merchantLocationKey, fulfillment_policy_id: fulfillmentPolicyId,
       payment_policy_id: paymentPolicyId, return_policy_id: returnPolicyId, condition,
-      condition_description: String(body.condition_description ?? ""), quantity,
+      condition_description: conditionDescription, quantity,
       front_image_path: String((slabRow as Record<string, unknown>).front_image_path ?? ""),
       back_image_path: (slabRow as Record<string, unknown>).back_image_path ? String((slabRow as Record<string, unknown>).back_image_path) : "",
-      aspects: (body.aspects && typeof body.aspects === "object" ? body.aspects : {}) as Record<string, unknown>,
+      aspects,
     });
-
-    // Fingerprint enforcement (pure decision): never silently reuse a stale offer
-    // or re-publish over a live listing when inputs changed.
-    const decision = resolvePublishAction(existingIntent, fingerprint);
-    if (decision.action === "offer_created_unpersisted") {
-      return reply({ status: "offer_created_unpersisted", message: "A prior publish created an eBay offer that was not saved locally. Run reconcile (which recovers the offer by SKU) before publishing this SKU again." }, 409);
-    }
-    if (decision.action === "reconciled_existing") {
-      return reply({ status: "success", reconciled: true, offer_id: existingIntent?.offer_id, listing_id: existingIntent?.listing_id, listing_status: "published" });
-    }
-    if (decision.action === "listing_inputs_changed") {
-      return reply({ status: "listing_inputs_changed", offer_id: existingIntent?.offer_id, listing_id: existingIntent?.listing_id ?? undefined, message: "The listing inputs changed relative to the existing intent/listing for this SKU. Use an explicit revise flow — publish will not silently change a live listing or reuse a stale offer." }, 409);
-    }
-
     const { data: intentRow, error: intentErr0 } = await admin.from("ebay_listing_intents").upsert({ ebay_account_id: accountId, slab_id: slabId, sku, fingerprint, status: "preparing", last_error: null, updated_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id").single();
     if (intentErr0 || !intentRow) return reply({ status: "error", error_code: "listing_intent_persist_failed" }, 500);
     const intentId = (intentRow as { id: string }).id;
-    // Resume an existing offer ONLY on a fingerprint match (decided above).
-    let offerId = decision.action === "resume" ? decision.offerId : "";
 
-    const inventoryPayload = {
-      availability: { shipToLocationAvailability: { quantity } },
-      condition,
-      conditionDescription: body.condition_description ?? undefined,
-      product: { title, description, aspects: body.aspects ?? {}, imageUrls },
+    // READ-ALL-THEN-DECIDE: every provider read (getOffers → getInventoryItem) and
+    // the complete state comparison happen in the coordinator, which returns a
+    // PLAN. NO provider mutation occurs before an allowed mutation plan is returned.
+    const intended = {
+      sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId,
+      price: priceValue, currency, availableQuantity: quantity,
+      title, description, condition, conditionDescription, conditionDescriptors: [] as string[], aspects, imageCount: imageUrls.length, fingerprint,
     };
-    // FENCE: confirm we still hold the lease before the first provider mutation.
+    const plan = await planPublish({
+      discoverOffers: (s) => discoverOffers(accessToken, s),
+      fetchInventoryItem: (s) => discoverInventoryItem(accessToken, s),
+    }, intended, existingIntent);
+
+    // BLOCK: NO mutation. Record the reason (checked) and return the classification.
+    if (plan.action === "block") {
+      if (!(await recordIntentStatus(admin, intentId, "blocked", plan.errorCode))) return reply({ status: "error", error_code: "intent_persist_failed", context: plan.errorCode }, 500);
+      const providerFailure = ["provider_lookup_failed", "invalid_provider_response", "provider_redirect_rejected", "pagination_loop", "pagination_limit_exceeded", "incomplete_provider_result", "inconsistent_provider_pagination", "unsafe_pagination_url", "invalid_api_origin", "inventory_item_lookup_failed", "provider_timeout"].includes(plan.errorCode);
+      return reply({ status: plan.errorCode, error_code: plan.errorCode, offer_id: plan.offerId, listing_id: plan.listingId }, providerFailure ? 502 : 409);
+    }
+
+    // RECONCILE LOCAL ONLY: an exact ALREADY-published offer — repair the mapping,
+    // NO provider mutation.
+    if (plan.action === "reconcile_local_only") {
+      const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: plan.offerId, listing_id: plan.listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+      const persisted = await recordIntentStatus(admin, intentId, "published", "reconciled_local");
+      if (mapErr || !persisted) return reply({ status: "published_unmapped", offer_id: plan.offerId, listing_id: plan.listingId, message: "eBay already has a live listing for this SKU but the local mapping write failed — run reconcile." }, 500);
+      return reply({ status: "success", reconciled: true, offer_id: plan.offerId, listing_id: plan.listingId, listing_status: "published" });
+    }
+
+    // MUTATION PLANS — only now do we mutate the provider, fencing before each step.
+    let offerId = plan.action === "put_resume_publish" ? plan.offerId : "";
+    const inventoryPayload = { availability: { shipToLocationAvailability: { quantity } }, condition, conditionDescription: body.condition_description ?? undefined, product: { title, description, aspects: body.aspects ?? {}, imageUrls } };
     if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost", message: "The publish lease was lost or superseded; aborting before any eBay mutation." }, 409);
     await ebayFetch(`/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, { method: "PUT", body: JSON.stringify(inventoryPayload) });
-    // Inventory item PUT is idempotent by SKU, but the status transition is still
-    // checked; a lost transition returns error and a retry re-PUTs safely.
-    const { error: invErr } = await admin.from("ebay_listing_intents").update({ status: "inventory_created", updated_at: new Date().toISOString() }).eq("id", intentId);
-    if (invErr) return reply({ status: "error", error_code: "listing_intent_persist_failed" }, 500);
+    if (!(await recordIntentStatus(admin, intentId, "inventory_created", "inventory_put"))) return reply({ status: "error", error_code: "intent_persist_failed" }, 500);
 
-    // Create the offer ONLY if we do not already have one, so a retried publish
-    // never creates a duplicate offer. Persist offer_id BEFORE publish, and STOP
-    // if that persistence fails (a lost offer_id would risk a duplicate on retry).
     if (!offerId) {
-      // PROVIDER-SIDE idempotency: ask eBay what offers already exist for this SKU
-      // BEFORE creating one. This makes a retry safe even if EVERY prior local
-      // write (offer_id persistence AND its recovery) failed — we adopt the
-      // orphaned offer instead of creating a duplicate. A lookup failure is an
-      // error (never treated as "none exist").
-      // FENCE before the provider lookup.
       if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
-      // Discovery FAILS CLOSED: a loop, page-cap, unsafe next url, incomplete
-      // provider result, or lookup failure all block offer creation — never a
-      // partial collection read as "complete/none".
-      const lookup = await discoverOffers(accessToken, sku);
-      if (!lookup.ok) {
-        // A failed persistence of the failure is itself a primary durability error.
-        if (!(await recordIntentStatus(admin, intentId, "offer_discovery_failed", `${lookup.errorCode}:${lookup.httpStatus ?? ""}`))) return reply({ status: "error", error_code: "intent_persist_failed", context: lookup.errorCode }, 500);
-        return reply({ status: "error", error_code: lookup.errorCode, http: lookup.httpStatus, provider_error_id: lookup.safeProviderErrorId, message: "Could not COMPLETELY verify existing eBay offers for this SKU; refusing to create a possibly-duplicate offer." }, 502);
-      }
-      // FULL content validation: compatibility (SKU+marketplace+FIXED_PRICE) AND a
-      // field-by-field match against intent — never adopt/publish a stale offer.
-      const intendedOffer = { sku, marketplaceId, categoryId, merchantLocationKey, fulfillmentPolicyId, paymentPolicyId, returnPolicyId, price: priceValue, currency, availableQuantity: quantity };
-      const offerDecision = resolveExistingOffers(lookup.offers, intendedOffer);
-      if (offerDecision.action === "duplicate_offer_ambiguity") {
-        await admin.from("ebay_listing_intents").update({ status: "duplicate_offer_ambiguity", last_error: `offer_ids:${offerDecision.offerIds.join(",")}`, updated_at: new Date().toISOString() }).eq("id", intentId);
-        return reply({ status: "duplicate_offer_ambiguity", offer_ids: offerDecision.offerIds, message: "eBay already has multiple compatible offers for this SKU. Resolve them before publishing." }, 409);
-      }
-      if (offerDecision.action === "listing_on_hold") {
-        await admin.from("ebay_listing_intents").update({ status: "listing_on_hold", offer_id: offerDecision.offerId, updated_at: new Date().toISOString() }).eq("id", intentId);
-        return reply({ status: "listing_on_hold", offer_id: offerDecision.offerId, message: "eBay reports the existing listing for this SKU is on hold; resolve it before publishing." }, 409);
-      }
-      if (offerDecision.action === "existing_offer_inputs_changed") {
-        return reply({ status: "existing_offer_inputs_changed", offer_id: offerDecision.offerId, message: "An unpublished eBay offer exists for this SKU with DIFFERENT settings. Revise it explicitly — publish will not overwrite it silently." }, 409);
-      }
-      if (offerDecision.action === "existing_listing_inputs_changed") {
-        return reply({ status: "existing_listing_inputs_changed", offer_id: offerDecision.offerId, listing_id: offerDecision.listingId, message: "A LIVE eBay listing exists for this SKU with DIFFERENT settings. Use an explicit revise flow." }, 409);
-      }
-      if (offerDecision.action === "reconcile_published") {
-        // A matching offer is ALREADY published — adopt it locally, do NOT publish again.
-        const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: offerDecision.offerId, listing_id: offerDecision.listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" });
-        const { error: intUpd } = await admin.from("ebay_listing_intents").update({ status: "published", offer_id: offerDecision.offerId, listing_id: offerDecision.listingId, updated_at: new Date().toISOString() }).eq("id", intentId);
-        if (mapErr || intUpd) return reply({ status: "published_unmapped", offer_id: offerDecision.offerId, listing_id: offerDecision.listingId, message: "eBay already has a live listing for this SKU but the local mapping write failed — run reconcile." }, 500);
-        return reply({ status: "success", reconciled: true, offer_id: offerDecision.offerId, listing_id: offerDecision.listingId, listing_status: "published" });
-      }
-      if (offerDecision.action === "adopt") {
-        offerId = offerDecision.offerId; // reuse the existing MATCHING offer; do NOT create another
-      } else {
-        // FENCE before creating the offer.
-        if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
-        const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify({
-          sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: quantity, categoryId, merchantLocationKey,
-          listingDescription: description, pricingSummary: { price: { currency, value: priceValue.toFixed(2) } },
-          listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId },
-        }) });
-        offerId = String(offer.offerId ?? "");
-        if (!offerId) { await admin.from("ebay_listing_intents").update({ status: "failed", last_error: "no_offer_id", updated_at: new Date().toISOString() }).eq("id", intentId); return reply({ status: "error", error_code: "offer_creation_failed" }, 502); }
-      }
-      // Persist offer_id. If this fails, the next attempt's provider lookup will
-      // still find the offer and adopt it — no duplicate — but flag it anyway.
-      const { error: ocErr } = await admin.from("ebay_listing_intents").update({ status: "offer_created", offer_id: offerId, updated_at: new Date().toISOString() }).eq("id", intentId);
-      if (ocErr) {
-        await admin.from("ebay_listing_intents").update({ status: "offer_created_unpersisted", last_error: `offer_id_persist_failed:${offerId}`, updated_at: new Date().toISOString() }).eq("id", intentId);
+      const offer = await ebayFetch("/sell/inventory/v1/offer", accessToken, { method: "POST", body: JSON.stringify({
+        sku, marketplaceId, format: "FIXED_PRICE", availableQuantity: quantity, categoryId, merchantLocationKey,
+        listingDescription: description, pricingSummary: { price: { currency, value: priceValue.toFixed(2) } },
+        listingPolicies: { fulfillmentPolicyId, paymentPolicyId, returnPolicyId },
+      }) });
+      offerId = String(offer.offerId ?? "");
+      if (!offerId) { await recordIntentStatus(admin, intentId, "failed", "no_offer_id"); return reply({ status: "error", error_code: "offer_creation_failed" }, 502); }
+      if (!(await recordIntentStatus(admin, intentId, "offer_created", `offer:${offerId}`))) {
+        await recordIntentStatus(admin, intentId, "offer_created_unpersisted", `offer_id_persist_failed:${offerId}`);
         return reply({ status: "offer_created_unpersisted", offer_id: offerId, message: "An eBay offer exists but its ID could not be saved locally. Run reconcile; a retry will re-adopt it (no duplicate) via the provider lookup." }, 500);
       }
     }
 
-    // FENCE before publishing the offer.
     if (!(await assertLeaseHeld(admin, accountId, sku, leaseToken))) return reply({ status: "publish_lease_lost" }, 409);
     const published = await ebayFetch(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, accessToken, { method: "POST", body: "{}" });
     const listingId = published.listingId ? String(published.listingId) : null;
-
-    // The external listing now EXISTS. If local persistence fails here, this is
-    // NOT a normal success — it is published_unmapped, and we do NOT withdraw.
-    const { error: intentErr } = await admin.from("ebay_listing_intents").update({ status: "published", listing_id: listingId, updated_at: new Date().toISOString() }).eq("id", intentId);
-    const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" });
-    if (intentErr || mapErr) {
-      await admin.from("ebay_listing_intents").update({ status: "published_unmapped", offer_id: offerId, listing_id: listingId, last_error: "local_persist_failed", updated_at: new Date().toISOString() }).eq("id", intentId);
+    const publishedOk = await recordIntentStatus(admin, intentId, "published", "published");
+    const { error: mapErr } = await admin.from("ebay_listing_mappings").upsert({ slab_id: slabId, ebay_account_id: accountId, sku, offer_id: offerId, listing_id: listingId, listing_status: "published", asking_price_cents: Math.round(priceValue * 100), currency, last_synced_at: new Date().toISOString() }, { onConflict: "ebay_account_id,sku" }).select("id");
+    if (!publishedOk || mapErr) {
+      await recordIntentStatus(admin, intentId, "published_unmapped", "local_persist_failed");
       return reply({ status: "published_unmapped", offer_id: offerId, listing_id: listingId, message: "The eBay listing is LIVE but local reconciliation failed. The listing was NOT withdrawn — run reconcile to repair the local mapping." }, 500);
     }
     return reply({ status: "success", offer_id: offerId, listing_id: listingId, listing_status: "published" });

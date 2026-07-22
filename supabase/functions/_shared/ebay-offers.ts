@@ -148,6 +148,13 @@ export async function fetchAllOffersForSku(args: OffersDiscoveryArgs): Promise<O
     if (data === null) return fail("invalid_provider_response");
     const rawOffers = strictOffersArray(data);
     if (rawOffers === null) return fail("invalid_provider_response");
+    // Every successful getOffers response must report a total (so completeness is
+    // always checkable, even on a single page), and next/prev/href — when present
+    // — must be strings, never coerced-to-absent.
+    if (typeof data.total !== "number") return fail("invalid_provider_response");
+    for (const key of ["next", "prev", "href"] as const) {
+      if (data[key] !== undefined && typeof data[key] !== "string") return fail("invalid_provider_response");
+    }
 
     pages += 1;
     const summaries = extractOfferSummaries(data);
@@ -183,9 +190,6 @@ export async function fetchAllOffersForSku(args: OffersDiscoveryArgs): Promise<O
     if (!next) break;
     const v = validateNextUrl(next, apiOrigin, sku);
     if (!v.ok) return fail("unsafe_pagination_url");
-    // A genuinely paginated response must report a `total` so completeness is
-    // checkable; a paginated page without it fails closed.
-    if (typeof data.total !== "number") return fail("invalid_provider_response");
     url = next;
   }
 
