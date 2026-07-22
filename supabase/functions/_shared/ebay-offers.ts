@@ -66,6 +66,21 @@ export function validateNextUrl(next: string, apiOrigin: string, sku: string): {
   return { ok: true };
 }
 
+const isNonNegInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+// A successful 2xx getOffers body MUST have the expected schema; a malformed 2xx
+// is NEVER read as "zero offers". Returns the raw offers array or null (invalid).
+function strictOffersArray(data: Record<string, unknown>): unknown[] | null {
+  if (!data || typeof data !== "object" || !Array.isArray(data.offers)) return null;
+  for (const o of data.offers) {
+    if (!o || typeof o !== "object" || typeof (o as { offerId?: unknown }).offerId !== "string" || !(o as { offerId: string }).offerId) return null;
+  }
+  for (const key of ["total", "size", "limit", "offset"] as const) {
+    if (data[key] !== undefined && !isNonNegInt(data[key])) return null;
+  }
+  return data.offers as unknown[];
+}
+
 function safeErrorId(data: Record<string, unknown>): number | null {
   const errs = Array.isArray(data.errors) ? data.errors as Array<Record<string, unknown>> : [];
   const id = errs[0] ? Number(errs[0].errorId) : NaN;
@@ -103,52 +118,74 @@ export async function fetchAllOffersForSku(args: OffersDiscoveryArgs): Promise<O
   const byId = new Map<string, OfferSummary>();
   let pages = 0;
   let expectedTotal: number | null = null;
+  let expectedLimit: number | null = null;
   let providerSize: number | null = null;
   let prevOffset: number | null = null;
+  const fail = (errorCode: string): OffersDiscovery => ({ ok: false, errorCode, httpStatus: null, safeProviderErrorId: null, pagesFetched: pages });
 
   for (;;) {
-    if (pages >= maxPages) return { ok: false, errorCode: "pagination_limit_exceeded", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+    if (pages >= maxPages) return fail("pagination_limit_exceeded");
     const canon = canonicalizeUrl(url);
-    if (seen.has(canon)) return { ok: false, errorCode: "pagination_loop", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+    if (seen.has(canon)) return fail("pagination_loop");
     seen.add(canon);
 
     let r: OffersFetchResponse;
     // redirect:"manual" so a 3xx is returned (not followed); the bearer token is
     // never forwarded to a redirect target.
     try { r = await fetchImpl(url, { headers, redirect: "manual" }); }
-    catch { return { ok: false, errorCode: "provider_lookup_failed", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages }; }
+    catch { return fail("provider_lookup_failed"); }
     if (r.status >= 300 && r.status < 400) return { ok: false, errorCode: "provider_redirect_rejected", httpStatus: r.status, safeProviderErrorId: null, pagesFetched: pages };
-    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    const data = (await r.json().catch(() => null)) as Record<string, unknown> | null;
 
     if (!r.ok) {
-      if (r.status === 404 && is404NoOffers(data)) return { ok: true, offers: [], pagesFetched: pages, providerTotal: 0, providerSize: 0, deduplicatedCount: 0 };
-      return { ok: false, errorCode: "provider_lookup_failed", httpStatus: r.status, safeProviderErrorId: safeErrorId(data), pagesFetched: pages };
+      const body = (data ?? {}) as Record<string, unknown>;
+      if (r.status === 404 && is404NoOffers(body)) return { ok: true, offers: [], pagesFetched: pages, providerTotal: 0, providerSize: 0, deduplicatedCount: 0 };
+      return { ok: false, errorCode: "provider_lookup_failed", httpStatus: r.status, safeProviderErrorId: safeErrorId(body), pagesFetched: pages };
     }
+
+    // A successful 2xx with a malformed/missing offers array or bad pagination
+    // types is invalid — NEVER silently read as "zero offers".
+    if (data === null) return fail("invalid_provider_response");
+    const rawOffers = strictOffersArray(data);
+    if (rawOffers === null) return fail("invalid_provider_response");
 
     pages += 1;
     const summaries = extractOfferSummaries(data);
-    // size (when present) must equal this page's parsed offer count.
-    if (typeof data.size === "number") { if (data.size !== summaries.length) return { ok: false, errorCode: "inconsistent_provider_pagination", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages }; providerSize = data.size; }
-    // total must be constant across pages.
+    if (summaries.length !== rawOffers.length) return fail("invalid_provider_response"); // parsed must equal raw
+    // size (when present) must equal the RAW offers length.
+    if (typeof data.size === "number") { if (data.size !== rawOffers.length) return fail("inconsistent_provider_pagination"); providerSize = data.size; }
+    // total + limit must be constant across pages.
     if (typeof data.total === "number") {
       if (expectedTotal === null) expectedTotal = data.total;
-      else if (data.total !== expectedTotal) return { ok: false, errorCode: "inconsistent_provider_pagination", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+      else if (data.total !== expectedTotal) return fail("inconsistent_provider_pagination");
     }
-    // offset must be non-negative and strictly increasing.
+    if (typeof data.limit === "number") {
+      if (expectedLimit === null) expectedLimit = data.limit;
+      else if (data.limit !== expectedLimit) return fail("inconsistent_provider_pagination");
+    }
+    // offset strictly increasing across pages.
     if (typeof data.offset === "number") {
-      if (data.offset < 0 || (prevOffset !== null && data.offset <= prevOffset)) return { ok: false, errorCode: "inconsistent_provider_pagination", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+      if (prevOffset !== null && data.offset <= prevOffset) return fail("inconsistent_provider_pagination");
       prevOffset = data.offset;
     }
+    // href (when present) must identify the exact canonical current URL; prev
+    // (when present) must be a safe same-SKU approved URL.
+    if (typeof data.href === "string" && canonicalizeUrl(data.href) !== canon) return fail("inconsistent_provider_pagination");
+    if (typeof data.prev === "string" && !validateNextUrl(data.prev, apiOrigin, sku).ok) return fail("inconsistent_provider_pagination");
     // A well-formed paginated response never repeats an offerId across pages.
     for (const s of summaries) {
-      if (byId.has(s.offerId)) return { ok: false, errorCode: "inconsistent_provider_pagination", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+      if (byId.has(s.offerId)) return fail("inconsistent_provider_pagination");
       byId.set(s.offerId, s);
     }
+    if (byId.size > (expectedTotal ?? Infinity)) return fail("inconsistent_provider_pagination"); // collected must never exceed total
 
     const next = typeof data.next === "string" && data.next ? data.next : null;
     if (!next) break;
     const v = validateNextUrl(next, apiOrigin, sku);
-    if (!v.ok) return { ok: false, errorCode: "unsafe_pagination_url", httpStatus: null, safeProviderErrorId: null, pagesFetched: pages };
+    if (!v.ok) return fail("unsafe_pagination_url");
+    // A genuinely paginated response must report a `total` so completeness is
+    // checkable; a paginated page without it fails closed.
+    if (typeof data.total !== "number") return fail("invalid_provider_response");
     url = next;
   }
 
