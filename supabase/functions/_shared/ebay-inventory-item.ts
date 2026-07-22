@@ -38,17 +38,24 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 // (invalid) rather than silently substituting empties.
 function normalizeInventoryItem(data: unknown, sku: string): NormalizedInventoryItem | null {
   if (!isObj(data)) return null;
+  // A provider-echoed SKU that differs from the requested (server-derived) SKU is
+  // a mismatch, never silently accepted.
+  if (typeof data.sku === "string" && data.sku !== sku) return null;
   const product = isObj(data.product) ? data.product : {};
   const avail = isObj(data.availability) ? data.availability : {};
   const shipTo = isObj(avail.shipToLocationAvailability) ? avail.shipToLocationAvailability : {};
   if (data.condition !== undefined && typeof data.condition !== "string") return null;
+  if (data.conditionDescription !== undefined && typeof data.conditionDescription !== "string") return null;
   if (product.title !== undefined && typeof product.title !== "string") return null;
+  if (product.description !== undefined && typeof product.description !== "string") return null;
+  if (product.aspects !== undefined && !isObj(product.aspects)) return null;
   const rawImages = product.imageUrls;
   if (rawImages !== undefined && !Array.isArray(rawImages)) return null;
   const descriptors = data.conditionDescriptors;
   if (descriptors !== undefined && !Array.isArray(descriptors)) return null;
   const qtyRaw = shipTo.quantity;
-  const quantity = typeof qtyRaw === "number" && Number.isSafeInteger(qtyRaw) ? qtyRaw : (qtyRaw === undefined ? null : NaN);
+  // A present quantity must be a non-negative safe integer; absent stays null.
+  const quantity = qtyRaw === undefined ? null : (typeof qtyRaw === "number" && Number.isSafeInteger(qtyRaw) && qtyRaw >= 0 ? qtyRaw : NaN);
   if (Number.isNaN(quantity)) return null;
   return {
     sku,
@@ -73,16 +80,24 @@ export interface InventoryItemArgs {
 
 export async function fetchInventoryItemForSku(args: InventoryItemArgs): Promise<InventoryItemResult> {
   const { fetchImpl, apiOrigin, accessToken, sku } = args;
+  const timeoutMs = args.timeoutMs ?? INVENTORY_ITEM_TIMEOUT_MS;
   if (!validateApiOrigin(apiOrigin)) return { ok: false, errorCode: "invalid_api_origin", httpStatus: null };
   const url = `${apiOrigin}${INVENTORY_ITEM_PATH}${encodeURIComponent(sku)}`;
   const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Content-Language": "en-US" };
 
   let r: InventoryFetchResponse;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    r = await fetchImpl(url, { headers, redirect: "manual" });
+    // The module enforces its own timeout (in addition to any caller AbortController).
+    const timeout = new Promise<"__timeout__">((resolve) => { timer = setTimeout(() => resolve("__timeout__"), Math.max(1, timeoutMs)); });
+    const raced = await Promise.race([fetchImpl(url, { headers, redirect: "manual" }), timeout]);
+    if (raced === "__timeout__") return { ok: false, errorCode: "provider_timeout", httpStatus: null };
+    r = raced;
   } catch (e) {
     if (e && typeof e === "object" && (e as { name?: string }).name === "AbortError") return { ok: false, errorCode: "provider_timeout", httpStatus: null };
     return { ok: false, errorCode: "inventory_item_lookup_failed", httpStatus: null };
+  } finally {
+    clearTimeout(timer);
   }
   if (r.status >= 300 && r.status < 400) return { ok: false, errorCode: "provider_redirect_rejected", httpStatus: r.status };
   const data = await r.json().catch(() => null);
