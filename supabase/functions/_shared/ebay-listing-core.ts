@@ -6,6 +6,13 @@
 
 const nonEmpty = (p: unknown): p is string => typeof p === "string" && p.trim().length > 0;
 
+// THE canonical marketplace SKU, derived server-side from the slab's immutable
+// inventory number: "GCV" + 6-digit zero-pad (e.g. 47 → GCV000047). Must stay
+// identical to the frontend src/lib/slabs/marketplace-sku.ts (a test asserts it).
+export function canonicalSkuFromInventoryNumber(inventoryNumber: number): string {
+  return `GCV${String(inventoryNumber).padStart(6, "0")}`;
+}
+
 /** Ordered image paths for a listing: front first, then back; empties dropped. */
 export function orderedImagePaths(front: unknown, back: unknown): string[] {
   return [front, back].filter(nonEmpty).map((p) => p.trim());
@@ -103,6 +110,45 @@ export function extractOfferIds(offersResponse: unknown): string[] {
   return offers
     .map((o) => String((o as { offerId?: unknown })?.offerId ?? "").trim())
     .filter(Boolean);
+}
+
+export interface OfferSummary { offerId: string; sku: string; marketplaceId: string; format: string; listingId: string | null }
+
+// Parse getOffers into typed summaries (offerId + the fields needed to judge
+// whether an existing offer is COMPATIBLE with the intended listing).
+export function extractOfferSummaries(offersResponse: unknown): OfferSummary[] {
+  const offers = (offersResponse as { offers?: unknown } | null)?.offers;
+  if (!Array.isArray(offers)) return [];
+  return offers.map((o) => {
+    const r = (o ?? {}) as Record<string, unknown>;
+    const listing = r.listing && typeof r.listing === "object" ? r.listing as Record<string, unknown> : {};
+    return {
+      offerId: String(r.offerId ?? "").trim(),
+      sku: String(r.sku ?? "").trim(),
+      marketplaceId: String(r.marketplaceId ?? "").trim(),
+      format: String(r.format ?? "").trim(),
+      listingId: listing.listingId != null ? String(listing.listingId) : null,
+    };
+  }).filter((o) => o.offerId);
+}
+
+export type OfferResolution =
+  | { action: "create" }                                        // no COMPATIBLE offer exists
+  | { action: "adopt"; offerId: string }                        // one compatible, unpublished
+  | { action: "reconcile_published"; offerId: string; listingId: string } // one compatible, already published
+  | { action: "duplicate_offer_ambiguity"; offerIds: string[] }; // >1 compatible
+
+/**
+ * Decide what to do with the offers eBay already has, validating COMPATIBILITY
+ * (same SKU + marketplace + FIXED_PRICE) before adopting — never blindly adopt an
+ * auction offer or a wrong-marketplace offer. Pure.
+ */
+export function resolveExistingOffers(offers: OfferSummary[], intended: { sku: string; marketplaceId: string }): OfferResolution {
+  const compatible = offers.filter((o) => o.sku === intended.sku && o.marketplaceId === intended.marketplaceId && o.format === "FIXED_PRICE");
+  if (compatible.length === 0) return { action: "create" };
+  if (compatible.length > 1) return { action: "duplicate_offer_ambiguity", offerIds: compatible.map((o) => o.offerId) };
+  const one = compatible[0];
+  return one.listingId ? { action: "reconcile_published", offerId: one.offerId, listingId: one.listingId } : { action: "adopt", offerId: one.offerId };
 }
 
 export interface OfferLookup { ok: boolean; offerIds: string[] }
