@@ -32,7 +32,6 @@ suite("buildout integrity hardening", () => {
   afterAll(async () => {
     await service.from("slab_settings").update({ allow_hard_delete: false }).eq("id", true);
     if (slabIds.length) await service.from("slabs").delete().in("id", slabIds);
-    await service.schema("private").from("slab_storage_cleanup_queue").delete().like("storage_path", `%${stamp}%`);
     if (adminId) await service.auth.admin.deleteUser(adminId).catch(() => {});
   });
 
@@ -160,9 +159,11 @@ suite("buildout integrity hardening", () => {
     expect(tombstone.error).toBeNull();
     const tombstoneRow = (tombstone.data as Array<{ inventory_code: string | null }> | null)?.[0];
     expect(tombstoneRow?.inventory_code).toBe(slab.inventory_code);
-    const queued = await service.schema("private").from("slab_storage_cleanup_queue").select("storage_path").eq("slab_id", slab.id);
+    const queued = await admin.rpc("list_pending_slab_storage_cleanup");
     expect(queued.error).toBeNull();
-    const paths = (queued.data ?? []).map((row) => row.storage_path);
+    const paths = ((queued.data ?? []) as Array<{ storage_path: string; slab_id?: string | null }>)
+      .filter((row) => row.slab_id === slab.id || row.storage_path === imagePath || row.storage_path === derivativePath)
+      .map((row) => row.storage_path);
     expect(paths).toEqual(expect.arrayContaining([imagePath, derivativePath]));
 
     const index = slabIds.indexOf(slab.id);
