@@ -10,14 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { useAuth } from "@/auth/AuthProvider";
-import { Plus, Download, ArrowDown, ArrowUp, ArrowUpDown, Loader2, Pencil, Trash2, Rows3, RefreshCw } from "lucide-react";
+import { Plus, Download, ArrowDown, ArrowUp, ArrowUpDown, Loader2, Trash2, RefreshCw } from "lucide-react";
 import { INVENTORY_TABLE_COLUMNS, GRADERS, LANGUAGES, VERIFICATION_STATUSES, DUPLICATE_STATUSES } from "@/lib/slabs/constants";
 import { fetchSlabs, fetchAllSlabs, fetchAllComps, type SlabQuery } from "@/lib/slabs/data";
 import {
-  compactSlabInventoryIds,
   fetchPermanentDeleteEnabled,
   purgeSlabs,
-  reassignSlabInventoryId,
   retryPendingSlabStorageCleanup,
   setPermanentDeleteEnabled,
 } from "@/lib/slabs/inventory-maintenance";
@@ -154,25 +152,6 @@ export default function SlabList() {
     } finally { setMaintenanceBusy(false); }
   };
 
-  const editInventoryId = async (slab: Slab) => {
-    const current = slab.inventory_sequence ?? Number(String(slab.inventory_code ?? "").replace(/\D/g, ""));
-    const entered = window.prompt("Enter the visible inventory number. Example: 12 becomes S0012.", String(current || ""));
-    if (entered === null) return;
-    const sequence = Number(entered.replace(/^S/i, ""));
-    if (!Number.isInteger(sequence) || sequence < 1) {
-      toast.error("Inventory ID must be a positive whole number.");
-      return;
-    }
-    setMaintenanceBusy(true);
-    try {
-      const updated = await reassignSlabInventoryId(slab.id, sequence);
-      toast.success(`Inventory ID changed to ${updated.inventory_code}.`);
-      await refreshInventory();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Inventory ID could not be changed.");
-    } finally { setMaintenanceBusy(false); }
-  };
-
   const confirmAndPurge = async (targets: Slab[], label: string) => {
     if (targets.length === 0) return;
     const archivedCount = targets.filter((row) => !!row.archived_at).length;
@@ -217,20 +196,6 @@ export default function SlabList() {
       setMaintenanceBusy(false);
       toast.error(error instanceof Error ? error.message : "The complete inventory could not be loaded.");
     }
-  };
-
-  const compactIds = async () => {
-    if (!window.confirm("Renumber every remaining visible slab ID consecutively from S0001? Internal storage and marketplace keys will not change.")) return;
-    const typed = window.prompt("Type RENUMBER to confirm.");
-    if (typed !== "RENUMBER") return;
-    setMaintenanceBusy(true);
-    try {
-      const count = await compactSlabInventoryIds();
-      toast.success(`${count} slab inventory IDs renumbered consecutively.`);
-      await refreshInventory();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Inventory IDs could not be compacted.");
-    } finally { setMaintenanceBusy(false); }
   };
 
   const handleExport = async () => {
@@ -279,7 +244,6 @@ export default function SlabList() {
           <span className="mr-auto text-xs text-muted-foreground">Database safety switch. Turn it off after cleanup.</span>
           <span className="text-sm"><strong>{selectedRows.length}</strong> selected on this page</span>
           <Button variant="outline" size="sm" onClick={() => void retryStorageCleanup()} disabled={maintenanceBusy}><RefreshCw /> Retry image cleanup</Button>
-          <Button variant="outline" size="sm" onClick={() => void compactIds()} disabled={maintenanceBusy}><Rows3 /> Compact visible IDs</Button>
           <Button variant="destructive" size="sm" onClick={() => void purgeSelected()} disabled={maintenanceBusy || !permanentDeleteEnabled || selectedRows.length === 0}><Trash2 /> Delete selected</Button>
           <Button variant="destructive" size="sm" onClick={() => void purgeAll()} disabled={maintenanceBusy || !permanentDeleteEnabled || total === 0}><Trash2 /> Delete all slabs</Button>
         </div>
@@ -298,7 +262,7 @@ export default function SlabList() {
                 <TableRow key={slab.id} data-state={selected.has(slab.id) ? "selected" : undefined}>
                   {isAdmin && <TableCell><input type="checkbox" aria-label={`Select ${slab.inventory_code}`} checked={selected.has(slab.id)} onChange={() => toggleRow(slab.id)} /></TableCell>}
                   {INVENTORY_TABLE_COLUMNS.map((column, index) => <TableCell key={String(column.key)} className="whitespace-nowrap">{index === 0 ? <Link to={`/slabs/${slab.id}`} className="font-medium text-primary hover:underline">{renderCell(slab, column)}</Link> : column.key === "pricecharting_match_status" && slab.pricecharting_match_status ? <Badge variant="outline">{slab.pricecharting_match_status}</Badge> : renderCell(slab, column)}</TableCell>)}
-                  {isAdmin && <TableCell><div className="flex items-center gap-1"><Button variant="ghost" size="sm" onClick={() => void editInventoryId(slab)} disabled={maintenanceBusy}><Pencil className="h-4 w-4" /> Edit ID</Button><Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => void purgeOne(slab)} disabled={maintenanceBusy || !permanentDeleteEnabled}><Trash2 className="h-4 w-4" /> Delete</Button></div></TableCell>}
+                  {isAdmin && <TableCell><Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => void purgeOne(slab)} disabled={maintenanceBusy || !permanentDeleteEnabled}><Trash2 className="h-4 w-4" /> Delete</Button></TableCell>}
                 </TableRow>
               ))}
             </TableBody>
