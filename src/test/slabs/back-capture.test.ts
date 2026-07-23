@@ -21,15 +21,17 @@ const strongFront = {
 };
 
 describe("slabBackRequirement", () => {
-  it("requires the back when the certification number is unreadable", () => {
+  it("recommends review rather than requiring the back when the certification number is unreadable", () => {
     const r = slabBackRequirement(analysis({ grader: { value: "CGC", confidence: 0.9, readable: true }, certification_number: { value: null, confidence: 0, readable: false } }));
-    expect(r.requirement).toBe("required");
+    expect(r.requirement).toBe("recommended");
     expect(r.reason).toMatch(/certification number/i);
+    expect(r.reason).toMatch(/front|manual/i);
   });
 
-  it("requires the back when independent front reads disagree", () => {
+  it("recommends review rather than requiring the back when independent front reads disagree", () => {
     const r = slabBackRequirement(analysis(strongFront, { warnings: ["Card number could not be verified: two independent readings disagree."] }));
-    expect(r.requirement).toBe("required");
+    expect(r.requirement).toBe("recommended");
+    expect(canSkipBack(r.requirement)).toBe(true);
   });
 
   it("recommends the back on low overall confidence", () => {
@@ -46,8 +48,8 @@ describe("slabBackRequirement", () => {
     expect(slabBackRequirement(analysis(strongFront)).requirement).toBe("optional");
   });
 
-  it("permits skipping unless the back is required", () => {
-    expect(canSkipBack("required")).toBe(false);
+  it("always permits continuing without the back, including legacy required values", () => {
+    expect(canSkipBack("required")).toBe(true);
     expect(canSkipBack("recommended")).toBe(true);
     expect(canSkipBack("optional")).toBe(true);
   });
