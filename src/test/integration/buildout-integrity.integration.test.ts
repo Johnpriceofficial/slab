@@ -110,10 +110,15 @@ suite("buildout integrity hardening", () => {
 
   it("permanently rejects public inventory ID reassignment and compaction", async () => {
     const slab = await createSlab(`INT-ID-${stamp}`);
+    const before = await service.from("slabs").select("inventory_sequence").eq("id", slab.id).single();
+    expect(before.error).toBeNull();
     const moved = await admin.rpc("reassign_slab_inventory_id", { p_slab_id: slab.id, p_sequence: 900001 });
     expect(moved.error?.message ?? "").toMatch(/INVENTORY_ID_IMMUTABLE/i);
     const compacted = await admin.rpc("compact_slab_inventory_ids");
     expect(compacted.error?.message ?? "").toMatch(/INVENTORY_ID_IMMUTABLE/i);
+    const after = await service.from("slabs").select("inventory_sequence").eq("id", slab.id).single();
+    expect(after.error).toBeNull();
+    expect(after.data?.inventory_sequence).toBe(before.data?.inventory_sequence);
   });
 
   it("retains audit/tombstone evidence and queues originals plus derivatives on purge", async () => {
@@ -151,9 +156,10 @@ suite("buildout integrity hardening", () => {
     const audit = await service.from("audit_log").select("id, action").eq("entity_type", "slab").eq("entity_id", slab.id).eq("action", "hard_delete");
     expect(audit.error).toBeNull();
     expect(audit.data?.length).toBe(1);
-    const tombstone = await service.schema("private").from("slab_deletion_tombstones").select("slab_id, inventory_code").eq("slab_id", slab.id).single();
+    const tombstone = await admin.rpc("get_slab_deletion_tombstone", { p_slab_id: slab.id });
     expect(tombstone.error).toBeNull();
-    expect(tombstone.data?.inventory_code).toBe(slab.inventory_code);
+    const tombstoneRow = (tombstone.data as Array<{ inventory_code: string | null }> | null)?.[0];
+    expect(tombstoneRow?.inventory_code).toBe(slab.inventory_code);
     const queued = await service.schema("private").from("slab_storage_cleanup_queue").select("storage_path").eq("slab_id", slab.id);
     expect(queued.error).toBeNull();
     const paths = (queued.data ?? []).map((row) => row.storage_path);
