@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { EbaySellerPanel } from "@/components/slabs/EbaySellerPanel";
 import type { Slab } from "@/lib/slabs/types";
@@ -31,8 +31,10 @@ function renderPanel() {
 describe("EbaySellerPanel OAuth status", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/slabs/s1");
+    accountsMock.mockReset();
     accountsMock.mockResolvedValue([]);
-    startMock.mockClear();
+    startMock.mockReset();
+    startMock.mockResolvedValue({ status: "error", message: "test stop" });
   });
 
   it("surfaces identity_scope_missing as a persistent inline banner and strips the URL marker", async () => {
@@ -56,9 +58,10 @@ describe("EbaySellerPanel OAuth status", () => {
     const buttons = await screen.findAllByRole("button", { name: "Reconnect eBay" });
     expect(buttons.length).toBeGreaterThan(0);
     expect(screen.getByText(/saved authorization was rejected/i)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Publish with confirmation" }) as HTMLButtonElement).disabled).toBe(true);
+    const publishButton = screen.getByRole("button", { name: "Publish with confirmation" }) as HTMLButtonElement;
+    await waitFor(() => expect(publishButton.disabled).toBe(true));
     fireEvent.click(buttons[0]);
-    expect(startMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
   });
 
   it("shows distinct banners for other stages and no banner without a marker", async () => {
