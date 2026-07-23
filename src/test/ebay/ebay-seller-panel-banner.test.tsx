@@ -4,8 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { EbaySellerPanel } from "@/components/slabs/EbaySellerPanel";
 import type { Slab } from "@/lib/slabs/types";
 
-const accountsMock = vi.fn(async () => [] as Array<Record<string, unknown>>);
-const startMock = vi.fn(async () => ({ status: "error", message: "test stop" }));
+const { accountsMock, startMock } = vi.hoisted(() => ({
+  accountsMock: vi.fn(async () => [] as Array<Record<string, unknown>>),
+  startMock: vi.fn(async () => ({ status: "error", message: "test stop" })),
+}));
 vi.mock("@/lib/slabs/ebay-data", () => ({
   fetchEbayAccounts: accountsMock,
   fetchEbaySyncCursors: vi.fn(async () => []),
@@ -54,7 +56,7 @@ describe("EbaySellerPanel OAuth status", () => {
     const buttons = await screen.findAllByRole("button", { name: "Reconnect eBay" });
     expect(buttons.length).toBeGreaterThan(0);
     expect(screen.getByText(/saved authorization was rejected/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Publish with confirmation" })).toBeDisabled();
+    expect((screen.getByRole("button", { name: "Publish with confirmation" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(buttons[0]);
     expect(startMock).toHaveBeenCalledTimes(1);
   });
