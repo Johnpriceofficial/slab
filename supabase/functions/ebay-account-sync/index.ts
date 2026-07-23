@@ -1,3 +1,3 @@
-import { handleEbay } from "../_shared/ebay.ts";
+import { handleEbayAccountSyncV2 } from "../_shared/ebay-account-sync-v2.ts";
 
-Deno.serve((req) => handleEbay(req, "account_sync"));
+Deno.serve(handleEbayAccountSyncV2);
