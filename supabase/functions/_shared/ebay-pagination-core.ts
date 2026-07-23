@@ -60,6 +60,11 @@ export interface PaginatorArgs<T> {
   validateItem: (raw: unknown) => ItemValidation<T>;
   maxPages?: number;
   timeoutMs?: number;
+  // Per-page lease heartbeat: called BEFORE every provider page fetch (including
+  // the first). Returning false aborts with `sync_lease_lost` before that fetch —
+  // no further page, mapping, persistence, or completion occurs. It has no DB
+  // access itself; the caller injects an assert-and-extend of the sync lease.
+  beforePageFetch?: () => Promise<boolean>;
 }
 
 const isAbortError = (e: unknown): boolean => !!e && typeof e === "object" && (e as { name?: string }).name === "AbortError";
@@ -100,6 +105,9 @@ export async function fetchAllPages<T>(args: PaginatorArgs<T>): Promise<Paginate
 
   for (;;) {
     if (pages >= maxPages) return fail("pagination_limit_exceeded");
+    // Lease heartbeat BEFORE every page fetch (extends the lease during a long
+    // paginated run; a lost lease stops before this page is fetched).
+    if (args.beforePageFetch && !(await args.beforePageFetch())) return fail("sync_lease_lost");
     const canon = canonicalizeUrl(url);
     if (seen.has(canon)) return fail("pagination_loop");
     seen.add(canon);

@@ -17,7 +17,7 @@ import { type ListingDeps, routeListingWithToken } from "./ebay-listing-handler.
 import { fetchAllEbayOrders } from "./ebay-orders-pagination.ts";
 import { fetchAllEbayFinanceTransactions } from "./ebay-finances-pagination.ts";
 import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "./ebay-sync-handler.ts";
-import type { SyncResult } from "./ebay-sync-orchestrator.ts";
+import { syncBody } from "./ebay-sync-response.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 
 type Operation =
@@ -268,8 +268,8 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
   const ordersOrigin = new URL(API).origin;
   const financeOrigin = new URL(ebayApizBase(MODE)).origin;
   return {
-    fetchOrders: (accessToken, query) => fetchAllEbayOrders({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: ordersOrigin, accessToken, query }),
-    fetchFinances: (accessToken, query) => fetchAllEbayFinanceTransactions({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: financeOrigin, accessToken, query }),
+    fetchOrders: (accessToken, query, beforePageFetch) => fetchAllEbayOrders({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: ordersOrigin, accessToken, query, beforePageFetch }),
+    fetchFinances: (accessToken, query, beforePageFetch) => fetchAllEbayFinanceTransactions({ fetchImpl: (url, init) => fetch(url, init as RequestInit), apiOrigin: financeOrigin, accessToken, query, beforePageFetch }),
     resolveOrderMappings: async (accountId, skus) => {
       const { data, error } = await admin.from("ebay_listing_mappings").select("sku, slab_id").eq("ebay_account_id", accountId).in("sku", skus);
       if (error) return { ok: false };
@@ -280,8 +280,8 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
     persistOrders: async (accountId, shaped) => {
       const { data, error } = await admin.rpc("ebay_orders_persist", { p_account_id: accountId, p_orders: shaped });
       if (error) return { ok: false };
-      const p = (data && typeof data === "object" ? data : {}) as { orders?: number; line_items?: number };
-      return { ok: true, durableTotal: p.orders ?? 0, persisted: p.line_items ?? 0 };
+      const p = (data && typeof data === "object" ? data : {}) as { line_items?: number; confirmed_order_total?: number; confirmed_line_total?: number };
+      return { ok: true, durableTotal: p.confirmed_order_total ?? null, durableLines: p.confirmed_line_total ?? null, persisted: p.line_items ?? 0 };
     },
     persistFinances: async (accountId, shaped) => {
       const { data, error } = await admin.rpc("ebay_finance_transactions_apply", { p_account_id: accountId, p_transactions: shaped });
@@ -294,21 +294,30 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
       if (a.error) return { acquired: false, error: true };
       return { acquired: (a.data as { acquired?: boolean } | null)?.acquired === true, error: false };
     },
+    leaseAssert: async (accountId, resource, token) => {
+      const a = await admin.rpc("ebay_sync_lease_assert_and_extend", { p_account_id: accountId, p_resource_type: resource, p_token: token, p_ttl_seconds: 300 });
+      if (a.error) return false;
+      return (a.data as { held?: boolean } | null)?.held === true;
+    },
     leaseRelease: async (accountId, resource, token) => {
       const r = await admin.rpc("ebay_sync_lease_release", { p_account_id: accountId, p_resource_type: resource, p_token: token });
       if (r.error) return { released: false };
       return { released: (r.data as { released?: boolean } | null)?.released === true };
     },
-    syncStateLoad: async (accountId, resource) => {
-      const { data, error } = await admin.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: resource });
-      if (error) return { ok: false };
-      return { ok: true, highWatermarkAt: (data as { high_watermark_at?: string | null } | null)?.high_watermark_at ?? null };
+    syncBegin: async (accountId, resource, token) => {
+      const { data, error } = await admin.rpc("ebay_sync_state_load", { p_account_id: accountId, p_resource_type: resource, p_lease_token: token });
+      if (error) return { ok: false, errorCode: "sync_begin_failed" };
+      const d = (data as { ok?: boolean; run_id?: string; high_watermark_at?: string | null; error_code?: string } | null);
+      if (d?.ok !== true || !d.run_id) return { ok: false, errorCode: d?.error_code ?? "sync_begin_failed" };
+      return { ok: true, runId: d.run_id, highWatermarkAt: d.high_watermark_at ?? null };
     },
-    syncStateCommit: async (accountId, resource, args) => {
-      const { data, error } = await admin.rpc("ebay_sync_state_commit", { p_account_id: accountId, p_resource_type: resource, p_run_id: args.runId, p_high_watermark_at: args.highWatermarkAt, p_pages: args.pagesFetched, p_records_fetched: args.recordsFetched, p_records_persisted: args.recordsPersisted, p_durable_total: args.durableTotal });
-      return { ok: !error && (data as { ok?: boolean } | null)?.ok === true };
+    syncComplete: async (accountId, resource, token, args) => {
+      const { data, error } = await admin.rpc("ebay_sync_complete", { p_account_id: accountId, p_resource_type: resource, p_run_id: args.runId, p_lease_token: token, p_high_watermark_at: args.highWatermarkAt, p_overlap_start_at: args.overlapStartAt, p_pages: args.pagesFetched, p_records_fetched: args.recordsFetched, p_records_persisted: args.recordsPersisted, p_durable_total: args.durableTotal, p_latency_ms: Math.max(0, Math.round(args.latencyMs)) });
+      if (error) return { ok: false, errorCode: "sync_complete_rpc_failed" };
+      const d = (data as { ok?: boolean; error_code?: string } | null);
+      return d?.ok === true ? { ok: true } : { ok: false, errorCode: d?.error_code ?? "sync_complete_failed" };
     },
-    syncStateFail: async (accountId, resource, runId, errorCode) => {
+    syncFail: async (accountId, resource, runId, errorCode) => {
       const { data, error } = await admin.rpc("ebay_sync_state_fail", { p_account_id: accountId, p_resource_type: resource, p_run_id: runId, p_error_code: errorCode });
       return { ok: !error && (data as { ok?: boolean } | null)?.ok === true };
     },
@@ -316,19 +325,6 @@ function realSyncDeps(admin: AdminClient): SyncHandlerDeps {
     now: () => Date.now(),
     uuid: () => crypto.randomUUID(),
   };
-}
-
-// Map a SyncResult to a response body.
-function syncBody(r: SyncResult, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  const b: Record<string, unknown> = { status: r.status };
-  if (r.errorCode) b.error_code = r.errorCode;
-  if (r.pagesFetched !== undefined) b.pages_fetched = r.pagesFetched;
-  if (r.recordsFetched !== undefined) b.records_fetched = r.recordsFetched;
-  if (r.recordsPersisted !== undefined) b.records_persisted = r.recordsPersisted;
-  if (r.durableTotal !== undefined) b.durable_total = r.durableTotal;
-  if (r.deduplicated !== undefined) b.deduplicated = r.deduplicated;
-  if (r.highWatermarkAt !== undefined) b.high_watermark_at = r.highWatermarkAt;
-  return { ...b, ...extra };
 }
 
 // Cached eBay getPublicKey lookups (≈1h TTL) used to verify notification
@@ -979,7 +975,7 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
     let proposedSales: unknown[] = [];
     const r = await runOrderSync(accountId, accessToken, { ...realSyncDeps(admin), collectProposedSales: (s) => { proposedSales = s; } });
     if (r.status === "success") {
-      return reply(syncBody(r, { mode: "synced", proposed_sales: proposedSales, proposed_sale_count: proposedSales.length, orders_synced: r.durableTotal ?? 0, source_label: "Seller’s Completed Sale", message: `${r.recordsFetched ?? 0} fetched · ${r.recordsPersisted ?? 0} persisted · ${r.deduplicated ?? 0} deduped · ${proposedSales.length} proposed sale(s).` }));
+      return reply(syncBody(r, { mode: "synced", processed_orders: r.recordsFetched ?? 0, processed_lines: r.recordsPersisted ?? 0, confirmed_order_total: r.durableTotal ?? 0, confirmed_line_total: r.durableSecondary ?? 0, proposed_sales: proposedSales, proposed_sale_count: proposedSales.length, orders_synced: r.durableTotal ?? 0, source_label: "Seller’s Completed Sale", message: `${r.recordsFetched ?? 0} fetched · ${r.recordsPersisted ?? 0} persisted · ${r.deduplicated ?? 0} deduped · ${proposedSales.length} proposed sale(s).` }));
     }
     return reply(syncBody(r), r.httpStatus);
   }
