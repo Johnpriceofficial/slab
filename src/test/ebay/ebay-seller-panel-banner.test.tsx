@@ -4,12 +4,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { EbaySellerPanel } from "@/components/slabs/EbaySellerPanel";
 import type { Slab } from "@/lib/slabs/types";
 
-vi.mock("@/lib/slabs/data", () => ({
-  fetchEbayAccounts: vi.fn(async () => []),
+const accountsMock = vi.fn(async () => [] as Array<Record<string, unknown>>);
+const startMock = vi.fn(async () => ({ status: "error", message: "test stop" }));
+vi.mock("@/lib/slabs/ebay-data", () => ({
+  fetchEbayAccounts: accountsMock,
+  fetchEbaySyncCursors: vi.fn(async () => []),
+  fetchEbayLocations: vi.fn(async () => []),
+  fetchEbayBusinessPolicies: vi.fn(async () => []),
   ebaySellerOperation: vi.fn(),
-  startEbayOAuth: vi.fn(),
+  startEbayOAuth: startMock,
 }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 
 const slab = {
   id: "s1", inventory_number: 46, card_name: "Test", grader: "PSA", grade: "9",
@@ -18,21 +23,21 @@ const slab = {
 
 function renderPanel() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
-    <QueryClientProvider client={qc}>
-      <EbaySellerPanel slab={slab} />
-    </QueryClientProvider>,
-  );
+  return render(<QueryClientProvider client={qc}><EbaySellerPanel slab={slab} /></QueryClientProvider>);
 }
 
-describe("EbaySellerPanel OAuth callback banner", () => {
-  beforeEach(() => { window.history.replaceState({}, "", "/slabs/s1"); });
+describe("EbaySellerPanel OAuth status", () => {
+  beforeEach(() => {
+    window.history.replaceState({}, "", "/slabs/s1");
+    accountsMock.mockResolvedValue([]);
+    startMock.mockClear();
+  });
 
   it("surfaces identity_scope_missing as a persistent inline banner and strips the URL marker", async () => {
     window.history.replaceState({}, "", "/slabs/s1?ebay=identity_scope_missing");
     renderPanel();
     expect(await screen.findByText(/required Identity permission/i)).toBeTruthy();
-    expect(window.location.search).toBe(""); // marker removed without reload
+    expect(window.location.search).toBe("");
   });
 
   it("shows a connected banner that can be dismissed", async () => {
@@ -41,6 +46,17 @@ describe("EbaySellerPanel OAuth callback banner", () => {
     expect(await screen.findByText(/account connected/i)).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Dismiss eBay status"));
     expect(screen.queryByText(/account connected/i)).toBeNull();
+  });
+
+  it("keeps a rejected account visible and shows an explicit Reconnect eBay action", async () => {
+    accountsMock.mockResolvedValue([{ id: "a1", display_label: "Connected eBay seller", connection_status: "reauthorization_required", privilege_status: "verified", connected_at: "2026-07-21T20:58:00Z" }]);
+    renderPanel();
+    const buttons = await screen.findAllByRole("button", { name: "Reconnect eBay" });
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(screen.getByText(/saved authorization was rejected/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Publish with confirmation" })).toBeDisabled();
+    fireEvent.click(buttons[0]);
+    expect(startMock).toHaveBeenCalledTimes(1);
   });
 
   it("shows distinct banners for other stages and no banner without a marker", async () => {
