@@ -122,6 +122,15 @@ jobs:
             bunx vitest run src/test/integration \
               --reporter=verbose --reporter=json --outputFile=/tmp/integration.json
 
+      - name: Upload integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-report
+          path: /tmp/integration.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Assert no integration test was skipped
         run: |
           SKIPPED=$(bun -e "const r = await Bun.file('/tmp/integration.json').json(); console.log(r.numPendingTests + r.numTodoTests)")
