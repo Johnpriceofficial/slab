@@ -87,24 +87,29 @@ suite("slab inventory maintenance", () => {
     expect(queued.error?.message ?? "").toMatch(/NOT_AUTHORIZED/i);
   });
 
-  it("lets an admin correct a visible inventory ID and rejects duplicates", async () => {
-    const first = await createSlab(`MAINT-A-${stamp}`);
-    const second = await createSlab(`MAINT-B-${stamp}`);
-    const target = Math.max(first.inventory_sequence, second.inventory_sequence) + 500;
-    const changed = await adminClient.rpc("reassign_slab_inventory_id", { p_slab_id: first.id, p_sequence: target });
-    expect(changed.error).toBeNull();
-    const duplicate = await adminClient.rpc("reassign_slab_inventory_id", { p_slab_id: second.id, p_sequence: target });
-    expect(duplicate.error?.message ?? "").toMatch(/INVENTORY_ID_ALREADY_USED|duplicate/i);
+  it("permanently rejects public inventory ID reassignment for an admin", async () => {
+    const slab = await createSlab(`MAINT-A-${stamp}`);
+    const originalSequence = slab.inventory_sequence;
+    const changed = await adminClient.rpc("reassign_slab_inventory_id", {
+      p_slab_id: slab.id,
+      p_sequence: originalSequence + 500,
+    });
+    expect(changed.error?.message ?? "").toMatch(/INVENTORY_ID_IMMUTABLE/i);
+    const current = await service.from("slabs").select("inventory_sequence").eq("id", slab.id).single();
+    expect(current.error).toBeNull();
+    expect(current.data?.inventory_sequence).toBe(originalSequence);
   });
 
-  it("compacts all remaining visible IDs to a consecutive sequence", async () => {
-    await createSlab(`MAINT-C-${stamp}`);
+  it("permanently rejects public inventory ID compaction and preserves sequences", async () => {
+    const slab = await createSlab(`MAINT-C-${stamp}`);
+    const before = await service.from("slabs").select("id, inventory_sequence").order("id");
+    expect(before.error).toBeNull();
     const result = await adminClient.rpc("compact_slab_inventory_ids");
-    expect(result.error).toBeNull();
-    const { data, error } = await service.from("slabs").select("inventory_sequence").order("inventory_sequence");
-    expect(error).toBeNull();
-    const sequences = (data ?? []).map((row) => row.inventory_sequence as number);
-    expect(sequences).toEqual(sequences.map((_, index) => index + 1));
+    expect(result.error?.message ?? "").toMatch(/INVENTORY_ID_IMMUTABLE/i);
+    const after = await service.from("slabs").select("id, inventory_sequence").order("id");
+    expect(after.error).toBeNull();
+    expect(after.data).toEqual(before.data);
+    expect(after.data?.some((row) => row.id === slab.id)).toBe(true);
   });
 
   it("keeps mixed valid and missing purge requests atomic", async () => {

@@ -10,7 +10,7 @@ import { analyzeSlab } from "@/lib/slabs/data";
 import { stageRawCard, rawIdentityGaps } from "@/lib/cards/stage-raw";
 import { classifyScannedItem, type ItemType } from "@/lib/slabs/classify-item";
 import { decideIntakeRoute } from "@/lib/slabs/intake-route";
-import { slabBackRequirement, canSkipBack } from "@/lib/slabs/back-capture";
+import { slabBackRequirement } from "@/lib/slabs/back-capture";
 import type { AnalyzeResult } from "@/server/analyze-slab/handler";
 
 type Phase = "starting" | "camera" | "busy" | "review" | "error";
@@ -25,16 +25,11 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Universal "Scan Item" scanner with a front/back workflow.
+ * Universal Scan Item scanner.
  *
- * Capture the front → analyze once → classify. A graded slab may require or
- * recommend the back (unreadable cert, low confidence, or disagreeing reads); a
- * raw card offers the back for condition/verification. The back can be captured,
- * uploaded, or skipped (when permitted); adding or replacing it triggers ONE
- * combined reanalysis, and unchanged images are never analyzed twice. A graded
- * item stages both images + the analysis into /slabs/new (no repeat call); a raw
- * item is created from the SAME extraction with no second model request.
- * Captures survive analysis/quota failures and route changes.
+ * A graded slab always may continue from a front image. The back is optional
+ * supplemental documentation. Adding or replacing it runs one combined analysis,
+ * but a missing back never disables routing into the slab workflow.
  */
 export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => void }) {
   const navigate = useNavigate();
@@ -44,8 +39,6 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const backInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  // The (front,back) File pair the current analysis was computed from — so the
-  // same unchanged images are never analyzed twice.
   const analyzedRef = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
 
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
@@ -110,15 +103,10 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
     return blob;
   }, []);
 
-  // Analyze the current pair, but only if it changed since the last run — the
-  // same unchanged images are never analyzed twice. A failure (e.g. quota) never
-  // discards the captured images.
   const analyzePair = useCallback(async (nextFront: SlabImageState, nextBack: SlabImageState | null, force = false) => {
-    if (!force && analyzedRef.current.front === nextFront.file && analyzedRef.current.back === (nextBack?.file ?? null)) {
-      return;
-    }
+    if (!force && analyzedRef.current.front === nextFront.file && analyzedRef.current.back === (nextBack?.file ?? null)) return;
     setPhase("busy");
-    setBusyLabel(nextBack ? "Reconciling front and back…" : "Analyzing item…");
+    setBusyLabel(nextBack ? "Analyzing front with supplemental back…" : "Analyzing front…");
     setAnalysisError("");
     try {
       const result = await analyzeSlab(
@@ -162,12 +150,12 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
   const addBack = async (image: SlabImageState) => {
     releaseSlabImageState(back);
     setBack(image);
-    await analyzePair(front!, image); // one combined reanalysis
+    await analyzePair(front!, image);
   };
 
   const captureBack = async () => {
     setPhase("busy");
-    setBusyLabel("Capturing back…");
+    setBusyLabel("Capturing optional back…");
     try {
       const blob = await captureBlob();
       const { image, error } = await createSlabImageState(blob, { fallbackName: "back.jpg" });
@@ -181,7 +169,7 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
 
   const uploadBack = async (file: File) => {
     setPhase("busy");
-    setBusyLabel("Preparing back…");
+    setBusyLabel("Preparing optional back…");
     const { image, error } = await createSlabImageState(file, { fallbackName: "back.jpg" });
     if (error || !image) {
       toast.error(error ?? "Could not use that image.");
@@ -206,10 +194,9 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
   const retakeBack = async () => {
     releaseSlabImageState(back);
     setBack(null);
-    await analyzePair(front!, null); // back removed → reconcile front-only (one call)
+    await analyzePair(front!, null);
   };
 
-  // ── Routing ────────────────────────────────────────────────────────────────
   const routeToSlab = () => {
     stageCameraCapture(front!, back, analysis);
     stopCamera();
@@ -219,12 +206,12 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
 
   const routeToRaw = async () => {
     if (!analysis) {
-      toast.error("Couldn't read the card. Reanalyze, add the back, or file it as a slab.");
+      toast.error("Couldn't read the card. Reanalyze the front, add an optional back, or file it as a slab.");
       return;
     }
     const gaps = rawIdentityGaps(analysis);
     if (gaps.length > 0) {
-      toast.error(`Still missing ${gaps.join(", ")} — capture the back or reanalyze.`);
+      toast.error(`Still missing ${gaps.join(", ")} — retake the front or add the back for raw-card condition evidence.`);
       return;
     }
     setPhase("busy");
@@ -233,31 +220,26 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
       const card = await stageRawCard(analysis, { front: front!.file, back: back?.file ?? null });
       toast.success(`${card.card_name} added as ${card.inventory_code}.`);
       onInventoryChange?.();
-      retakeFront(); // reset for the next scan; camera stays live
+      retakeFront();
     } catch (error) {
       toast.error(errorMessage(error));
       setPhase("review");
     }
   };
 
-  // ── Derived review state ────────────────────────────────────────────────────
   const classification = analysis ? classifyScannedItem(analysis) : null;
   const route = analysis ? decideIntakeRoute(classification!) : "choose";
   const effectiveType: ItemType | null = override ?? (route === "slab" ? "graded_slab" : route === "raw" ? "raw_card" : null);
   const backReq = analysis && effectiveType === "graded_slab" ? slabBackRequirement(analysis) : null;
-  const backBlocked = !!backReq && backReq.requirement === "required" && !back && !canSkipBack(backReq.requirement);
 
   return (
     <section className="relative overflow-hidden rounded-2xl bg-slate-950 text-white shadow-2xl sm:min-h-[680px]">
       <div ref={frameRef} className="relative h-[calc(100dvh-8.5rem)] min-h-[520px] w-full overflow-hidden sm:h-[680px]">
         <video ref={videoRef} playsInline muted className="h-full w-full object-cover" aria-label="Live camera preview" />
         <div className="pointer-events-none absolute inset-0 bg-black/20" />
-        <div
-          ref={guideRef}
-          className="pointer-events-none absolute left-1/2 top-1/2 aspect-[5/7] h-[70%] max-h-[560px] -translate-x-1/2 -translate-y-1/2 rounded-[5%] border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.36)]"
-        >
+        <div ref={guideRef} className="pointer-events-none absolute left-1/2 top-1/2 aspect-[5/7] h-[70%] max-h-[560px] -translate-x-1/2 -translate-y-1/2 rounded-[5%] border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.36)]">
           <span className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/55 px-3 py-1 text-xs font-medium">
-            {phase === "review" ? "Add the back, or file this item" : "Align the card or slab inside the guide"}
+            {phase === "review" ? "Review the front or add an optional back" : "Align the card or slab inside the guide"}
           </span>
           <i className="absolute -left-1 -top-1 h-10 w-10 rounded-tl-xl border-l-4 border-t-4 border-secondary" />
           <i className="absolute -right-1 -top-1 h-10 w-10 rounded-tr-xl border-r-4 border-t-4 border-secondary" />
@@ -266,86 +248,45 @@ export function CardScanner({ onInventoryChange }: { onInventoryChange?: () => v
         </div>
 
         <div className="absolute left-3 right-3 top-3 flex items-center justify-end gap-2">
-          <Button
-            type="button" variant="outline" size="icon"
-            className="border-white/40 bg-black/50 text-white hover:bg-black/70 hover:text-white"
-            onClick={() => setFacingMode((mode) => (mode === "environment" ? "user" : "environment"))}
-            disabled={phase === "busy"}
-            aria-label="Flip camera"
-          ><FlipHorizontal2 /></Button>
+          <Button type="button" variant="outline" size="icon" className="border-white/40 bg-black/50 text-white hover:bg-black/70 hover:text-white" onClick={() => setFacingMode((mode) => (mode === "environment" ? "user" : "environment"))} disabled={phase === "busy"} aria-label="Flip camera"><FlipHorizontal2 /></Button>
         </div>
 
-        {phase === "starting" && (
-          <div className="absolute inset-0 grid place-items-center bg-slate-950/80"><div className="text-center"><Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin" /><p>Starting camera…</p></div></div>
-        )}
-        {phase === "error" && (
-          <div className="absolute inset-0 grid place-items-center bg-slate-950 p-6 text-center">
-            <div className="max-w-sm"><ShieldAlert className="mx-auto mb-3 h-10 w-10 text-amber-400" /><h2 className="text-xl font-bold">Camera unavailable</h2><p className="mt-2 text-sm text-white/70">{cameraError}</p><Button className="mt-5" onClick={() => void startCamera()}><RotateCcw /> Try again</Button></div>
-          </div>
-        )}
-        {phase === "busy" && (
-          <div className="absolute inset-0 grid place-items-center bg-slate-950/70">
-            <div className="text-center"><Sparkles className="mx-auto mb-3 h-8 w-8 animate-pulse text-primary" /><p>{busyLabel || "Working…"}</p></div>
-          </div>
-        )}
-
-        {phase === "camera" && (
-          <div className="absolute bottom-5 left-0 right-0 flex justify-center">
-            <Button
-              size="lg" className="h-16 rounded-full border-4 border-white bg-primary px-8 text-lg shadow-xl hover:bg-primary/90"
-              onClick={() => void captureFront()}
-            ><Camera className="h-6 w-6" /> Scan item</Button>
-          </div>
-        )}
+        {phase === "starting" && <div className="absolute inset-0 grid place-items-center bg-slate-950/80"><div className="text-center"><Loader2 className="mx-auto mb-3 h-9 w-9 animate-spin" /><p>Starting camera…</p></div></div>}
+        {phase === "error" && <div className="absolute inset-0 grid place-items-center bg-slate-950 p-6 text-center"><div className="max-w-sm"><ShieldAlert className="mx-auto mb-3 h-10 w-10 text-amber-400" /><h2 className="text-xl font-bold">Camera unavailable</h2><p className="mt-2 text-sm text-white/70">{cameraError}</p><Button className="mt-5" onClick={() => void startCamera()}><RotateCcw /> Try again</Button></div></div>}
+        {phase === "busy" && <div className="absolute inset-0 grid place-items-center bg-slate-950/70"><div className="text-center"><Sparkles className="mx-auto mb-3 h-8 w-8 animate-pulse text-primary" /><p>{busyLabel || "Working…"}</p></div></div>}
+        {phase === "camera" && <div className="absolute bottom-5 left-0 right-0 flex justify-center"><Button size="lg" className="h-16 rounded-full border-4 border-white bg-primary px-8 text-lg shadow-xl hover:bg-primary/90" onClick={() => void captureFront()}><Camera className="h-6 w-6" /> Scan item</Button></div>}
 
         {phase === "review" && front && (
           <div className="absolute inset-x-3 bottom-3 max-h-[80%] overflow-y-auto rounded-2xl bg-white p-4 text-slate-900 shadow-2xl sm:left-1/2 sm:right-auto sm:w-[min(94%,600px)] sm:-translate-x-1/2">
             <div className="flex items-start gap-3">
-              <div className="flex gap-1">
-                <img src={front.previewUrl} alt="Captured front" className="h-28 w-20 rounded-lg object-cover shadow" />
-                {back && <img src={back.previewUrl} alt="Captured back" className="h-28 w-20 rounded-lg object-cover shadow" />}
-              </div>
+              <div className="flex gap-1"><img src={front.previewUrl} alt="Captured front" className="h-28 w-20 rounded-lg object-cover shadow" />{back && <img src={back.previewUrl} alt="Captured back" className="h-28 w-20 rounded-lg object-cover shadow" />}</div>
               <div className="min-w-0 flex-1">
-                <h2 className="font-bold">
-                  {effectiveType === "graded_slab" ? "Graded slab" : effectiveType === "raw_card" ? "Raw card" : "Couldn't determine the item type"}
-                </h2>
+                <h2 className="font-bold">{effectiveType === "graded_slab" ? "Graded slab" : effectiveType === "raw_card" ? "Raw card" : "Couldn't determine the item type"}</h2>
                 {analysisError ? (
-                  <p className="mt-1 text-sm text-amber-700">Couldn't analyze ({analysisError}) — your capture is kept. Choose the type, reanalyze, or add the back.</p>
-                ) : backReq && backReq.requirement !== "optional" ? (
-                  <p className={`mt-1 text-sm ${backReq.requirement === "required" ? "text-red-700" : "text-amber-700"}`}>{backReq.reason}</p>
+                  <p className="mt-1 text-sm text-amber-700">Couldn't analyze ({analysisError}) — your front capture is kept. Reanalyze, choose the type, or add an optional back.</p>
+                ) : backReq && backReq.requirement === "recommended" ? (
+                  <p className="mt-1 text-sm text-amber-700">{backReq.reason}</p>
                 ) : effectiveType === "raw_card" ? (
-                  <p className="mt-1 text-sm text-slate-600">Add the back to record condition (whitening, edges, surface) — optional.</p>
+                  <p className="mt-1 text-sm text-slate-600">Add the back to record condition evidence — optional.</p>
                 ) : (
-                  <p className="mt-1 text-sm text-slate-600">The front is enough. The back is optional.</p>
+                  <p className="mt-1 text-sm text-slate-600">The front is sufficient for the graded-slab workflow. The back is optional.</p>
                 )}
               </div>
             </div>
 
-            {/* Back controls */}
             <div className="mt-4 flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={() => void captureBack()}><Camera className="mr-1 h-4 w-4" /> {back ? "Recapture back" : "Capture back"}</Button>
-              <Button variant="outline" size="sm" onClick={() => backInputRef.current?.click()}><Upload className="mr-1 h-4 w-4" /> Upload back</Button>
+              <Button variant="outline" size="sm" onClick={() => void captureBack()}><Camera className="mr-1 h-4 w-4" /> {back ? "Recapture optional back" : "Add Back Image"}</Button>
+              <Button variant="outline" size="sm" onClick={() => backInputRef.current?.click()}><Upload className="mr-1 h-4 w-4" /> Upload optional back</Button>
               {back && <Button variant="ghost" size="sm" onClick={() => void retakeBack()}>Remove back</Button>}
               <Button variant="ghost" size="sm" onClick={() => void analyzePair(front, back, true)}><Sparkles className="mr-1 h-4 w-4" /> Reanalyze</Button>
               <Button variant="ghost" size="sm" onClick={retakeFront}><RotateCcw className="mr-1 h-4 w-4" /> Retake front</Button>
             </div>
 
-            {/* Type + route. Manual override is always available. */}
             <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
-              <div className="flex gap-2">
-                <Button variant={effectiveType === "raw_card" ? "default" : "outline"} size="sm" onClick={() => setOverride("raw_card")}><Layers className="mr-1 h-4 w-4" /> Raw</Button>
-                <Button variant={effectiveType === "graded_slab" ? "default" : "outline"} size="sm" onClick={() => setOverride("graded_slab")}><SquareStack className="mr-1 h-4 w-4" /> Slab</Button>
-              </div>
-              {effectiveType === "graded_slab" ? (
-                <Button onClick={routeToSlab} disabled={backBlocked} title={backBlocked ? "Capture the back first" : undefined}>Continue to slab details</Button>
-              ) : effectiveType === "raw_card" ? (
-                <Button onClick={() => void routeToRaw()}>Add to raw inventory</Button>
-              ) : (
-                <span className="text-sm text-slate-500">Choose Raw or Slab to continue.</span>
-              )}
+              <div className="flex gap-2"><Button variant={effectiveType === "raw_card" ? "default" : "outline"} size="sm" onClick={() => setOverride("raw_card")}><Layers className="mr-1 h-4 w-4" /> Raw</Button><Button variant={effectiveType === "graded_slab" ? "default" : "outline"} size="sm" onClick={() => setOverride("graded_slab")}><SquareStack className="mr-1 h-4 w-4" /> Slab</Button></div>
+              {effectiveType === "graded_slab" ? <Button onClick={routeToSlab}>Continue to slab details</Button> : effectiveType === "raw_card" ? <Button onClick={() => void routeToRaw()}>Add to raw inventory</Button> : <span className="text-sm text-slate-500">Choose Raw or Slab to continue.</span>}
             </div>
-            <input ref={backInputRef} type="file" accept="image/*" className="hidden" aria-label="Upload back image"
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadBack(f); }} />
+            <input ref={backInputRef} type="file" accept="image/*" className="hidden" aria-label="Upload optional back image" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadBack(f); }} />
           </div>
         )}
       </div>

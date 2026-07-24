@@ -1,8 +1,6 @@
 /**
- * Displays the PROPOSED identity fields returned by the analyze-slab function.
- * Nothing here writes to the database or the form automatically — the operator
- * clicks Apply (per field or all readable) to populate the still-editable form.
- * Confidence, source, unreadable flags, and label/card mismatch are all shown.
+ * Displays PROPOSED identity fields returned by analyze-slab. The operator reviews
+ * and applies values; no proposal is silently promoted to verified data.
  */
 
 import { AlertTriangle, Check, CheckCircle2, ImageDown, Sparkles } from "lucide-react";
@@ -29,18 +27,14 @@ const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
 
 export interface SlabAnalysisPanelProps {
   result: AnalyzeResult;
-  /** Whether a back image was part of this analysis — tunes the recapture advice. */
   backProvided?: boolean;
   onApplyField: (key: AnalyzeFieldKey, value: string) => void;
   onApplyAll: (values: Partial<Record<AnalyzeFieldKey, string>>) => void;
 }
 
-/** A readable field below this confidence is surfaced for extra scrutiny. */
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
-
 const CERT_UNREADABLE_MESSAGE =
-  "Certification number is present but not readable with confidence. " +
-  "Upload a sharper front image, upload the back image, or enter it manually.";
+  "Certification number was not readable with confidence. Retake a sharper, glare-free front-label image or enter it manually. An optional back image may provide supplemental evidence, but is not required to continue.";
 
 const SUFFICIENCY_STYLE = {
   sufficient: { border: "border-emerald-500/40", bg: "bg-emerald-500/5", text: "text-emerald-700", Icon: CheckCircle2 },
@@ -52,8 +46,6 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
   const readableKeys = ANALYZE_FIELD_KEYS.filter((k) => result.proposed[k].readable);
   const sufficiency = assessFrontImageSufficiency(result, { backProvided });
   const suffStyle = SUFFICIENCY_STYLE[sufficiency.level];
-  // The certification number is uniquely never-guessed: when it can't be read,
-  // give the operator the exact, actionable next steps rather than a bare flag.
   const certUnreadable = !result.proposed.certification_number.readable;
 
   const applyAll = () => {
@@ -78,7 +70,6 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
         </Button>
       </div>
 
-      {/* Front-image sufficiency — is the front enough, or is the back needed? */}
       <div className={`flex items-start gap-2 rounded-md border ${suffStyle.border} ${suffStyle.bg} p-2 text-sm ${suffStyle.text}`}>
         <suffStyle.Icon className="mt-0.5 h-4 w-4 shrink-0" />
         <span>{sufficiency.message}</span>
@@ -102,8 +93,7 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
       )}
 
       <p className="text-xs text-muted-foreground">
-        These are AI-proposed values, not confirmed data. Apply them, then verify and correct every field before
-        running PriceCharting or saving.
+        These are AI-proposed values, not confirmed data. Apply them, then verify and correct every field before running PriceCharting or saving.
       </p>
 
       <div className="grid gap-2 sm:grid-cols-2">
@@ -113,25 +103,15 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
             <div key={key} className="flex items-center justify-between gap-2 rounded border bg-background px-3 py-2 text-sm">
               <div className="min-w-0">
                 <p className="text-xs text-muted-foreground">{FIELD_LABELS[key]}</p>
-                {f.readable ? (
-                  <p className="truncate font-medium">{f.value}</p>
-                ) : (
-                  <p className="italic text-muted-foreground">Unreadable — enter manually</p>
-                )}
+                {f.readable ? <p className="truncate font-medium">{f.value}</p> : <p className="italic text-muted-foreground">Unreadable — enter manually</p>}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {f.readable && (
                   <>
-                    <Badge
-                      variant={f.confidence < LOW_CONFIDENCE_THRESHOLD ? "destructive" : "outline"}
-                      className="text-[10px]"
-                      title={f.confidence < LOW_CONFIDENCE_THRESHOLD ? "Low confidence — verify this field against the photo" : undefined}
-                    >
+                    <Badge variant={f.confidence < LOW_CONFIDENCE_THRESHOLD ? "destructive" : "outline"} className="text-[10px]" title={f.confidence < LOW_CONFIDENCE_THRESHOLD ? "Low confidence — verify this field against the photo" : undefined}>
                       {Math.round(f.confidence * 100)}% · {f.source}
                     </Badge>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => onApplyField(key, f.value as string)}>
-                      Apply
-                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => onApplyField(key, f.value as string)}>Apply</Button>
                   </>
                 )}
               </div>
