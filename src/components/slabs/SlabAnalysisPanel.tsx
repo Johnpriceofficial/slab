@@ -1,6 +1,9 @@
 /**
- * Displays PROPOSED identity fields returned by analyze-slab. The operator reviews
- * and applies values; no proposal is silently promoted to verified data.
+ * Displays analyze-slab identity evidence plus the intake automation summary.
+ *
+ * Safe, high-confidence values may already have been promoted into the canonical
+ * form by NewSlab. The per-field Apply controls remain as a recovery path for
+ * fields the automation deliberately left for review.
  */
 
 import { AlertTriangle, Check, CheckCircle2, ImageDown, Sparkles } from "lucide-react";
@@ -9,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { ANALYZE_FIELD_KEYS, type AnalyzeFieldKey, type AnalyzeResult } from "@/server/analyze-slab/handler";
 import { assessFrontImageSufficiency } from "@/lib/slabs/image-sufficiency";
 
-const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
+const ANALYSIS_FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
   card_name: "Card Name",
   set: "Set",
   card_number: "Card #",
@@ -25,9 +28,21 @@ const FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
   label_description: "Label Description",
 };
 
+export interface AnalysisAutomationSummary {
+  automaticallyPopulated: string[];
+  requiringReview: string[];
+  unresolvedCanonicalFields: string[];
+  certificationStatus: string;
+  priceChartingProduct: string;
+  selectedValuationTier: string;
+  guideValue: string;
+  verificationLevel: string;
+}
+
 export interface SlabAnalysisPanelProps {
   result: AnalyzeResult;
   backProvided?: boolean;
+  automation?: AnalysisAutomationSummary;
   onApplyField: (key: AnalyzeFieldKey, value: string) => void;
   onApplyAll: (values: Partial<Record<AnalyzeFieldKey, string>>) => void;
 }
@@ -42,11 +57,24 @@ const SUFFICIENCY_STYLE = {
   insufficient: { border: "border-destructive/40", bg: "bg-destructive/5", text: "text-destructive", Icon: AlertTriangle },
 } as const;
 
-export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyAll }: SlabAnalysisPanelProps) {
+function fallbackCertificationStatus(result: AnalyzeResult): string {
+  const grader = result.proposed.grader.value?.trim() || "this grader";
+  if (!result.proposed.certification_number.readable) {
+    return "Needs review — certification number was not readable with confidence.";
+  }
+  return `Visually extracted for ${grader}. Certification database verification is not configured for this grader.`;
+}
+
+function listText(values: string[]): string {
+  return values.length > 0 ? values.join(", ") : "None";
+}
+
+export function SlabAnalysisPanel({ result, backProvided, automation, onApplyField, onApplyAll }: SlabAnalysisPanelProps) {
   const readableKeys = ANALYZE_FIELD_KEYS.filter((k) => result.proposed[k].readable);
   const sufficiency = assessFrontImageSufficiency(result, { backProvided });
   const suffStyle = SUFFICIENCY_STYLE[sufficiency.level];
   const certUnreadable = !result.proposed.certification_number.readable;
+  const certificationStatus = automation?.certificationStatus ?? fallbackCertificationStatus(result);
 
   const applyAll = () => {
     const values: Partial<Record<AnalyzeFieldKey, string>> = {};
@@ -62,7 +90,7 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-primary" />
-          <span className="font-medium">Proposed identity — review before saving</span>
+          <span className="font-medium">Analysis automation summary</span>
           <Badge variant="outline">{Math.round(result.overall_confidence * 100)}% overall</Badge>
         </div>
         <Button type="button" size="sm" variant="outline" onClick={applyAll} disabled={readableKeys.length === 0}>
@@ -73,6 +101,41 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
       <div className={`flex items-start gap-2 rounded-md border ${suffStyle.border} ${suffStyle.bg} p-2 text-sm ${suffStyle.text}`}>
         <suffStyle.Icon className="mt-0.5 h-4 w-4 shrink-0" />
         <span>{sufficiency.message}</span>
+      </div>
+
+      <div className="grid gap-2 rounded-md border bg-background p-3 text-sm sm:grid-cols-2">
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Automatically populated</p>
+          <p>{listText(automation?.automaticallyPopulated ?? [])}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Requires review</p>
+          <p>{listText(automation?.requiringReview ?? [])}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Certification status</p>
+          <p>{certificationStatus}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Verification level</p>
+          <p>{automation?.verificationLevel ?? "Visually verified evidence only — official certification lookup not configured."}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Exact PriceCharting product</p>
+          <p>{automation?.priceChartingProduct ?? "Not linked yet"}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Selected valuation tier</p>
+          <p>{automation?.selectedValuationTier ?? "Not selected yet"}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Guide value</p>
+          <p>{automation?.guideValue ?? "Not resolved yet"}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">Missing from canonical form</p>
+          <p>{listText(automation?.unresolvedCanonicalFields ?? [])}</p>
+        </div>
       </div>
 
       {certUnreadable && (
@@ -93,7 +156,7 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
       )}
 
       <p className="text-xs text-muted-foreground">
-        These are AI-proposed values, not confirmed data. Apply them, then verify and correct every field before running PriceCharting or saving.
+        These are AI-proposed readings. Auto-populated fields came from high-confidence evidence; review fields remain manual until the operator resolves them.
       </p>
 
       <div className="grid gap-2 sm:grid-cols-2">
@@ -102,7 +165,7 @@ export function SlabAnalysisPanel({ result, backProvided, onApplyField, onApplyA
           return (
             <div key={key} className="flex items-center justify-between gap-2 rounded border bg-background px-3 py-2 text-sm">
               <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">{FIELD_LABELS[key]}</p>
+                <p className="text-xs text-muted-foreground">{ANALYSIS_FIELD_LABELS[key]}</p>
                 {f.readable ? <p className="truncate font-medium">{f.value}</p> : <p className="italic text-muted-foreground">Unreadable — enter manually</p>}
               </div>
               <div className="flex shrink-0 items-center gap-2">
