@@ -85,11 +85,11 @@ var INSTRUCTION = `Extract these fields from the slab photos and return JSON wit
   "warnings": [ <string> ]
 }
 Fields: ${ANALYZE_FIELD_KEYS.join(", ")}.
-Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. rarity is the printed rarity (e.g. "Mega Attack Rare"). finish is the print treatment (e.g. "Holo", "Reverse Holo", "Non-Holo"). variation is the combined descriptor when the card shows one (e.g. "Mega Attack Rare - Holo"). COMPATIBLE READINGS ARE NOT CONFLICTS. A numeric grade "10" alongside a label "PRISTINE" is grade="10", grade_label="PRISTINE" — never report that as a grade conflict. A rarity "Mega Attack Rare" alongside a finish "Holo" may combine into variation "Mega Attack Rare - Holo" — never report that as a variation conflict. Only a genuine front-vs-back or label-vs-card DISAGREEMENT on the same field is a conflict. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
+Rules: certification_number is a STRING — preserve leading zeros, never a number. The certification/serial number is printed on the grading company's label (CGC, PSA, BGS, SGC), usually a long digit string and often SMALL — look closely at the label and at every supplied label-region variant (original crop, corrected crop, enhanced crop, grayscale crop, sharpened crop, and thresholded crop) before deciding. read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/glared to read with confidence, set readable=false for certification_number and DO NOT guess (a wrong cert number is worse than a blank one). Treat 0/6/8, 1/7, 3/5/8, and 4/9 as high-risk ambiguity groups for certification digits too; if a digit falls in one of those groups and cannot be resolved, mark the field unreadable rather than choosing the closest-looking digit. card_number is a STRING and MUST be read digit by digit against the printed numerator/denominator (e.g. "016/064"), never estimated from a quick glance. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause of a silently wrong card number. If any digit in the numerator could plausibly be one of a confusable pair, or is small/blurred/glared, you MUST report confidence <= 0.6 for card_number and add a warning naming the ambiguous digit(s) — do not report high confidence on a guess. A wrong card number causes a downstream product-match failure that looks just like a legitimate no-match, so hiding uncertainty behind a high confidence score is worse than flagging it. This field is independently re-verified regardless of the confidence you report, so report your GENUINE confidence rather than inflating it. grade is ONLY the numeric grade as a STRING (e.g. "10", "9.5"). grade_label is the grader's DESIGNATION/TIER printed with it — e.g. CGC "PRISTINE" or "GEM MINT", PSA "GEM MT", BGS "PRISTINE"/"BLACK LABEL". From a label reading "PRISTINE 10", grade="10" and grade_label="PRISTINE". NEVER drop the designation or fold it into grade. rarity is the printed rarity (e.g. "Mega Attack Rare"). finish is the print treatment (e.g. "Holo", "Reverse Holo", "Non-Holo"). variation is the combined descriptor when the card shows one (e.g. "Mega Attack Rare - Holo"). COMPATIBLE READINGS ARE NOT CONFLICTS. A numeric grade "10" alongside a label "PRISTINE" is grade="10", grade_label="PRISTINE" — never report that as a grade conflict. A rarity "Mega Attack Rare" alongside a finish "Holo" may combine into variation "Mega Attack Rare - Holo" — never report that as a variation conflict. Only a genuine front-vs-back or label-vs-card DISAGREEMENT on the same field is a conflict. If the label and the visible card disagree, set label_matches_card=false and add a warning. Flag any unreadable field instead of guessing.`;
 var VERIFY_CARD_NUMBER_SYSTEM_PROMPT = 'You are independently re-verifying ONE specific field on a graded trading-card slab label: the card_number (numerator/denominator, e.g. "016/064"). Treat this as a fresh, independent examination — you have no memory of any prior reading, and you must not anchor on what a first pass might have guessed. You return ONLY strict JSON, no prose.';
 var VERIFY_CARD_NUMBER_INSTRUCTION = 'Look ONLY at the card_number printed on the slab label. Read every digit individually. Digit pairs that are frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the most common source of a wrong reading; scrutinize each digit against these confusable pairs before deciding. Return ONLY this exact JSON shape: { "card_number": { "value": <string|null>, "confidence": <0..1>, "readable": <bool> } }. If any digit is genuinely ambiguous or the text is too small/blurred/glared to be certain, set readable=false and value=null — never guess the closest-looking digit.';
 var VERIFY_CERTIFICATION_SYSTEM_PROMPT = "You are independently re-verifying ONE field on a graded-card label: the certification_number. This is a fresh examination. You are not shown and must not infer any earlier prediction. Return only schema-conforming output.";
-var VERIFY_CERTIFICATION_INSTRUCTION = "Look ONLY at the certification_number printed on the grading label. Read each character independently and preserve leading zeros. Return the exact certification_number schema. If glare, blur, size, or a confusable character prevents a reliable reading, set readable=false and value=null. Never reconstruct or guess a missing character.";
+var VERIFY_CERTIFICATION_INSTRUCTION = "Look ONLY at the certification_number printed on the grading label. Read each character independently and preserve leading zeros. Compare all supplied label-region variants: original, corrected, enhanced, grayscale, sharpened, and thresholded. Return the exact certification_number schema. If glare, blur, size, or a confusable character prevents a reliable reading, set readable=false and value=null. Pay special attention to 0/6/8, 1/7, 3/5/8, and 4/9. Never reconstruct or guess a missing character.";
 var VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT = "You are independently rereading critical identity and artwork evidence on a graded-card slab. This is a fresh examination. You are not shown any earlier transcription or marketplace candidate. Return only schema-conforming output and never infer unreadable text.";
 var VERIFY_CRITICAL_IDENTITY_INSTRUCTION = "Independently reread the critical identity fields card_name, grader, grade, language, and major variation. Also describe only directly visible artwork evidence: character, composition, border, set symbol, collector number, rarity marking, promo marking, and error/variation markings. If evidence is not readable or visible, return null; never use outside product knowledge and never reconstruct a character or digit.";
 function clamp01(n) {
@@ -160,8 +160,59 @@ async function reverifyCardNumber(deps, images, proposed, warnings) {
     `Card number could not be verified: two independent readings disagree ("${first.value}" vs "${second.value}"). Enter the correct number manually after checking the physical slab — never guessing between disagreeing reads.`
   );
 }
+function normalizedCert(value) {
+  return (value ?? "").replace(/[\s-]+/g, "").toUpperCase();
+}
+function detectedGrader(value) {
+  const g = (value ?? "").trim().toUpperCase();
+  if (g.includes("CGC")) return "CGC";
+  if (g.includes("PSA")) return "PSA";
+  if (g.includes("BGS") || g.includes("BECKETT")) return "BGS";
+  if (g.includes("SGC")) return "SGC";
+  return "OTHER";
+}
+function validateCertificationCandidate(value, grader) {
+  const normalized = normalizedCert(value);
+  if (!normalized) return { ok: false, reason: "blank certification number" };
+  if (/[?*_[\]{}()]/.test(value ?? "")) return { ok: false, reason: "contains an unresolved/ambiguous character marker" };
+  if (grader === "CGC" || grader === "PSA" || grader === "BGS" || grader === "SGC") {
+    if (!/^\d{6,16}$/.test(normalized)) {
+      return { ok: false, reason: `${grader} certification numbers must resolve to a 6-16 digit numeric string` };
+    }
+    return { ok: true, reason: null };
+  }
+  if (!/^[A-Z0-9]{5,32}$/.test(normalized)) {
+    return { ok: false, reason: "certification number did not match the supported alphanumeric format" };
+  }
+  return { ok: true, reason: null };
+}
+function certAmbiguityNote(first, second) {
+  const a = normalizedCert(first);
+  const b = normalizedCert(second);
+  if (a.length !== b.length || !a || !b) return null;
+  const groups = [
+    ["0", "6", "8"],
+    ["1", "7"],
+    ["3", "5", "8"],
+    ["4", "9"]
+  ];
+  const notes = [];
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === b[i]) continue;
+    const group = groups.find((candidate) => candidate.includes(a[i]) && candidate.includes(b[i]));
+    if (group) notes.push(`position ${i + 1} (${group.join("/")})`);
+  }
+  return notes.length > 0 ? ` Ambiguous digit group(s): ${notes.join(", ")}.` : null;
+}
 async function reverifyCertificationNumber(deps, images, proposed, warnings) {
   const first = proposed.certification_number;
+  const grader = detectedGrader(proposed.grader.value);
+  const firstValidity = validateCertificationCandidate(first.value, grader);
+  if (!firstValidity.ok) {
+    proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+    warnings.push(`Certification number needs review: ${firstValidity.reason}. Never save an uncertain certification digit.`);
+    return;
+  }
   let second;
   try {
     const text = await deps.callModel({
@@ -179,14 +230,20 @@ async function reverifyCertificationNumber(deps, images, proposed, warnings) {
     warnings.push("Certification number was not clear enough for an independent reread. Verify it manually from a closer, glare-free label photograph.");
     return;
   }
-  const normalize = (value) => (value ?? "").replace(/\s+/g, "").toUpperCase();
-  if (normalize(first.value) === normalize(second.value)) {
+  const secondValidity = validateCertificationCandidate(second.value, grader);
+  if (!secondValidity.ok) {
+    proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+    warnings.push(`Certification number needs review: independent reread ${secondValidity.reason}. Never save an uncertain certification digit.`);
+    return;
+  }
+  if (normalizedCert(first.value) === normalizedCert(second.value)) {
     proposed.certification_number = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
     return;
   }
   proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+  const ambiguity = certAmbiguityNote(first.value, second.value) ?? "";
   warnings.push(
-    `Certification number needs review: independent readings disagree ("${first.value}" vs "${second.value}"). Do not save a verified certification number until the original photograph resolves every character.`
+    `Certification number needs review: independent readings disagree ("${first.value}" vs "${second.value}"). Do not save a verified certification number until the original photograph resolves every character.` + ambiguity
   );
 }
 function parseGradeReading(raw) {

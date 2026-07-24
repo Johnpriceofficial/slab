@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState } from "react";
+import { cloneElement, isValidElement, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -14,18 +14,25 @@ import { ImageUploader, type SlabImageState } from "@/components/slabs/ImageUplo
 import { consumeCameraCapture } from "@/lib/slabs/camera-capture";
 import { PriceChartingPanel, type SelectedPriceCharting } from "@/components/slabs/PriceChartingPanel";
 import type { ImageSource } from "@/server/pricecharting/handler";
-import { SlabAnalysisPanel } from "@/components/slabs/SlabAnalysisPanel";
+import { SlabAnalysisPanel, type AnalysisAutomationSummary } from "@/components/slabs/SlabAnalysisPanel";
 import { SlabPricingCard } from "@/components/slabs/SlabPricingCard";
-import { analyzeSlab, linkAnalysisRun, recordPricechartingConfirmation, type PricechartingConfirmation } from "@/lib/slabs/data";
+import {
+  analyzeSlab,
+  linkAnalysisRun,
+  priceChartingSearch,
+  priceChartingValue,
+  recordPricechartingConfirmation,
+  type PricechartingConfirmation,
+} from "@/lib/slabs/data";
 import { SCORING_VERSION } from "@/lib/pricecharting/matching";
-import type { AnalyzeFieldKey, AnalyzeResult } from "@/server/analyze-slab/handler";
+import { ANALYZE_FIELD_KEYS, type AnalyzeFieldKey, type AnalyzeResult } from "@/server/analyze-slab/handler";
 import {
   GRADERS,
   LANGUAGES,
   VERIFICATION_STATUSES,
   LABEL_ACCURACY,
 } from "@/lib/slabs/constants";
-import { dollarsToCents, centsToInputString, todayLocalDate } from "@/lib/slabs/format";
+import { dollarsToCents, centsToInputString, formatCents, todayLocalDate } from "@/lib/slabs/format";
 import { priceVariancePercent } from "@/lib/slabs/compute-stats";
 import { deriveValuation } from "@/lib/slabs/valuation-derive";
 import { buildPricingModel } from "@/lib/slabs/pricing-display";
@@ -38,6 +45,7 @@ import {
   type ValuationProvenance,
 } from "@/lib/slabs/valuation-provenance";
 import { buildPricingPersist, type SlabPricingWrite } from "@/lib/slabs/pricing-tiers";
+import { buildAutomaticAnalysisPatch, type CanonicalIdentityDraft } from "@/lib/slabs/analysis-auto-apply";
 import {
   persistRequiredConfirmation,
   saveSlab,
@@ -68,6 +76,22 @@ const EMPTY_IDENTITY = {
   verification_status: "unverified",
 };
 
+const ANALYSIS_SUMMARY_FIELD_LABELS: Record<AnalyzeFieldKey, string> = {
+  card_name: "Card Name",
+  set: "Set",
+  card_number: "Card #",
+  year: "Year",
+  language: "Language",
+  rarity: "Rarity",
+  finish: "Finish",
+  variation: "Variation",
+  grader: "Grader",
+  grade: "Grade",
+  grade_label: "Grade Label",
+  certification_number: "Certification #",
+  label_description: "Label Description",
+};
+
 const EMPTY_VALUATION = {
   final: "",
   quick: "",
@@ -77,6 +101,23 @@ const EMPTY_VALUATION = {
   notes: "",
   date_valued: todayLocalDate(),
 };
+
+type IdentityState = typeof EMPTY_IDENTITY;
+type IdentityField = keyof IdentityState;
+
+type AnalysisAutomationState = {
+  applied: AnalyzeFieldKey[];
+  review: AnalyzeFieldKey[];
+};
+
+type AutoPriceChartingState =
+  | { status: "idle" }
+  | { status: "searching" }
+  | { status: "linked"; product_id: string; product_name: string }
+  | { status: "review"; reason: string }
+  | { status: "error"; message: string };
+
+type PriceChartingValueSuccess = Extract<Awaited<ReturnType<typeof priceChartingValue>>, { status: "success" }>;
 
 interface NewSlabPageProps {
   /** Injectable for tests; defaults to the Supabase-backed implementation. */
@@ -89,6 +130,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   const [front, setFront] = useState<SlabImageState | null>(null);
   const [back, setBack] = useState<SlabImageState | null>(null);
   const [id, setId] = useState(EMPTY_IDENTITY);
+  const [dirtyIdFields, setDirtyIdFields] = useState<Set<IdentityField>>(() => new Set());
   const [val, setVal] = useState(EMPTY_VALUATION);
   const [pc, setPc] = useState<SelectedPriceCharting | null>(null);
   const [visual, setVisual] = useState<{ product_id: string; status: "user_confirmed" | "user_rejected"; imageUrl: string | null; imageSource: ImageSource } | null>(null);
@@ -108,6 +150,8 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   } | null>(null);
   const [cleanupRecovery, setCleanupRecovery] = useState<{ slabId: string; paths: string[] } | null>(null);
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
+  const [analysisAuto, setAnalysisAuto] = useState<AnalysisAutomationState | null>(null);
+  const [autoPc, setAutoPc] = useState<AutoPriceChartingState>({ status: "idle" });
   const [analyzing, setAnalyzing] = useState(false);
   // Valuation provenance is independent from source availability/confidence.
   const [valProvenance, setValProvenance] = useState<ValuationProvenance>("tier_unavailable");
@@ -117,32 +161,25 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
   // that effect depend on (and re-run for) every provenance change.
   const provenanceRef = useRef(valProvenance);
   provenanceRef.current = valProvenance;
-
-  // ── Camera hand-off ──────────────────────────────────────────────────────
-  // A capture staged by CardScanner hydrates the Front slot once, on mount, as
-  // the same SlabImageState a manual upload yields — so identity, AI analysis,
-  // PriceCharting, valuation, the duplicate-cert check, and save all run through
-  // the one path below, and a scanned slab is saved exactly once. Consuming
-  // empties the buffer, so a later manual visit to /slabs/new starts blank
-  // rather than re-hydrating a stale photo.
-  useEffect(() => {
-    const captured = consumeCameraCapture();
-    if (captured) {
-      setFront(captured.image);
-      if (captured.back) setBack(captured.back);
-      // The universal scanner already analyzed this capture (front, and back when
-      // present) to classify it as a slab; reuse that combined result so the
-      // proposal panel appears without a second AI call. The operator still
-      // reviews and applies every field.
-      if (captured.analysis) setAnalysis(captured.analysis);
-    }
-  }, []);
+  const autoPcAttemptRef = useRef<string | null>(null);
 
   const NUMERIC_VAL_FIELDS: ReadonlyArray<keyof typeof EMPTY_VALUATION> = ["final", "quick", "replacement", "guide"];
-  const setIdField = (k: keyof typeof EMPTY_IDENTITY, v: string) => setId((s) => ({ ...s, [k]: v }));
+  const markDirty = useCallback((fields: IdentityField[]) => {
+    if (fields.length === 0) return;
+    setDirtyIdFields((previous) => {
+      const next = new Set(previous);
+      for (const field of fields) next.add(field);
+      return next;
+    });
+  }, []);
+
+  const setIdField = (k: IdentityField, v: string, source: "operator" | "analysis" = "operator") => {
+    if (source === "operator") markDirty([k]);
+    setId((s) => ({ ...s, [k]: v }));
+  };
 
   // Map an analyze-slab proposal key to the identity form field it fills.
-  const ANALYSIS_TO_FIELD: Record<AnalyzeFieldKey, keyof typeof EMPTY_IDENTITY> = {
+  const ANALYSIS_TO_FIELD: Record<AnalyzeFieldKey, IdentityField> = {
     card_name: "card_name",
     set: "set_name",
     card_number: "card_number",
@@ -158,8 +195,69 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     label_description: "label_description",
   };
 
-  const applyAnalysisField = (key: AnalyzeFieldKey, value: string) => setIdField(ANALYSIS_TO_FIELD[key], value);
+  const canonicalDraftForAutoApply = useCallback(
+    (current: IdentityState): CanonicalIdentityDraft => ({
+      card_name: current.card_name,
+      set_name: current.set_name,
+      card_number: current.card_number,
+      year: current.year,
+      language: dirtyIdFields.has("language") ? current.language : "",
+      rarity: current.rarity,
+      finish: current.finish,
+      variation: current.variation,
+      grader: dirtyIdFields.has("grader") ? current.grader : "",
+      grade: current.grade,
+      grade_label: current.grade_label,
+      certification_number: current.certification_number,
+      label_description: current.label_description,
+    }),
+    [dirtyIdFields],
+  );
+
+  const applyAnalysisResult = useCallback(
+    (result: AnalyzeResult) => {
+      const decision = buildAutomaticAnalysisPatch(canonicalDraftForAutoApply(id), result);
+      setId((current) => ({ ...current, ...decision.values }));
+      setAnalysisAuto({ applied: decision.applied, review: decision.review });
+      setAutoPc({ status: "idle" });
+      autoPcAttemptRef.current = null;
+      return decision;
+    },
+    [canonicalDraftForAutoApply, id],
+  );
+
+  // ── Camera hand-off ──────────────────────────────────────────────────────
+  // A capture staged by CardScanner hydrates the Front slot once, on mount, as
+  // the same SlabImageState a manual upload yields. If the scanner already has
+  // an analysis result, reuse it through the same automatic patch path as a
+  // manual Analyze click.
+  useEffect(() => {
+    const captured = consumeCameraCapture();
+    if (captured) {
+      setFront(captured.image);
+      if (captured.back) setBack(captured.back);
+      if (captured.analysis) {
+        setAnalysis(captured.analysis);
+        applyAnalysisResult(captured.analysis);
+      }
+    }
+  }, [applyAnalysisResult]);
+
+  const applyAnalysisField = (key: AnalyzeFieldKey, value: string) => {
+    const field = ANALYSIS_TO_FIELD[key];
+    setIdField(field, value, "operator");
+    setAnalysisAuto((current) =>
+      current
+        ? {
+            applied: Array.from(new Set([...current.applied, key])),
+            review: current.review.filter((reviewKey) => reviewKey !== key),
+          }
+        : current,
+    );
+  };
   const applyAnalysisAll = (values: Partial<Record<AnalyzeFieldKey, string>>) => {
+    const appliedKeys = Object.keys(values).filter((key) => values[key as AnalyzeFieldKey] !== undefined) as AnalyzeFieldKey[];
+    markDirty(appliedKeys.map((key) => ANALYSIS_TO_FIELD[key]));
     setId((s) => {
       const next = { ...s };
       for (const [k, v] of Object.entries(values)) {
@@ -167,6 +265,14 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       }
       return next;
     });
+    setAnalysisAuto((current) =>
+      current
+        ? {
+            applied: Array.from(new Set([...current.applied, ...appliedKeys])),
+            review: current.review.filter((key) => !appliedKeys.includes(key)),
+          }
+        : current,
+    );
   };
 
   const handleAnalyze = async () => {
@@ -182,7 +288,12 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       );
       if (res.status === "success") {
         setAnalysis(res);
-        toast.success("Analysis complete — review and apply the proposed fields.");
+        const decision = applyAnalysisResult(res);
+        toast.success(
+          decision.applied.length > 0
+            ? `Analysis complete — ${decision.applied.length} field(s) populated automatically.`
+            : "Analysis complete — review the proposed fields.",
+        );
       } else {
         toast.error(res.message);
       }
@@ -200,6 +311,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     (side === "front" ? setFront : setBack)(next);
     if (analysis) {
       setAnalysis(null);
+      setAnalysisAuto(null);
+      setAutoPc({ status: "idle" });
+      autoPcAttemptRef.current = null;
       toast.info("Image changed — re-run analysis to verify the new photo.");
     }
   };
@@ -287,7 +401,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       setValProvenance("tier_unavailable");
       setValStale(false);
     }
-  }, [id.card_name, id.set_name, id.card_number, id.year, id.language, id.variation, id.grader, id.grade, id.grade_label]);
+  }, [id.card_name, id.set_name, id.card_number, id.year, id.language, id.finish, id.variation, id.grader, id.grade, id.grade_label]);
 
   const variance = useMemo(
     () => priceVariancePercent(dollarsToCents(val.final), dollarsToCents(val.guide)),
@@ -338,7 +452,14 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     toast.info("Product unlinked (visually rejected). Its values were cleared.");
   };
 
-  const onSelectPc = (sel: SelectedPriceCharting) => {
+  // True when any money figure is currently populated (used to decide whether a
+  // fresh product selection may overwrite the figures or must preserve them).
+  const hasManualFigures = useCallback(
+    () => val.final.trim() !== "" || val.quick.trim() !== "" || val.replacement.trim() !== "",
+    [val.final, val.quick, val.replacement],
+  );
+
+  const onSelectPc = useCallback((sel: SelectedPriceCharting) => {
     setPc(sel);
     // Auto-derive Quick-Sale / Replacement / Confidence from the CONFIRMED guide
     // value using the documented ratios — never leave confidence on "Manual" when
@@ -382,12 +503,7 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     setValStale(false);
     setPcStale(false);
     setRejected(null); // selecting a product supersedes any prior rejection
-  };
-
-  // True when any money figure is currently populated (used to decide whether a
-  // fresh product selection may overwrite the figures or must preserve them).
-  const hasManualFigures = () =>
-    val.final.trim() !== "" || val.quick.trim() !== "" || val.replacement.trim() !== "";
+  }, [hasManualFigures, id.grader, valProvenance, visual]);
 
   const buildInput = (mode: SaveMode): SlabInput => ({
     card_name: id.card_name.trim() || null,
@@ -432,7 +548,9 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
       const source =
         pc.match_status === "manual_product_id" || pc.match_status === "manual_product_url"
           ? pc.match_status
-          : "search_manual";
+          : autoPc.status === "linked" && autoPc.product_id === pc.product_id
+            ? "search_auto"
+            : "search_manual";
       return {
         product_id: pc.product_id,
         candidate_image_url: reviewed ? visual!.imageUrl : null,
@@ -694,17 +812,186 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
     }
   };
 
-  const identity = {
+  const identity = useMemo(() => ({
     card_name: id.card_name,
     set: id.set_name,
     card_number: id.card_number,
     year: id.year,
     language: id.language,
-    variation: id.variation,
+    variation: id.variation || id.finish,
     grader: id.grader,
     grade: id.grade,
     grade_label: id.grade_label, // §2: designation reaches PriceCharting tier selection
-  };
+  }), [id.card_name, id.set_name, id.card_number, id.year, id.language, id.variation, id.finish, id.grader, id.grade, id.grade_label]);
+
+  const selectedFromValue = useCallback(
+    (value: PriceChartingValueSuccess, matchStatus: string, confidenceScore: number): SelectedPriceCharting => ({
+      product_id: value.product_id,
+      product_name: value.product_name,
+      grade_field: value.grade_field,
+      value_cents: value.guide_value_cents,
+      sales_volume: value.sales_volume,
+      match_status: matchStatus,
+      confidence_score: confidenceScore,
+      is_estimate: value.is_estimate,
+      available_values_cents: value.available_values_cents ?? {},
+      value_response: value,
+      canonical_url: value.canonical_url,
+      tier_availability: value.tier_availability,
+      valuation_source: value.valuation_source,
+      public_page: value.public_page,
+      reference_artwork: value.reference_artwork,
+      designation_exact: value.designation_exact,
+      selected_tier_key: value.selected_tier_key,
+      selected_tier_label: value.selected_tier_label,
+    }),
+    [],
+  );
+
+  const autoLinkReadiness = useMemo(() => {
+    if (!analysis || !analysisAuto) return { ready: false, missing: ["analysis"] };
+    const applied = new Set(analysisAuto.applied);
+    const trusted = (field: IdentityField, key: AnalyzeFieldKey) =>
+      String(id[field] ?? "").trim() !== "" && (dirtyIdFields.has(field) || applied.has(key));
+    const missing: string[] = [];
+    if (!trusted("card_name", "card_name")) missing.push("Card Name");
+    if (!trusted("set_name", "set")) missing.push("Set");
+    if (!trusted("card_number", "card_number")) missing.push("Card #");
+    if (!trusted("language", "language")) missing.push("Language");
+    if (!trusted("grader", "grader")) missing.push("Grader");
+    if (!trusted("grade", "grade")) missing.push("Grade");
+    if (!trusted("finish", "finish") && !trusted("variation", "variation")) missing.push("Finish / Variation");
+    if (analysis.label_matches_card === false) missing.push("label/card agreement");
+    return { ready: missing.length === 0, missing };
+  }, [analysis, analysisAuto, dirtyIdFields, id]);
+
+  const autoLinkKey = useMemo(
+    () =>
+      JSON.stringify({
+        card_name: identity.card_name.trim(),
+        set: identity.set.trim(),
+        card_number: identity.card_number.trim(),
+        year: identity.year.trim(),
+        language: identity.language.trim(),
+        variation: identity.variation.trim(),
+        grader: identity.grader.trim(),
+        grade: identity.grade.trim(),
+        grade_label: identity.grade_label.trim(),
+      }),
+    [identity.card_name, identity.set, identity.card_number, identity.year, identity.language, identity.variation, identity.grader, identity.grade, identity.grade_label],
+  );
+
+  useEffect(() => {
+    if (!analysis || !analysisAuto || pc) return;
+    if (!autoLinkReadiness.ready) {
+      const reason = `PriceCharting auto-link paused until ${autoLinkReadiness.missing.join(", ")} is resolved.`;
+      setAutoPc((current) => (current.status === "review" && current.reason === reason ? current : { status: "review", reason }));
+      return;
+    }
+    if (autoPcAttemptRef.current === autoLinkKey) return;
+    autoPcAttemptRef.current = autoLinkKey;
+    let cancelled = false;
+    setAutoPc({ status: "searching" });
+
+    (async () => {
+      const search = await priceChartingSearch(identity);
+      if (cancelled) return;
+      if (search.status === "error") {
+        setAutoPc({ status: "error", message: search.message });
+        return;
+      }
+      const exactCandidates = search.candidates.filter(
+        (candidate) =>
+          !candidate.rejected &&
+          candidate.match_status === "exact" &&
+          candidate.conflicts.length === 0,
+      );
+      const candidate =
+        !search.requires_confirmation &&
+        search.auto_confirmed_product_id &&
+        exactCandidates.length === 1 &&
+        exactCandidates[0].product_id === search.auto_confirmed_product_id
+          ? exactCandidates[0]
+          : null;
+      if (!candidate) {
+        setAutoPc({
+          status: "review",
+          reason: "PriceCharting returned no single exact, conflict-free candidate. Confirm the product manually.",
+        });
+        return;
+      }
+
+      const value = await priceChartingValue({
+        ...identity,
+        product_id: candidate.product_id,
+        canonical_url: candidate.canonical_url ?? undefined,
+      });
+      if (cancelled) return;
+      if (value.status === "error") {
+        setAutoPc({ status: "error", message: value.message });
+        return;
+      }
+      onSelectPc(selectedFromValue(value, candidate.match_status, candidate.confidence_score));
+      setAutoPc({ status: "linked", product_id: value.product_id, product_name: value.product_name });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [analysis, analysisAuto, autoLinkKey, autoLinkReadiness, identity, onSelectPc, pc, selectedFromValue]);
+
+  const canonicalMissing = useMemo(() => {
+    const missing: string[] = [];
+    if (!id.card_name.trim()) missing.push("Card Name");
+    if (!id.set_name.trim()) missing.push("Set");
+    if (!id.card_number.trim()) missing.push("Card #");
+    if (!id.year.trim()) missing.push("Year");
+    if (!id.language.trim()) missing.push("Language");
+    if (!id.finish.trim() && !id.variation.trim()) missing.push("Finish / Variation");
+    if (!id.grader.trim()) missing.push("Grader");
+    if (!id.grade.trim()) missing.push("Grade");
+    if (!id.certification_number.trim()) missing.push("Certification #");
+    return missing;
+  }, [id]);
+
+  const analysisSummary = useMemo<AnalysisAutomationSummary | undefined>(() => {
+    if (!analysis) return undefined;
+    const reviewKeys = new Set<AnalyzeFieldKey>(analysisAuto?.review ?? []);
+    for (const key of ANALYZE_FIELD_KEYS) {
+      if (!analysis.proposed[key].readable) reviewKeys.add(key);
+    }
+    const requiringReview = Array.from(new Set([
+      ...Array.from(reviewKeys, (key) => ANALYSIS_SUMMARY_FIELD_LABELS[key]),
+      ...canonicalMissing,
+    ]));
+    const grader = id.grader.trim() || analysis.proposed.grader.value?.trim() || "this grader";
+    const certificationStatus = id.certification_number.trim()
+      ? `Certification number visually extracted for ${grader}. Certification database verification is not configured for this grader.`
+      : "Needs review — certification number was not readable with confidence.";
+    const verificationLevel =
+      analysis.label_matches_card === false || requiringReview.length > 0
+        ? "Needs review"
+        : `Visually verified — label and card evidence agree. Certification database verification is not configured for this grader.`;
+    const priceChartingProduct = pc
+      ? `${pc.product_name} (PriceCharting ID ${pc.product_id})`
+      : autoPc.status === "searching"
+        ? "Searching for one exact, conflict-free match..."
+        : autoPc.status === "review"
+          ? autoPc.reason
+          : autoPc.status === "error"
+            ? `PriceCharting check failed: ${autoPc.message}`
+            : "Not linked yet";
+    return {
+      automaticallyPopulated: Array.from(new Set(analysisAuto?.applied ?? [])).map((key) => ANALYSIS_SUMMARY_FIELD_LABELS[key]),
+      requiringReview,
+      unresolvedCanonicalFields: canonicalMissing,
+      certificationStatus,
+      priceChartingProduct,
+      selectedValuationTier: pc?.selected_tier_label ?? pc?.selected_tier_key ?? "Not selected yet",
+      guideValue: formatCents(dollarsToCents(val.guide)),
+      verificationLevel,
+    };
+  }, [analysis, analysisAuto, autoPc, canonicalMissing, id.certification_number, id.grader, pc, val.guide]);
 
   return (
     <div className="container max-w-5xl py-8">
@@ -770,12 +1057,13 @@ export default function NewSlab({ dao = supabaseSlabDataAccess }: NewSlabPagePro
           </CardContent>
         </Card>
 
-        {/* AI analysis proposals (never auto-applied; operator confirms/edits) */}
+        {/* AI analysis summary + recovery controls */}
         {analysis && (
           <div className="lg:col-span-2">
             <SlabAnalysisPanel
               result={analysis}
               backProvided={!!back}
+              automation={analysisSummary}
               onApplyField={applyAnalysisField}
               onApplyAll={applyAnalysisAll}
             />

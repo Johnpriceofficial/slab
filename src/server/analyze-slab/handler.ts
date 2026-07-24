@@ -159,9 +159,14 @@ const INSTRUCTION =
   "Rules: certification_number is a STRING — preserve leading zeros, never a number. " +
   "The certification/serial number is printed on the grading company's label (CGC, PSA, " +
   "BGS, SGC), usually a long digit string and often SMALL — look closely at the label and " +
+  "at every supplied label-region variant (original crop, corrected crop, enhanced crop, " +
+  "grayscale crop, sharpened crop, and thresholded crop) before deciding. " +
   "read it digit by digit. If any digit is uncertain, or the serial is too small/blurred/" +
   "glared to read with confidence, set readable=false for certification_number and DO NOT " +
-  "guess (a wrong cert number is worse than a blank one). " +
+  "guess (a wrong cert number is worse than a blank one). Treat 0/6/8, 1/7, 3/5/8, and " +
+  "4/9 as high-risk ambiguity groups for certification digits too; if a digit falls in " +
+  "one of those groups and cannot be resolved, mark the field unreadable rather than " +
+  "choosing the closest-looking digit. " +
   "card_number is a STRING and MUST be read digit by digit against the printed numerator/" +
   "denominator (e.g. \"016/064\"), never estimated from a quick glance. Digit pairs that are " +
   "frequently confused in print — 0/6/8, 1/7, 3/5/8, 5/6 — are the single most common cause " +
@@ -209,10 +214,11 @@ const VERIFY_CERTIFICATION_SYSTEM_PROMPT =
 
 const VERIFY_CERTIFICATION_INSTRUCTION =
   "Look ONLY at the certification_number printed on the grading label. Read each " +
-  "character independently and preserve leading zeros. Return the exact " +
+  "character independently and preserve leading zeros. Compare all supplied label-region " +
+  "variants: original, corrected, enhanced, grayscale, sharpened, and thresholded. Return the exact " +
   "certification_number schema. If glare, blur, size, or a confusable character " +
-  "prevents a reliable reading, set readable=false and value=null. Never reconstruct " +
-  "or guess a missing character.";
+  "prevents a reliable reading, set readable=false and value=null. Pay special attention " +
+  "to 0/6/8, 1/7, 3/5/8, and 4/9. Never reconstruct or guess a missing character.";
 
 const VERIFY_CRITICAL_IDENTITY_SYSTEM_PROMPT =
   "You are independently rereading critical identity and artwork evidence on a graded-card slab. " +
@@ -344,7 +350,55 @@ async function reverifyCardNumber(
     `Card number could not be verified: two independent readings disagree (` +
       `"${first.value}" vs "${second.value}"). Enter the correct number manually after checking ` +
       "the physical slab — never guessing between disagreeing reads.",
-  );
+    );
+}
+
+function normalizedCert(value: string | null): string {
+  return (value ?? "").replace(/[\s-]+/g, "").toUpperCase();
+}
+
+function detectedGrader(value: string | null): string {
+  const g = (value ?? "").trim().toUpperCase();
+  if (g.includes("CGC")) return "CGC";
+  if (g.includes("PSA")) return "PSA";
+  if (g.includes("BGS") || g.includes("BECKETT")) return "BGS";
+  if (g.includes("SGC")) return "SGC";
+  return "OTHER";
+}
+
+function validateCertificationCandidate(value: string | null, grader: string): { ok: boolean; reason: string | null } {
+  const normalized = normalizedCert(value);
+  if (!normalized) return { ok: false, reason: "blank certification number" };
+  if (/[?*_[\]{}()]/.test(value ?? "")) return { ok: false, reason: "contains an unresolved/ambiguous character marker" };
+  if (grader === "CGC" || grader === "PSA" || grader === "BGS" || grader === "SGC") {
+    if (!/^\d{6,16}$/.test(normalized)) {
+      return { ok: false, reason: `${grader} certification numbers must resolve to a 6-16 digit numeric string` };
+    }
+    return { ok: true, reason: null };
+  }
+  if (!/^[A-Z0-9]{5,32}$/.test(normalized)) {
+    return { ok: false, reason: "certification number did not match the supported alphanumeric format" };
+  }
+  return { ok: true, reason: null };
+}
+
+function certAmbiguityNote(first: string | null, second: string | null): string | null {
+  const a = normalizedCert(first);
+  const b = normalizedCert(second);
+  if (a.length !== b.length || !a || !b) return null;
+  const groups = [
+    ["0", "6", "8"],
+    ["1", "7"],
+    ["3", "5", "8"],
+    ["4", "9"],
+  ];
+  const notes: string[] = [];
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === b[i]) continue;
+    const group = groups.find((candidate) => candidate.includes(a[i]) && candidate.includes(b[i]));
+    if (group) notes.push(`position ${i + 1} (${group.join("/")})`);
+  }
+  return notes.length > 0 ? ` Ambiguous digit group(s): ${notes.join(", ")}.` : null;
 }
 
 async function reverifyCertificationNumber(
@@ -354,6 +408,13 @@ async function reverifyCertificationNumber(
   warnings: string[],
 ): Promise<void> {
   const first = proposed.certification_number;
+  const grader = detectedGrader(proposed.grader.value);
+  const firstValidity = validateCertificationCandidate(first.value, grader);
+  if (!firstValidity.ok) {
+    proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+    warnings.push(`Certification number needs review: ${firstValidity.reason}. Never save an uncertain certification digit.`);
+    return;
+  }
   let second: ProposedField;
   try {
     const text = await deps.callModel({
@@ -371,15 +432,22 @@ async function reverifyCertificationNumber(
     warnings.push("Certification number was not clear enough for an independent reread. Verify it manually from a closer, glare-free label photograph.");
     return;
   }
-  const normalize = (value: string | null) => (value ?? "").replace(/\s+/g, "").toUpperCase();
-  if (normalize(first.value) === normalize(second.value)) {
+  const secondValidity = validateCertificationCandidate(second.value, grader);
+  if (!secondValidity.ok) {
+    proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+    warnings.push(`Certification number needs review: independent reread ${secondValidity.reason}. Never save an uncertain certification digit.`);
+    return;
+  }
+  if (normalizedCert(first.value) === normalizedCert(second.value)) {
     proposed.certification_number = { ...first, confidence: Math.max(first.confidence, second.confidence, 0.95) };
     return;
   }
   proposed.certification_number = { value: null, confidence: 0, source: first.source, readable: false };
+  const ambiguity = certAmbiguityNote(first.value, second.value) ?? "";
   warnings.push(
     `Certification number needs review: independent readings disagree ("${first.value}" vs "${second.value}"). ` +
-      "Do not save a verified certification number until the original photograph resolves every character.",
+      "Do not save a verified certification number until the original photograph resolves every character." +
+      ambiguity,
   );
 }
 
