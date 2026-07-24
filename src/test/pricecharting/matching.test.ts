@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PriceChartingClient } from "@/lib/pricecharting/client";
-import { findBestProductMatch } from "@/lib/pricecharting/matching";
+import { compareScoredCandidates, findBestProductMatch, scoreCandidate } from "@/lib/pricecharting/matching";
 import { getCardValuation } from "@/lib/pricecharting/valuation";
 import { nullLogger } from "@/lib/pricecharting/logger";
 import type { CardItemInput } from "@/lib/pricecharting/types";
@@ -76,6 +76,92 @@ describe("findBestProductMatch", () => {
     const { product, match } = await findBestProductMatch(client(mock), { ...CHARIZARD_4, pricecharting_id: "6910" });
     expect(product?.pricecharting_id).toBe("6910");
     expect(match.confidence_score).toBeGreaterThanOrEqual(95);
+  });
+
+  it("orders equal-score candidates deterministically", () => {
+    const scored = [
+      scoreCandidate(CHARIZARD_4, {
+        pricecharting_id: "10",
+        name: "Charizard #4",
+        console_or_category: "Pokemon Base Set",
+        release_date: "1999-01-09",
+        upc: null,
+        asin: null,
+        epid: null,
+        genre: null,
+        raw_prices: {},
+      }),
+      scoreCandidate(CHARIZARD_4, {
+        pricecharting_id: "2",
+        name: "Charizard #4",
+        console_or_category: "Pokemon Base Set",
+        release_date: "1999-01-09",
+        upc: null,
+        asin: null,
+        epid: null,
+        genre: null,
+        raw_prices: {},
+      }),
+    ].sort(compareScoredCandidates);
+
+    expect(scored.map((candidate) => candidate.product.pricecharting_id)).toEqual(["2", "10"]);
+  });
+});
+
+describe("material trading-card conflicts", () => {
+  it("hard-rejects Holo versus Reverse Holo candidates", () => {
+    const item: CardItemInput = {
+      category: "trading_card",
+      card_name: "Charizard",
+      card_number: "4",
+      set: "Base Set",
+      holo: true,
+    };
+    const s = scoreCandidate(item, {
+      pricecharting_id: "RH",
+      name: "Charizard #4 Reverse Holo",
+      console_or_category: "Pokemon Base Set",
+      release_date: "1999",
+      upc: null,
+      asin: null,
+      epid: null,
+      genre: null,
+      raw_prices: {},
+    });
+    expect(s.disqualified).toBe(true);
+    expect(s.conflicts.join(" ")).toMatch(/finish mismatch.*Holo.*Reverse Holo/i);
+  });
+
+  it("hard-rejects a wholly different set while allowing partial aliases elsewhere", () => {
+    const s = scoreCandidate(CHARIZARD_4, {
+      pricecharting_id: "BS",
+      name: "Charizard #4",
+      console_or_category: "Pokemon Brilliant Stars",
+      release_date: "1999",
+      upc: null,
+      asin: null,
+      epid: null,
+      genre: null,
+      raw_prices: {},
+    });
+    expect(s.disqualified).toBe(true);
+    expect(s.conflicts.join(" ")).toMatch(/set mismatch/i);
+  });
+
+  it("hard-rejects known mutually exclusive variations", () => {
+    const s = scoreCandidate({ ...CHARIZARD_4, variant: "First Edition" }, {
+      pricecharting_id: "UNL",
+      name: "Charizard #4 Unlimited",
+      console_or_category: "Pokemon Base Set",
+      release_date: "1999",
+      upc: null,
+      asin: null,
+      epid: null,
+      genre: null,
+      raw_prices: {},
+    });
+    expect(s.disqualified).toBe(true);
+    expect(s.conflicts.join(" ")).toMatch(/variation mismatch.*First Edition.*Unlimited/i);
   });
 });
 

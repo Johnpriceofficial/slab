@@ -54,6 +54,35 @@ describe("low-confidence fields remain applyable/editable", () => {
   });
 });
 
+describe("automation summary", () => {
+  it("shows populated fields, review fields, PriceCharting tier, guide value, and certification status", () => {
+    render(
+      <SlabAnalysisPanel
+        result={result({ certification_number: { value: "6165347099", confidence: 0.99, readable: true } })}
+        automation={{
+          automaticallyPopulated: ["Card Name", "Certification #"],
+          requiringReview: ["Finish / Variation"],
+          unresolvedCanonicalFields: ["Finish / Variation"],
+          certificationStatus: "Certification number visually extracted for CGC. Certification database verification is not configured for this grader.",
+          priceChartingProduct: "Venusaur #3 (PriceCharting ID 1003)",
+          selectedValuationTier: "CGC 10 Pristine",
+          guideValue: "$60.00",
+          verificationLevel: "Visually verified",
+        }}
+        onApplyField={vi.fn()}
+        onApplyAll={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Card Name, Certification #")).toBeInTheDocument();
+    expect(screen.getAllByText("Finish / Variation")).toHaveLength(2);
+    expect(screen.getByText(/Certification database verification is not configured for this grader/)).toBeInTheDocument();
+    expect(screen.getByText("Venusaur #3 (PriceCharting ID 1003)")).toBeInTheDocument();
+    expect(screen.getByText("CGC 10 Pristine")).toBeInTheDocument();
+    expect(screen.getByText("$60.00")).toBeInTheDocument();
+  });
+});
+
 describe("unreadable certification messaging", () => {
   it("shows the exact actionable message when the certification is unreadable", () => {
     render(
@@ -66,9 +95,7 @@ describe("unreadable certification messaging", () => {
         onApplyAll={vi.fn()}
       />,
     );
-    expect(
-      screen.getByText(/certification number was not readable with confidence/i),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText(/certification number was not readable with confidence/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/retake a sharper.*front-label image or enter it manually/i)).toBeInTheDocument();
   });
 

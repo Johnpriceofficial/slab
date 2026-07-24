@@ -40,6 +40,36 @@ function tokens(s: string): string[] {
     .filter((t) => t.length > 0 && !STOPWORDS.has(t));
 }
 
+function tokenHitsHay(haystack: string, token: string): boolean {
+  if (haystack.includes(token)) return true;
+  if (token.endsWith("s") && token.length > 3 && haystack.includes(token.slice(0, -1))) return true;
+  if (!token.endsWith("s") && haystack.includes(`${token}s`)) return true;
+  return false;
+}
+
+function variationHardConflict(requestedValue: string, candidateHay: string): string | null {
+  const requested = normalizeText(requestedValue);
+  const wantedReverse = /\breverse[\s-]+holo\b/.test(requested);
+  const candidateReverse = /\breverse[\s-]+holo\b/.test(candidateHay);
+  const wantedHolo = !wantedReverse && /\bholo\b/.test(requested);
+  const candidateHolo = !candidateReverse && /\bholo\b/.test(candidateHay);
+  if (wantedReverse && candidateHolo) return "wanted Reverse Holo, candidate is Holo";
+  if (wantedHolo && candidateReverse) return "wanted Holo, candidate is Reverse Holo";
+
+  const wantedFirst = /\b(?:1st|first)[\s-]+edition\b/.test(requested);
+  const candidateFirst = /\b(?:1st|first)[\s-]+edition\b/.test(candidateHay);
+  const wantedUnlimited = /\bunlimited\b/.test(requested);
+  const candidateUnlimited = /\bunlimited\b/.test(candidateHay);
+  if (wantedFirst && candidateUnlimited) return "wanted First Edition, candidate is Unlimited";
+  if (wantedUnlimited && candidateFirst) return "wanted Unlimited, candidate is First Edition";
+
+  const wantedShadowless = /\bshadowless\b/.test(requested);
+  const candidateShadowless = /\bshadowless\b/.test(candidateHay);
+  if (wantedShadowless && candidateUnlimited) return "wanted Shadowless, candidate is Unlimited";
+  if (wantedUnlimited && candidateShadowless) return "wanted Unlimited, candidate is Shadowless";
+  return null;
+}
+
 /** Extract a `#`-prefixed card/issue number token from a product name, if any. */
 export function extractHashNumber(name: string): string | null {
   const m = /#\s*([0-9]+[a-z]?)/i.exec(name);
@@ -471,8 +501,69 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       }
     }
 
-    const hits = wantTokens.filter((t) => hay.includes(t)).length;
+    if (id.key === "holo" || id.key === "reverse_holo") {
+      const candidateReverse = /\breverse[\s-]+holo\b/.test(hay);
+      const candidateHolo = !candidateReverse && /\bholo\b/.test(hay);
+      const wantsReverse = id.key === "reverse_holo";
+      const finishConflict = wantsReverse ? candidateHolo : candidateReverse;
+      let finishAward = 0;
+      let result: FieldResult = "missing";
+      let explanation = "Finish not exposed by candidate metadata.";
+      if (finishConflict) {
+        const wanted = wantsReverse ? "Reverse Holo" : "Holo";
+        const actual = candidateReverse ? "Reverse Holo" : "Holo";
+        hardConflicts.push(`finish mismatch: wanted ${wanted}, candidate is ${actual}`);
+        disqualified = true;
+        result = "mismatch";
+        explanation = "Holo and Reverse Holo are materially different finishes.";
+      } else if ((wantsReverse && candidateReverse) || (!wantsReverse && candidateHolo)) {
+        finishAward = id.weight;
+        result = "exact";
+        explanation = "Finish matches.";
+        reasons.push(`Finish matches "${id.value}"`);
+      } else {
+        missing.push(`finish "${id.value}" not found`);
+      }
+      awarded += finishAward;
+      pushField({
+        field: "finish",
+        requested_value: id.value,
+        candidate_value: candidateReverse ? "Reverse Holo" : candidateHolo ? "Holo" : null,
+        result,
+        hard_conflict: finishConflict,
+        points_possible: id.weight,
+        points_awarded: finishAward,
+        explanation,
+      });
+      continue;
+    }
+
+    const hits = wantTokens.filter((t) => tokenHitsHay(hay, t)).length;
     const coverage = hits / wantTokens.length;
+    let textHard = false;
+    let textExplanation =
+      id.key === "card_name"
+        ? charHard
+          ? "A required character is missing/replaced (hard conflict)."
+          : "Every major character present."
+        : id.key === "set"
+          ? "Set/catalog alias or partial label (soft unless no requested set token appears)."
+          : "Supporting descriptor (soft).";
+    if (id.key === "variant") {
+      const conflict = variationHardConflict(id.value, hay);
+      if (conflict) {
+        hardConflicts.push(`variation mismatch: ${conflict}`);
+        disqualified = true;
+        textHard = true;
+        textExplanation = "Variation mismatch (hard conflict for known mutually exclusive variants).";
+      }
+    }
+    if (id.key === "set" && coverage === 0 && (product.console_or_category ?? "").trim()) {
+      hardConflicts.push(`set mismatch: wanted "${id.value}", candidate catalog is "${product.console_or_category}"`);
+      disqualified = true;
+      textHard = true;
+      textExplanation = "Set/catalog mismatch (hard conflict when no requested set token appears).";
+    }
     const fieldAward = id.weight * coverage;
     if (coverage > 0) {
       awarded += fieldAward;
@@ -488,18 +579,11 @@ export function scoreCandidate(item: ItemInput, product: Product): ScoredCandida
       candidate_value: product.name,
       normalized_requested_value: normalizeText(id.value),
       normalized_candidate_value: hay,
-      result: charHard ? "mismatch" : coverage >= 0.99 ? "exact" : coverage > 0 ? "partial" : "missing",
-      hard_conflict: charHard || languageHard,
+      result: charHard || textHard ? "mismatch" : coverage >= 0.99 ? "exact" : coverage > 0 ? "partial" : "missing",
+      hard_conflict: charHard || languageHard || textHard,
       points_possible: id.weight,
       points_awarded: fieldAward,
-      explanation:
-        id.key === "card_name"
-          ? charHard
-            ? "A required character is missing/replaced (hard conflict)."
-            : "Every major character present."
-          : id.key === "set"
-            ? "Set/catalog label (SOFT — a broad catalog alias is not a conflict)."
-            : "Supporting descriptor (soft).",
+      explanation: textExplanation,
     });
   }
 
@@ -559,6 +643,16 @@ function levelFor(score: number): ConfidenceLevel {
   if (score >= 70) return "Probable";
   if (score >= 50) return "Low";
   return "Unresolved";
+}
+
+export function compareScoredCandidates(a: ScoredCandidate, b: ScoredCandidate): number {
+  const scoreDelta = b.score - a.score;
+  if (scoreDelta !== 0) return scoreDelta;
+  const nameDelta = a.product.name.localeCompare(b.product.name, undefined, { numeric: true, sensitivity: "base" });
+  if (nameDelta !== 0) return nameDelta;
+  const categoryDelta = (a.product.console_or_category ?? "").localeCompare(b.product.console_or_category ?? "", undefined, { numeric: true, sensitivity: "base" });
+  if (categoryDelta !== 0) return categoryDelta;
+  return a.product.pricecharting_id.localeCompare(b.product.pricecharting_id, undefined, { numeric: true, sensitivity: "base" });
 }
 
 /** Items where a wrong match is expensive require >= 85 to confirm. */
@@ -626,7 +720,7 @@ export async function findBestProductMatch(
 
   const scored = candidates
     .map((c) => scoreCandidate(item, c))
-    .sort((a, b) => b.score - a.score);
+    .sort(compareScoredCandidates);
 
   const eligible = scored.filter((s) => !s.disqualified);
   const alternatives = scored.slice(0, 5).map((s) => ({
