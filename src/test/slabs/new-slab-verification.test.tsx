@@ -110,7 +110,7 @@ describe("shared analysis pipeline (Requirement 8)", () => {
     // Manual upload: a web-safe JPEG passes normalizeImageFile's fast path, so no
     // canvas is needed in jsdom. This is the identical pipeline the camera uses.
     const file = new File(["jpeg-bytes"], "manual-front.jpg", { type: "image/jpeg" });
-    const input = screen.getByLabelText(/upload front image/i);
+    const input = screen.getByLabelText(/upload required front image/i);
     fireEvent.change(input, { target: { files: [file] } });
     await screen.findByAltText("front of slab");
 

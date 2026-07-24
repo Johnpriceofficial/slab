@@ -67,9 +67,9 @@ describe("unreadable certification messaging", () => {
       />,
     );
     expect(
-      screen.getByText(/Certification number is present but not readable with confidence\./i),
+      screen.getByText(/certification number was not readable with confidence/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Upload a sharper front image, upload the back image, or enter it manually\./i)).toBeInTheDocument();
+    expect(screen.getByText(/retake a sharper.*front-label image or enter it manually/i)).toBeInTheDocument();
   });
 
   it("does not show the certification message when it was read", () => {

@@ -85,8 +85,8 @@ describe("back prompting and resolution (Requirements 2, 3, 4, 8)", () => {
   it("requires the back when the certification number is unreadable", async () => {
     vi.mocked(analyzeSlab).mockResolvedValue(GRADED_NO_CERT);
     await scanFront();
-    expect(screen.getByText(/certification number wasn't readable/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /continue to slab details/i })).toBeDisabled();
+    expect(screen.getByText(/certification number was not readable on the front/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /continue to slab details/i })).toBeEnabled();
   });
 
   it("captures the back, runs ONE combined reanalysis that resolves the cert, and unblocks continue", async () => {
@@ -94,7 +94,7 @@ describe("back prompting and resolution (Requirements 2, 3, 4, 8)", () => {
     await scanFront();
     expect(analyzeSlab).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: /^capture back$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add back image/i }));
     await waitFor(() => expect(analyzeSlab).toHaveBeenCalledTimes(2)); // one combined reanalysis
     // Second call included the back image.
     expect(vi.mocked(analyzeSlab).mock.calls[1][1]).not.toBeNull();
@@ -104,16 +104,16 @@ describe("back prompting and resolution (Requirements 2, 3, 4, 8)", () => {
   it("requires the back when independent front reads disagree", async () => {
     vi.mocked(analyzeSlab).mockResolvedValue(analysis({ grader: { value: "CGC", confidence: 0.9, readable: true }, certification_number: { value: "4012345678", confidence: 0.9, readable: true } }, { warnings: ["Card number could not be verified: two independent readings disagree."] }));
     await scanFront();
-    expect(screen.getByText(/reads disagreed|reconcile/i)).toBeInTheDocument();
+    expect(screen.getByText(/conflicting evidence/i)).toBeInTheDocument();
   });
 
   it("replacing the back invalidates prior analysis and re-runs exactly once more", async () => {
     vi.mocked(analyzeSlab).mockResolvedValue(GRADED_FULL);
     await scanFront();
     expect(analyzeSlab).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: /^capture back$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add back image/i }));
     await waitFor(() => expect(analyzeSlab).toHaveBeenCalledTimes(2));
-    fireEvent.click(screen.getByRole("button", { name: /recapture back/i }));
+    fireEvent.click(screen.getByRole("button", { name: /recapture optional back/i }));
     await waitFor(() => expect(analyzeSlab).toHaveBeenCalledTimes(3)); // replacing back → one more
   });
 });
@@ -136,7 +136,7 @@ describe("raw routing (Requirements 5, 6, 13)", () => {
   it("carries the back image into the raw record when one was captured", async () => {
     vi.mocked(analyzeSlab).mockResolvedValue(RAW);
     await scanFront();
-    fireEvent.click(screen.getByRole("button", { name: /^capture back$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add back image/i }));
     await waitFor(() => expect(analyzeSlab).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: /add to raw inventory/i }));
     await waitFor(() => expect(stageRawCard).toHaveBeenCalled());

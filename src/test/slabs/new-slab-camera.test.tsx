@@ -81,7 +81,7 @@ describe("NewSlab camera hydration", () => {
 
     // Front is filled; Back remains an empty upload target, so the manual
     // workflow is untouched and the operator can still add the back photo.
-    expect(screen.getByText(/click to upload the back image/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/upload optional back image/i)).toBeInTheDocument();
     expect(screen.queryByAltText("back of slab")).not.toBeInTheDocument();
   });
 
@@ -141,7 +141,7 @@ describe("NewSlab camera hydration", () => {
     renderNewSlab();
 
     expect(await screen.findByText(/click to upload the front image/i)).toBeInTheDocument();
-    expect(screen.getByText(/click to upload the back image/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/upload optional back image/i)).toBeInTheDocument();
     // Draft save stays blocked until an image exists — camera or manual.
     expect(screen.getByRole("button", { name: /save as unverified draft/i })).toBeDisabled();
   });
