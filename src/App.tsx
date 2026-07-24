@@ -2,7 +2,7 @@ import { lazy, Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { Camera, Images, LayoutDashboard, LogOut, PackageSearch } from "lucide-react";
+import { Camera, GitBranch, Images, LayoutDashboard, LogOut, PackageSearch } from "lucide-react";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ const Signup = lazy(() => import("./pages/Signup"));
 const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
 const ResetPassword = lazy(() => import("./pages/ResetPassword"));
 const SlabDashboard = lazy(() => import("./pages/slabs/SlabDashboard"));
+const Builder = lazy(() => import("./pages/builder/Builder"));
 const SlabList = lazy(() => import("./pages/slabs/SlabList"));
 const NewSlab = lazy(() => import("./pages/slabs/NewSlab"));
 const SlabDetail = lazy(() => import("./pages/slabs/SlabDetail"));
@@ -42,6 +43,7 @@ function AppHeader() {
           <Button variant="ghost" size="sm" asChild><Link to="/cards"><Images /> Raw Cards</Link></Button>
           <Button variant="ghost" size="sm" asChild><Link to="/slabs"><PackageSearch /> Slabs</Link></Button>
           {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/dashboard"><LayoutDashboard /> Dashboard</Link></Button>}
+          {status === "admin" && <Button variant="ghost" size="sm" asChild><Link to="/builder"><GitBranch /> Builder</Link></Button>}
         </nav>
         <div className="flex items-center gap-3 text-sm">
           {user?.email && <span className="text-muted-foreground">{user.email}</span>}
@@ -105,6 +107,7 @@ export default function App() {
                     exports, bulk actions, and system settings. */}
                 <Route element={<ProtectedAdminLayout />}>
                   <Route path="/dashboard" element={<SlabDashboard />} />
+                  <Route path="/builder" element={<Builder />} />
                 </Route>
                 <Route path="*" element={<Navigate to="/scan-card" replace />} />
               </Routes>
