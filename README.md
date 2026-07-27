@@ -1,4 +1,4 @@
-# GradedCardValue.com
+# GradedCardValue.com 
 
 Secure graded-card identification, verification, valuation, and inventory app.
 **Verified customers own their own inventory** (raw cards and graded slabs);
