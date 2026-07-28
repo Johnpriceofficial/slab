@@ -16,11 +16,27 @@ export interface AnalyzeCallerFacts {
   /** Result of the server-side is_admin() check for that user. */
   isAdmin: boolean;
   /**
+   * Rollout flag for non-admin traffic (see isCustomerAnalysisEnabled).
+   * Fails closed: anything but an explicit enable keeps customers out.
+   * Admin access is never affected by this flag.
+   */
+  customerAccessEnabled: boolean;
+  /**
    * Customer-profile lookup outcome (service-role read, keyed by the JWT
    * user id). `failed` means the lookup itself errored — which must fail
    * closed, never open.
    */
   profile: { ok: true; accountStatus: string | null } | { ok: false };
+}
+
+/**
+ * Parses ANALYZE_SLAB_CUSTOMER_ENABLED. Fail-closed by construction: the one
+ * and only enabling value is the exact lowercase string "true". Missing,
+ * empty, whitespace-padded, differently-cased or otherwise malformed values
+ * all read as DISABLED.
+ */
+export function isCustomerAnalysisEnabled(raw: string | null | undefined): boolean {
+  return raw === "true";
 }
 
 export type AnalyzeAccessDecision =
@@ -36,8 +52,13 @@ export function decideAnalyzeAccess(facts: AnalyzeCallerFacts): AnalyzeAccessDec
     return deny(401, "NOT_AUTHENTICATED", "Sign in to analyze a slab.");
   }
   if (facts.isAdmin) {
-    // Existing administrative access is preserved unchanged.
+    // Existing administrative access is preserved unchanged — the customer
+    // rollout flag never applies to admins.
     return { allowed: true, role: "admin" };
+  }
+  if (!facts.customerAccessEnabled) {
+    // Rollout gate for non-admin traffic: typed refusal, never a 500.
+    return deny(403, "CUSTOMER_ACCESS_DISABLED", "Customer slab analysis is not enabled in this environment.");
   }
   if (!facts.user.emailConfirmed) {
     return deny(403, "EMAIL_NOT_CONFIRMED", "Verify your email before analyzing slabs.");
