@@ -84,34 +84,60 @@ describe("analyze-slab request pipeline ordering", () => {
     expect(runAnalysis).not.toHaveBeenCalled();
   });
 
-  it("quota exhaustion → 429 without reaching the provider-config check or provider", async () => {
-    const { deps: d, getApiKey, runAnalysis } = deps({ consumeQuota: vi.fn(async () => false) });
-    const res = await runAnalyzeRequestPipeline(d);
-    expect(res.statusCode).toBe(429);
-    expect(res.body).toMatchObject({ error_code: "QUOTA_EXCEEDED" });
-    // Quota is checked (6) BEFORE the provider-config check (7).
-    expect(getApiKey).not.toHaveBeenCalled();
-    expect(runAnalysis).not.toHaveBeenCalled();
-  });
-
-  it("NOT_CONFIGURED is reached only after validation and quota both pass", async () => {
+  it("NOT_CONFIGURED (no provider key) consumes NO quota and never calls the provider", async () => {
     const { deps: d, consumeQuota, runAnalysis } = deps({ getApiKey: () => undefined });
     const res = await runAnalyzeRequestPipeline(d);
     expect(res.statusCode).toBe(502);
     expect(res.body).toMatchObject({ error_code: "NOT_CONFIGURED" });
-    // A well-formed request DID pass validation and consume quota before the
-    // provider-config check — the specified order (quota=6, provider=7).
-    expect(consumeQuota).toHaveBeenCalledTimes(1);
+    // The provider-config check (6) precedes quota (7): a valid request that
+    // cannot be served must not spend quota, nor reach the provider.
+    expect(consumeQuota).not.toHaveBeenCalled();
     expect(runAnalysis).not.toHaveBeenCalled();
   });
 
-  it("valid request with a configured provider reaches step 8 exactly once", async () => {
+  it("quota exhaustion → 429 only after the provider key is confirmed present; no provider call", async () => {
+    const { deps: d, getApiKey, runAnalysis } = deps({ consumeQuota: vi.fn(async () => false) });
+    const res = await runAnalyzeRequestPipeline(d);
+    expect(res.statusCode).toBe(429);
+    expect(res.body).toMatchObject({ error_code: "QUOTA_EXCEEDED" });
+    // Provider-config (6) runs BEFORE quota (7), so the key was checked first.
+    expect(getApiKey).toHaveBeenCalledTimes(1);
+    expect(runAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("valid request with a configured provider consumes quota and reaches step 8 exactly once", async () => {
     const { deps: d, consumeQuota, runAnalysis } = deps();
     const res = await runAnalyzeRequestPipeline(d);
     expect(res.statusCode).toBe(200);
     expect(consumeQuota).toHaveBeenCalledTimes(1);
     expect(runAnalysis).toHaveBeenCalledTimes(1);
     expect(runAnalysis).toHaveBeenCalledWith(GOOD_BODY, "sk-present");
+  });
+
+  it("executes side effects in the exact order provider-config → quota → provider", async () => {
+    const order: string[] = [];
+    const d: AnalyzePipelineDeps = {
+      role: "customer",
+      parseJson: async () => {
+        order.push("parse");
+        return { ok: true, value: GOOD_BODY };
+      },
+      getApiKey: () => {
+        order.push("getApiKey");
+        return "sk-present";
+      },
+      consumeQuota: async () => {
+        order.push("consumeQuota");
+        return true;
+      },
+      runAnalysis: async () => {
+        order.push("runAnalysis");
+        return { statusCode: 200, body: { status: "success" } };
+      },
+    };
+    await runAnalyzeRequestPipeline(d);
+    // parse (4) → [validate (5)] → getApiKey (6) → consumeQuota (7) → runAnalysis (8)
+    expect(order).toEqual(["parse", "getApiKey", "consumeQuota", "runAnalysis"]);
   });
 
   it("routes the quota role correctly and preserves admin vs customer messages", async () => {
