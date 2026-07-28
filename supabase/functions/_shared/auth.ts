@@ -22,7 +22,9 @@ export async function getCallerUser(req: Request) {
  * Returns true if the caller's JWT belongs to an admin user.
  * Uses the existing public.is_admin(uuid) SECURITY DEFINER function via service role.
  */
-export async function isCallerAdmin(req: Request): Promise<{ user: { id: string } | null; isAdmin: boolean }> {
+export async function isCallerAdmin(
+  req: Request,
+): Promise<{ user: { id: string; email_confirmed_at?: string | null } | null; isAdmin: boolean }> {
   const user = await getCallerUser(req);
   if (!user) return { user: null, isAdmin: false };
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
