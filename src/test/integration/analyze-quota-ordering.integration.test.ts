@@ -12,7 +12,7 @@
  * disposable test stack (SLABVAULT_TEST_*), never production.
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { runAnalyzeRequestPipeline } from "../../server/analyze-slab/request-pipeline";
 
@@ -76,6 +76,12 @@ suite("analyze-slab provider-before-quota ordering (per-user quota)", () => {
     // Let the profile trigger provision an active customer_profiles row.
     await new Promise((r) => setTimeout(r, 400));
   }, 30_000);
+
+  afterAll(async () => {
+    // Deletes the user and cascades its customer_profiles + quota rows; the
+    // account owns no slabs/cards, so no RESTRICT FK blocks it.
+    for (const id of userIds) await service.auth.admin.deleteUser(id).catch(() => {});
+  });
 
   it("a valid request with no provider key returns NOT_CONFIGURED and consumes NO quota", async () => {
     const before = await usageCount(userId);
