@@ -119,8 +119,15 @@ begin
 
     -- Queue every slab-images object (front/back + slab_images + derivatives +
     -- any orphan object under slabs/<inventory_number>/) for async removal.
+    -- DISTINCT ON (storage_path): a saved slab's front image appears in
+    -- slabs.front_image_path, slab_images.storage_path AND storage.objects, so
+    -- the UNION emits the same path several times. storage_path is the queue's
+    -- primary key, and an ON CONFLICT that touched the same target row twice in
+    -- one statement would raise a cardinality violation and abort the whole
+    -- purge — collapse to one row per path first (as purge_slabs does).
     insert into private.slab_storage_cleanup_queue (bucket_id, storage_path, slab_id)
-    select 'slab-images', paths.storage_path, paths.source_slab_id
+    select distinct on (paths.storage_path)
+           'slab-images', paths.storage_path, paths.source_slab_id
       from (
         select s.front_image_path as storage_path, s.id as source_slab_id
           from public.slabs s where s.id = any(v_slab_ids)
@@ -145,6 +152,7 @@ begin
            and s.id = any(v_slab_ids)
       ) paths
      where nullif(btrim(paths.storage_path), '') is not null
+     order by paths.storage_path
     on conflict on constraint slab_storage_cleanup_queue_pkey
     do update set slab_id = excluded.slab_id, updated_at = now();
     get diagnostics v_queued = row_count;
@@ -208,3 +216,36 @@ $$;
 
 revoke all on function public.purge_customer_account_data(uuid) from public, anon;
 grant execute on function public.purge_customer_account_data(uuid) to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- Make the storage-cleanup queue bucket-aware.
+--
+-- Account deletion queues card-scans objects (bucket_id = 'card-scans')
+-- alongside slab-images objects. The existing list RPC returned only
+-- storage_path, so the cleanup consumer removed every path from a hardcoded
+-- 'slab-images' bucket and then acknowledged it — silently orphaning the
+-- private card-scans image. Expose bucket_id so the consumer routes each
+-- deletion to the bucket the row was recorded under. The delete order across
+-- the RETURNS TABLE change requires a drop+recreate.
+-- ----------------------------------------------------------------------------
+drop function if exists public.list_pending_slab_storage_cleanup();
+
+create function public.list_pending_slab_storage_cleanup()
+returns table (bucket_id text, storage_path text)
+language plpgsql
+security definer
+set search_path = public, private, auth
+as $$
+begin
+  if not public.is_admin((select auth.uid())) then
+    raise exception 'NOT_AUTHORIZED' using errcode = '42501';
+  end if;
+  return query
+    select q.bucket_id, q.storage_path
+    from private.slab_storage_cleanup_queue q
+    order by q.created_at, q.storage_path;
+end;
+$$;
+
+revoke all on function public.list_pending_slab_storage_cleanup() from public, anon;
+grant execute on function public.list_pending_slab_storage_cleanup() to authenticated;

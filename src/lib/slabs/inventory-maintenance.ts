@@ -52,14 +52,17 @@ async function recordStorageFailure(paths: string[], message: string): Promise<v
   if (error) throw new Error(`Storage cleanup failure could not be recorded: ${error.message}`);
 }
 
-async function removeQueuedStoragePaths(paths: string[]): Promise<StorageCleanupResult> {
+async function removeQueuedStoragePaths(
+  paths: string[],
+  bucket: string = BUCKET,
+): Promise<StorageCleanupResult> {
   const targets = uniquePaths(paths);
   const errors: string[] = [];
   let removed = 0;
   let pending = 0;
 
   for (const batch of chunks(targets, STORAGE_DELETE_BATCH_SIZE)) {
-    const { error } = await sb.storage.from(BUCKET).remove(batch);
+    const { error } = await sb.storage.from(bucket).remove(batch);
     if (error) {
       pending += batch.length;
       errors.push(error.message);
@@ -89,11 +92,31 @@ export async function retryPendingSlabStorageCleanup(): Promise<StorageCleanupRe
   const { data, error } = await sb.rpc("list_pending_slab_storage_cleanup");
   if (error) throw new Error(error.message);
   const rows = Array.isArray(data) ? data : [];
-  const paths = rows.map((row) => {
-    if (!row || typeof row !== "object") return null;
-    return (row as Record<string, unknown>).storage_path;
-  });
-  return removeQueuedStoragePaths(paths.filter((path): path is string => typeof path === "string"));
+
+  // The queue spans multiple private buckets (slab-images, card-scans); each
+  // object must be removed from the bucket it was recorded under, or it is
+  // silently orphaned. Group by bucket_id (legacy rows default to slab-images)
+  // and drain each bucket separately.
+  const byBucket = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const path = record.storage_path;
+    if (typeof path !== "string") continue;
+    const bucket = typeof record.bucket_id === "string" && record.bucket_id ? record.bucket_id : BUCKET;
+    const existing = byBucket.get(bucket);
+    if (existing) existing.push(path);
+    else byBucket.set(bucket, [path]);
+  }
+
+  const aggregate: StorageCleanupResult = { removed: 0, pending: 0, errors: [] };
+  for (const [bucket, paths] of byBucket) {
+    const result = await removeQueuedStoragePaths(paths, bucket);
+    aggregate.removed += result.removed;
+    aggregate.pending += result.pending;
+    aggregate.errors.push(...result.errors);
+  }
+  return aggregate;
 }
 
 export async function fetchPermanentDeleteEnabled(): Promise<boolean> {

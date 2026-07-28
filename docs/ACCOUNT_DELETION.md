@@ -71,8 +71,13 @@ PR's scope, and not deployed here).
   back, so no partial/inconsistent deletion is possible.
 - Object bytes are removed asynchronously — there is no server-side worker.
   Every path is durably enqueued in `private.slab_storage_cleanup_queue` with
-  its `bucket_id` (`slab-images` and `card-scans`); the existing admin cleanup
-  consumer (`src/lib/slabs/inventory-maintenance.ts`) drains it idempotently.
+  its `bucket_id` (`slab-images` and `card-scans`). `list_pending_slab_storage_cleanup`
+  now returns `(bucket_id, storage_path)` and the admin cleanup consumer
+  (`src/lib/slabs/inventory-maintenance.ts`) groups by bucket and removes each
+  object from the bucket it was recorded under (legacy rows default to
+  `slab-images`), so a card-scans object is never removed from the wrong bucket
+  and orphaned. The queue insert is de-duplicated (`DISTINCT ON (storage_path)`)
+  so the same path arriving from several sources cannot abort the transaction.
 - A concurrent admin `purge_slabs` and an account purge serialize on the shared
   advisory lock `918273646`, so storage-queue writes never race.
 
