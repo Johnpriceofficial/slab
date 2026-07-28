@@ -46,6 +46,18 @@
  */
 
 import { reconcileIdentity } from "../../lib/slabs/identity-normalize";
+import {
+  validateAnalyzeImageInput,
+  type ImageValidationLimits,
+} from "./validate-images";
+
+export {
+  DEFAULT_IMAGE_LIMITS,
+  validateAnalyzeImageInput,
+  type ImageValidationCode,
+  type ImageValidationError,
+  type ImageValidationLimits,
+} from "./validate-images";
 
 export type FieldSource = "front" | "back" | "label" | "card" | "unknown";
 
@@ -121,6 +133,8 @@ export interface AnalyzeModelRequest {
 export interface AnalyzeDeps {
   /** Calls the vision model; returns the model's raw text reply (expected JSON). */
   callModel: (req: AnalyzeModelRequest) => Promise<string>;
+  /** Override the server-side image limits (tests only; production uses defaults). */
+  imageLimits?: ImageValidationLimits;
 }
 
 export interface AnalyzeInput {
@@ -577,6 +591,12 @@ function applyIdentityReconciliation(proposed: AnalyzeProposal): void {
 
 export async function analyzeSlabImages(input: AnalyzeInput, deps: AnalyzeDeps): Promise<AnalyzeHandlerResult> {
   const images: AnalyzeModelRequest["images"] = [];
+
+  // Server-side security validation. Runs before ANY provider request is
+  // built: base64 integrity, decoded byte limits, variant caps and
+  // MIME/content consistency are enforced here, never trusted to the client.
+  const invalid = validateAnalyzeImageInput(input, deps.imageLimits);
+  if (invalid) return err(invalid.statusCode, invalid.code, invalid.message);
 
   if (!input.front_image_base64 || !input.front_mime) {
     return err(400, "MISSING_IMAGE", "A front image is required to analyze a slab.");

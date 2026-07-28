@@ -1,17 +1,26 @@
-// GradedCardValue.com — admin-only OpenAI vision analysis.
+// GradedCardValue.com — OpenAI vision analysis (admins + active confirmed customers).
 // Uses Responses API + native strict Structured Outputs. Original images and
 // deterministic variants are evidence; no image generation/editing is used.
+//
+// Customer access model: the caller's identity comes only from the verified
+// JWT (never a request-body user id); customers must be email-confirmed with
+// an active customer_profiles row; per-user quota fails closed; every image
+// is validated server-side before any provider request; and the analysis run
+// plus its field evidence are stamped with the caller as owner.
 
 import { createClient } from "npm:@supabase/supabase-js@2.110.2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
-import { consumeDailyQuota } from "../_shared/quota.ts";
+import { consumeDailyQuota, consumeUserDailyQuota } from "../_shared/quota.ts";
+import { decideAnalyzeAccess } from "../_shared/analyze-access.ts";
 // deno-lint-ignore no-explicit-any
-import { analyzeSlabImages } from "../_shared/analyze-slab-bundle.js";
+import { analyzeSlabImages, validateAnalyzeImageInput } from "../_shared/analyze-slab-bundle.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
 const MODEL = Deno.env.get("OPENAI_ANALYZE_MODEL") ?? "gpt-5.6-terra";
 const DAILY_LIMIT = Number(Deno.env.get("ANALYZE_DAILY_LIMIT") ?? "200");
+/** Hard per-user daily cap; the profile allowance is enforced inside the RPC. */
+const USER_DAILY_LIMIT = Number(Deno.env.get("ANALYZE_USER_DAILY_LIMIT") ?? "25");
 const SCHEMA_VERSION = "gcv-vision-2.0";
 
 function json(body: unknown, status: number): Response {
@@ -191,16 +200,53 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ status: "error", error_code: "INVALID_PARAMETER", message: "POST required" }, 405);
   const { user, isAdmin } = await isCallerAdmin(req);
   if (!user) return unauthorizedResponse(corsHeaders);
-  if (!isAdmin) return json({ status: "error", error_code: "NOT_AUTHORIZED", message: "Admin access required" }, 403);
+
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
+  // Customer authorization facts. The profile is read with the service role,
+  // keyed strictly by the verified JWT user id — a lookup failure fails closed.
+  let profile: { ok: true; accountStatus: string | null } | { ok: false } = { ok: true, accountStatus: null };
+  if (!isAdmin) {
+    const { data, error } = await admin.from("customer_profiles")
+      .select("account_status")
+      .eq("id", user.id)
+      .maybeSingle();
+    profile = error ? { ok: false } : { ok: true, accountStatus: data?.account_status ?? null };
+  }
+  const access = decideAnalyzeAccess({
+    user: { id: user.id, emailConfirmed: Boolean(user.email_confirmed_at) },
+    isAdmin,
+    profile,
+  });
+  if (!access.allowed) {
+    return json({ status: "error", error_code: access.errorCode, message: access.message }, access.statusCode);
+  }
 
   const apiKey = Deno.env.get("OPENAI_API_KEY");
   if (!apiKey) return json({ status: "error", error_code: "NOT_CONFIGURED", message: "OpenAI image analysis is not configured." }, 502);
-  if (!(await consumeDailyQuota("analyze-slab-openai", DAILY_LIMIT))) {
-    return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily image-analysis limit reached. Try again tomorrow." }, 429);
-  }
 
   let input: unknown;
   try { input = await req.json(); } catch { return json({ status: "error", error_code: "INVALID_PARAMETER", message: "Invalid JSON body." }, 400); }
+
+  // Server-side image validation BEFORE quota is spent and before any OpenAI
+  // request. The bundled analyzer re-runs the same validation defensively.
+  const invalidImages = validateAnalyzeImageInput(input as Record<string, unknown>);
+  if (invalidImages) {
+    return json({ status: "error", error_code: invalidImages.code, message: invalidImages.message }, invalidImages.statusCode);
+  }
+
+  if (access.role === "admin") {
+    // Existing administrative quota behavior: shared bucket, fails open.
+    if (!(await consumeDailyQuota("analyze-slab-openai", DAILY_LIMIT))) {
+      return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily image-analysis limit reached. Try again tomorrow." }, 429);
+    }
+  } else {
+    // Per-user allowance (profile limit enforced inside the RPC, capped by the
+    // configured hard limit). Fails CLOSED on any counter failure.
+    if (!(await consumeUserDailyQuota(user.id, "analyze-slab-openai", USER_DAILY_LIMIT))) {
+      return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily analysis limit reached for this account. Try again tomorrow." }, 429);
+    }
+  }
 
   const telemetry: Array<Record<string, unknown>> = [];
   try {
@@ -211,9 +257,10 @@ Deno.serve(async (req) => {
     const body = result.body;
     if (body.status !== "success" || !("warnings" in body)) return json(body, result.statusCode);
 
-    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const totalLatency = telemetry.reduce((sum, row) => sum + Number(row.latency_ms ?? 0), 0);
     const { data: run } = await admin.from("ai_analysis_runs").insert({
+      // Runs are never ownerless: the verified caller owns what they created.
+      owner_id: user.id,
       provider: "OPENAI",
       model: String(telemetry[0]?.model ?? MODEL),
       schema_version: SCHEMA_VERSION,
@@ -233,6 +280,7 @@ Deno.serve(async (req) => {
       const rawFields = mainOutput?.fields ?? {};
       const evidence = Object.entries(rawFields).map(([fieldName, field]: [string, any]) => ({
         analysis_run_id: run.id,
+        owner_id: user.id,
         field_name: fieldName,
         value: field.value,
         normalized_value: field.normalized_value,

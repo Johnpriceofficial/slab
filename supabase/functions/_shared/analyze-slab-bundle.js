@@ -56,6 +56,129 @@ function reconcileIdentity(input) {
   };
 }
 
+// src/server/analyze-slab/validate-images.ts
+var DEFAULT_IMAGE_LIMITS = {
+  maxImageBytes: 15728640,
+  maxAggregateBytes: 41943040,
+  maxVariants: 8
+};
+var ALLOWED_IMAGE_MIME = /* @__PURE__ */ new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif"
+]);
+var BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function fail(code, statusCode, message) {
+  return { code, statusCode, message };
+}
+function decodedLength(base64) {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return base64.length / 4 * 3 - padding;
+}
+function leadingBytes(base64) {
+  const prefix = base64.slice(0, 16);
+  const binary = atob(prefix);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+function contentMatchesMime(bytes, mime) {
+  if (bytes.length < 12) return false;
+  switch (mime) {
+    case "image/jpeg":
+      return bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+    case "image/png":
+      return bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10;
+    case "image/webp":
+      return bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80;
+    case "image/heic":
+    case "image/heif":
+      return bytes[4] === 102 && bytes[5] === 116 && bytes[6] === 121 && bytes[7] === 112;
+    default:
+      return false;
+  }
+}
+function validateOne(candidate, limits) {
+  if (!ALLOWED_IMAGE_MIME.has(candidate.mime)) {
+    return fail("UNSUPPORTED_IMAGE", 400, `Unsupported ${candidate.label} image type: ${candidate.mime}.`);
+  }
+  const base64 = candidate.base64;
+  if (base64.length === 0) {
+    return fail("EMPTY_IMAGE", 400, `The ${candidate.label} image is empty.`);
+  }
+  if (base64.length % 4 !== 0 || !BASE64_RE.test(base64)) {
+    return fail("INVALID_BASE64", 400, `The ${candidate.label} image is not valid base64.`);
+  }
+  const bytes = decodedLength(base64);
+  if (bytes <= 0) {
+    return fail("EMPTY_IMAGE", 400, `The ${candidate.label} image decoded to zero bytes.`);
+  }
+  if (bytes > limits.maxImageBytes) {
+    return fail(
+      "IMAGE_TOO_LARGE",
+      413,
+      `The ${candidate.label} image exceeds the ${limits.maxImageBytes}-byte limit.`
+    );
+  }
+  let leading;
+  try {
+    leading = leadingBytes(base64);
+  } catch {
+    return fail("INVALID_BASE64", 400, `The ${candidate.label} image is not valid base64.`);
+  }
+  if (!contentMatchesMime(leading, candidate.mime)) {
+    return fail(
+      "UNSUPPORTED_IMAGE",
+      400,
+      `The ${candidate.label} image content does not match its declared type (${candidate.mime}).`
+    );
+  }
+  return { bytes };
+}
+function validateAnalyzeImageInput(input, limits = DEFAULT_IMAGE_LIMITS) {
+  if (!input.front_image_base64 || !input.front_mime) {
+    return fail("MISSING_IMAGE", 400, "A front image is required to analyze a slab.");
+  }
+  const variants = input.variants ?? [];
+  if (variants.length > limits.maxVariants) {
+    return fail(
+      "TOO_MANY_VARIANTS",
+      400,
+      `At most ${limits.maxVariants} image variants are accepted per request.`
+    );
+  }
+  const candidates = [
+    { label: "front", base64: input.front_image_base64, mime: input.front_mime }
+  ];
+  if (input.back_image_base64 && input.back_mime) {
+    candidates.push({ label: "back", base64: input.back_image_base64, mime: input.back_mime });
+  }
+  for (const [index, variant] of variants.entries()) {
+    if (!variant?.image_base64 || !ALLOWED_IMAGE_MIME.has(variant.mime)) continue;
+    candidates.push({
+      label: variant.label || `variant_${index + 1}`,
+      base64: variant.image_base64,
+      mime: variant.mime
+    });
+  }
+  let aggregate = 0;
+  for (const candidate of candidates) {
+    const result = validateOne(candidate, limits);
+    if ("code" in result) return result;
+    aggregate += result.bytes;
+    if (aggregate > limits.maxAggregateBytes) {
+      return fail(
+        "AGGREGATE_IMAGE_LIMIT",
+        413,
+        `The combined decoded image payload exceeds the ${limits.maxAggregateBytes}-byte limit.`
+      );
+    }
+  }
+  return null;
+}
+
 // src/server/analyze-slab/handler.ts
 var ANALYZE_FIELD_KEYS = [
   "card_name",
@@ -326,6 +449,8 @@ function applyIdentityReconciliation(proposed) {
 }
 async function analyzeSlabImages(input, deps) {
   const images = [];
+  const invalid = validateAnalyzeImageInput(input, deps.imageLimits);
+  if (invalid) return err(invalid.statusCode, invalid.code, invalid.message);
   if (!input.front_image_base64 || !input.front_mime) {
     return err(400, "MISSING_IMAGE", "A front image is required to analyze a slab.");
   }
@@ -394,7 +519,9 @@ function err(statusCode, code, message) {
 }
 export {
   ANALYZE_FIELD_KEYS,
+  DEFAULT_IMAGE_LIMITS,
   analyzeSlabImages,
   reconcileGradeReadings,
-  reconcileVariationReadings
+  reconcileVariationReadings,
+  validateAnalyzeImageInput
 };

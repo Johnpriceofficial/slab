@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { analyzeSlabImages, type AnalyzeDeps, type AnalyzeModelRequest } from "@/server/analyze-slab/handler";
 
-const FRONT = { front_image_base64: "AAA", front_mime: "image/jpeg" };
-const BACK = { back_image_base64: "BBB", back_mime: "image/jpeg" };
+const FRONT = { front_image_base64: "/9j/4AAAAAAAAAAAAAAAAAAAAAAAAAAA", front_mime: "image/jpeg" };
+const BACK = { back_image_base64: "/9j/4AAAAAAAAAAAAAAAAAAAAAAAAAAA", back_mime: "image/jpeg" };
 
 function seqDeps(replies: Array<string | (() => Promise<string>)>): { deps: AnalyzeDeps; calls: AnalyzeModelRequest[] } {
   const calls: AnalyzeModelRequest[] = [];

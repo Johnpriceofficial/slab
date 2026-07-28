@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { analyzeSlabImages, type AnalyzeDeps, type AnalyzeModelRequest } from "@/server/analyze-slab/handler";
 
-const FRONT = { front_image_base64: "AAA", front_mime: "image/jpeg" };
+const FRONT = { front_image_base64: "/9j/4AAAAAAAAAAAAAAAAAAAAAAAAAAA", front_mime: "image/jpeg" };
 
 function deps(reply: string | (() => Promise<string>)): AnalyzeDeps {
   return { callModel: typeof reply === "function" ? reply : async () => reply };
@@ -117,7 +117,7 @@ describe("analyzeSlabImages", () => {
   });
 
   it("errors on an unsupported image type", async () => {
-    const res = await analyzeSlabImages({ front_image_base64: "AAA", front_mime: "image/gif" }, deps(fullReply));
+    const res = await analyzeSlabImages({ front_image_base64: "/9j/4AAAAAAAAAAAAAAAAAAAAAAAAAAA", front_mime: "image/gif" }, deps(fullReply));
     if (res.body.status !== "error") throw new Error("expected error");
     expect(res.body.error_code).toBe("UNSUPPORTED_IMAGE");
   });
