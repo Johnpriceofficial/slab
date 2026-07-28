@@ -229,8 +229,10 @@ Deno.serve(async (req) => {
   try { input = await req.json(); } catch { return json({ status: "error", error_code: "INVALID_PARAMETER", message: "Invalid JSON body." }, 400); }
 
   // Server-side image validation BEFORE quota is spent and before any OpenAI
-  // request. The bundled analyzer re-runs the same validation defensively.
-  const invalidImages = validateAnalyzeImageInput(input as Record<string, unknown>);
+  // request. The validator is total over unknown — any runtime shape yields a
+  // typed error, never a thrown TypeError. The bundled analyzer re-runs the
+  // same validation defensively.
+  const invalidImages = validateAnalyzeImageInput(input);
   if (invalidImages) {
     return json({ status: "error", error_code: invalidImages.code, message: invalidImages.message }, invalidImages.statusCode);
   }

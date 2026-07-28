@@ -108,6 +108,34 @@ describe("validateAnalyzeImageInput", () => {
     expect(error?.message).toContain("does not match");
   });
 
+  it("returns typed errors for wrong-runtime-shape bodies instead of throwing", () => {
+    // Syntactically valid JSON, wrong runtime shape (Codex P2 on PR #87).
+    for (const body of [null, undefined, "a string", 42, [front()]]) {
+      const error = validateAnalyzeImageInput(body);
+      expect(error?.code).toBe("INVALID_PARAMETER");
+      expect(error?.statusCode).toBe(400);
+    }
+    // Non-string front payload reads as no usable front image.
+    expect(validateAnalyzeImageInput({ front_image_base64: 1, front_mime: "image/jpeg" })?.code).toBe(
+      "MISSING_IMAGE",
+    );
+    // Non-array variants containers are typed errors, never TypeErrors.
+    expect(validateAnalyzeImageInput(front({ variants: "abc" }))?.code).toBe("INVALID_PARAMETER");
+    expect(validateAnalyzeImageInput(front({ variants: {} }))?.code).toBe("INVALID_PARAMETER");
+    // Truthy non-string nested payloads are typed errors too.
+    expect(
+      validateAnalyzeImageInput(front({ back_image_base64: 5, back_mime: "image/jpeg" }))?.code,
+    ).toBe("INVALID_PARAMETER");
+    expect(
+      validateAnalyzeImageInput(front({ variants: ["not-an-object"] }))?.code,
+    ).toBe("INVALID_PARAMETER");
+    expect(
+      validateAnalyzeImageInput(front({ variants: [{ label: "v", image_base64: 7, mime: "image/jpeg" }] }))?.code,
+    ).toBe("INVALID_PARAMETER");
+    // Null entries and payload-less entries are skipped like the handler does.
+    expect(validateAnalyzeImageInput(front({ variants: [null, { label: "x" }] }))).toBeNull();
+  });
+
   it("validates the variants the analysis would forward", () => {
     const error = validateAnalyzeImageInput(
       front({ variants: [{ label: "bad", image_base64: "%%%%", mime: "image/jpeg" }] }),

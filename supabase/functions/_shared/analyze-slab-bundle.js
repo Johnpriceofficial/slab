@@ -137,11 +137,21 @@ function validateOne(candidate, limits) {
   }
   return { bytes };
 }
-function validateAnalyzeImageInput(input, limits = DEFAULT_IMAGE_LIMITS) {
-  if (!input.front_image_base64 || !input.front_mime) {
+function validateAnalyzeImageInput(raw, limits = DEFAULT_IMAGE_LIMITS) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return fail("INVALID_PARAMETER", 400, "Request body must be a JSON object.");
+  }
+  const input = raw;
+  const frontBase64 = input.front_image_base64;
+  const frontMime = input.front_mime;
+  if (typeof frontBase64 !== "string" || frontBase64.length === 0 || typeof frontMime !== "string" || frontMime.length === 0) {
     return fail("MISSING_IMAGE", 400, "A front image is required to analyze a slab.");
   }
-  const variants = input.variants ?? [];
+  const rawVariants = input.variants;
+  if (rawVariants !== void 0 && rawVariants !== null && !Array.isArray(rawVariants)) {
+    return fail("INVALID_PARAMETER", 400, "variants must be an array of images.");
+  }
+  const variants = Array.isArray(rawVariants) ? rawVariants : [];
   if (variants.length > limits.maxVariants) {
     return fail(
       "TOO_MANY_VARIANTS",
@@ -149,16 +159,28 @@ function validateAnalyzeImageInput(input, limits = DEFAULT_IMAGE_LIMITS) {
       `At most ${limits.maxVariants} image variants are accepted per request.`
     );
   }
-  const candidates = [
-    { label: "front", base64: input.front_image_base64, mime: input.front_mime }
-  ];
-  if (input.back_image_base64 && input.back_mime) {
-    candidates.push({ label: "back", base64: input.back_image_base64, mime: input.back_mime });
+  const candidates = [{ label: "front", base64: frontBase64, mime: frontMime }];
+  const backBase64 = input.back_image_base64;
+  const backMime = input.back_mime;
+  if (backBase64 && backMime) {
+    if (typeof backBase64 !== "string" || typeof backMime !== "string") {
+      return fail("INVALID_PARAMETER", 400, "Back image fields must be strings.");
+    }
+    candidates.push({ label: "back", base64: backBase64, mime: backMime });
   }
-  for (const [index, variant] of variants.entries()) {
-    if (!variant?.image_base64 || !ALLOWED_IMAGE_MIME.has(variant.mime)) continue;
+  for (const [index, entry] of variants.entries()) {
+    if (entry === null || entry === void 0) continue;
+    if (typeof entry !== "object" || Array.isArray(entry)) {
+      return fail("INVALID_PARAMETER", 400, `Variant ${index + 1} must be an object.`);
+    }
+    const variant = entry;
+    if (!variant.image_base64) continue;
+    if (typeof variant.image_base64 !== "string") {
+      return fail("INVALID_PARAMETER", 400, `Variant ${index + 1} image payload must be a string.`);
+    }
+    if (typeof variant.mime !== "string" || !ALLOWED_IMAGE_MIME.has(variant.mime)) continue;
     candidates.push({
-      label: variant.label || `variant_${index + 1}`,
+      label: typeof variant.label === "string" && variant.label ? variant.label : `variant_${index + 1}`,
       base64: variant.image_base64,
       mime: variant.mime
     });

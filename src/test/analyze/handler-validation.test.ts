@@ -48,6 +48,19 @@ describe("analyzeSlabImages input gating", () => {
     expect(callModel).not.toHaveBeenCalled();
   });
 
+  it("returns a typed error for wrong-runtime-shape bodies without reaching the provider", async () => {
+    const callModel = vi.fn();
+    const result = await analyzeSlabImages(null as never, { callModel });
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toMatchObject({ status: "error", error_code: "INVALID_PARAMETER" });
+    const badVariants = await analyzeSlabImages(
+      { front_image_base64: jpegB64(), front_mime: "image/jpeg", variants: "abc" as never },
+      { callModel },
+    );
+    expect(badVariants.body).toMatchObject({ status: "error", error_code: "INVALID_PARAMETER" });
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
   it("reaches the provider only for valid input", async () => {
     const callModel = vi.fn().mockRejectedValue(new Error("sentinel: provider reached"));
     let outcome: unknown;

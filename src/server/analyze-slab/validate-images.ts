@@ -31,6 +31,7 @@ export const DEFAULT_IMAGE_LIMITS: ImageValidationLimits = {
 };
 
 export type ImageValidationCode =
+  | "INVALID_PARAMETER"
   | "MISSING_IMAGE"
   | "UNSUPPORTED_IMAGE"
   | "INVALID_BASE64"
@@ -157,18 +158,35 @@ function validateOne(
 }
 
 /**
- * Validates the full analyze-slab image payload. Returns null when every
- * image the analysis would consume is safe, or the first typed error.
+ * Validates the full analyze-slab image payload. Total over `unknown`: any
+ * runtime shape — null bodies, arrays, non-string fields, non-array variant
+ * containers — produces a typed error instead of a thrown TypeError, so the
+ * Edge Function can never 500 on a malformed-but-parseable request. Returns
+ * null when every image the analysis would consume is safe.
  */
 export function validateAnalyzeImageInput(
-  input: AnalyzeImageInputLike,
+  raw: unknown,
   limits: ImageValidationLimits = DEFAULT_IMAGE_LIMITS,
 ): ImageValidationError | null {
-  if (!input.front_image_base64 || !input.front_mime) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return fail("INVALID_PARAMETER", 400, "Request body must be a JSON object.");
+  }
+  const input = raw as Record<string, unknown>;
+
+  const frontBase64 = input.front_image_base64;
+  const frontMime = input.front_mime;
+  if (
+    typeof frontBase64 !== "string" || frontBase64.length === 0 ||
+    typeof frontMime !== "string" || frontMime.length === 0
+  ) {
     return fail("MISSING_IMAGE", 400, "A front image is required to analyze a slab.");
   }
 
-  const variants = input.variants ?? [];
+  const rawVariants = input.variants;
+  if (rawVariants !== undefined && rawVariants !== null && !Array.isArray(rawVariants)) {
+    return fail("INVALID_PARAMETER", 400, "variants must be an array of images.");
+  }
+  const variants: unknown[] = Array.isArray(rawVariants) ? rawVariants : [];
   if (variants.length > limits.maxVariants) {
     return fail(
       "TOO_MANY_VARIANTS",
@@ -177,18 +195,35 @@ export function validateAnalyzeImageInput(
     );
   }
 
-  const candidates: CandidateImage[] = [
-    { label: "front", base64: input.front_image_base64, mime: input.front_mime },
-  ];
-  if (input.back_image_base64 && input.back_mime) {
-    candidates.push({ label: "back", base64: input.back_image_base64, mime: input.back_mime });
+  const candidates: CandidateImage[] = [{ label: "front", base64: frontBase64, mime: frontMime }];
+
+  const backBase64 = input.back_image_base64;
+  const backMime = input.back_mime;
+  // Back is optional: forwarded (and therefore validated) only when both
+  // fields are present — the same rule the handler applies.
+  if (backBase64 && backMime) {
+    if (typeof backBase64 !== "string" || typeof backMime !== "string") {
+      return fail("INVALID_PARAMETER", 400, "Back image fields must be strings.");
+    }
+    candidates.push({ label: "back", base64: backBase64, mime: backMime });
   }
-  for (const [index, variant] of variants.entries()) {
-    // Only variants the analysis would actually forward are validated; the
-    // handler skips entries with no payload or a disallowed MIME type.
-    if (!variant?.image_base64 || !ALLOWED_IMAGE_MIME.has(variant.mime)) continue;
+
+  for (const [index, entry] of variants.entries()) {
+    if (entry === null || entry === undefined) continue; // handler skips these
+    if (typeof entry !== "object" || Array.isArray(entry)) {
+      return fail("INVALID_PARAMETER", 400, `Variant ${index + 1} must be an object.`);
+    }
+    const variant = entry as Record<string, unknown>;
+    // Entries the handler would skip (no payload, disallowed MIME) are
+    // ignored here too — but a truthy non-string payload is a typed error,
+    // never something that could reach the provider or throw.
+    if (!variant.image_base64) continue;
+    if (typeof variant.image_base64 !== "string") {
+      return fail("INVALID_PARAMETER", 400, `Variant ${index + 1} image payload must be a string.`);
+    }
+    if (typeof variant.mime !== "string" || !ALLOWED_IMAGE_MIME.has(variant.mime)) continue;
     candidates.push({
-      label: variant.label || `variant_${index + 1}`,
+      label: typeof variant.label === "string" && variant.label ? variant.label : `variant_${index + 1}`,
       base64: variant.image_base64,
       mime: variant.mime,
     });
