@@ -215,13 +215,13 @@ async function runAnalyzeRequestPipeline(deps) {
   if (invalid) {
     return err(invalid.statusCode, invalid.code, invalid.message);
   }
-  const allowed = await deps.consumeQuota(deps.role);
-  if (!allowed) {
-    return err(429, "QUOTA_EXCEEDED", QUOTA_MESSAGE[deps.role]);
-  }
   const apiKey = deps.getApiKey();
   if (!apiKey) {
     return err(502, "NOT_CONFIGURED", "OpenAI image analysis is not configured.");
+  }
+  const allowed = await deps.consumeQuota(deps.role);
+  if (!allowed) {
+    return err(429, "QUOTA_EXCEEDED", QUOTA_MESSAGE[deps.role]);
   }
   return deps.runAnalysis(parsed.value, apiKey);
 }

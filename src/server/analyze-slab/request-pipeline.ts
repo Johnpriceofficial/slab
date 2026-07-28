@@ -9,16 +9,19 @@
  *
  *   4. JSON parsing            → malformed body ⇒ typed 400 INVALID_PARAMETER
  *   5. image validation        → malformed images ⇒ typed 400/413
- *   6. quota consumption        → only a validated request may spend quota
- *   7. provider-config check    → NOT_CONFIGURED only AFTER 4–6 pass
+ *   6. provider-config check    → NOT_CONFIGURED only AFTER 4–5 pass
+ *   7. quota consumption        → spent only after 4–6 all pass
  *   8. provider request         → reached only for a fully valid, quota'd call
  *
  * Guarantees proven by construction and by request-pipeline.test.ts:
  *   - a malformed body or image returns its typed error even when the
  *     provider key is absent (validation never hides behind NOT_CONFIGURED);
  *   - a rejected payload never consumes quota and never calls the provider;
- *   - NOT_CONFIGURED is only reachable once the request has passed
- *     authorization (upstream), parsing, validation and quota.
+ *   - a valid request that hits NOT_CONFIGURED (no provider key) consumes NO
+ *     quota and never calls the provider — the provider-config check precedes
+ *     quota consumption;
+ *   - quota is consumed only once authorization (upstream), parsing,
+ *     validation and provider configuration have all passed.
  */
 
 import {
@@ -66,17 +69,22 @@ export async function runAnalyzeRequestPipeline(
     return err(invalid.statusCode, invalid.code, invalid.message);
   }
 
-  // 6. Quota — only a validated request reaches here, so rejected payloads
-  //    never consume quota.
-  const allowed = await deps.consumeQuota(deps.role);
-  if (!allowed) {
-    return err(429, "QUOTA_EXCEEDED", QUOTA_MESSAGE[deps.role]);
-  }
-
-  // 7. Provider-configuration check — after authorization, validation, quota.
+  // 6. Provider-configuration check — BEFORE quota. A valid request that
+  //    cannot be served (no provider key) must not spend quota, so this
+  //    precedes consumption. Still reached only after authorization and
+  //    validation, so NOT_CONFIGURED never masks a malformed/unauthorized
+  //    request.
   const apiKey = deps.getApiKey();
   if (!apiKey) {
     return err(502, "NOT_CONFIGURED", "OpenAI image analysis is not configured.");
+  }
+
+  // 7. Quota — consumed only once authorization, validation and provider
+  //    configuration have all passed, so a NOT_CONFIGURED response never
+  //    consumes quota and a rejected payload never does either.
+  const allowed = await deps.consumeQuota(deps.role);
+  if (!allowed) {
+    return err(429, "QUOTA_EXCEEDED", QUOTA_MESSAGE[deps.role]);
   }
 
   // 8. Provider request + persistence.
