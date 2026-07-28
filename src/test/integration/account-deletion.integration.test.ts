@@ -74,14 +74,15 @@ suite("account deletion (purge_customer_account_data + auth deletion)", () => {
     return row.id;
   }
 
-  async function makeCardScan(userId: string): Promise<string> {
+  async function makeCardScan(userId: string): Promise<{ id: string; path: string }> {
     // card_scans is service-role only; a scan row is enough to exercise the
     // created_by RESTRICT FK that blocks direct auth deletion.
+    const path = `${userId}/${stamp}-${Math.floor(performance.now())}.jpg`;
     const { data, error } = await service
       .from("card_scans")
       .insert({
         created_by: userId,
-        image_storage_path: `${userId}/${stamp}-${Math.floor(performance.now())}.jpg`,
+        image_storage_path: path,
         image_sha256: "a".repeat(64),
         mime_type: "image/jpeg",
         byte_size: 1024,
@@ -91,16 +92,22 @@ suite("account deletion (purge_customer_account_data + auth deletion)", () => {
       .select("id")
       .single();
     if (error) throw error;
-    return data.id;
+    return { id: data.id, path };
   }
 
-  beforeAll(() => {
+  let adminReader: SupabaseClient; // reads private/admin-gated evidence RPCs
+
+  beforeAll(async () => {
     service = createClient(URL!, SERVICE!, {
       auth: { persistSession: false, autoRefreshToken: false, storageKey: `acctdel-svc-${stamp}` },
     });
     anonClient = createClient(URL!, ANON!, {
       auth: { persistSession: false, autoRefreshToken: false, storageKey: `acctdel-anon-${stamp}` },
     });
+    // The tombstone reader and cleanup-queue list are admin-gated on
+    // is_admin(auth.uid()); the service role has no auth.uid(), so evidence is
+    // verified through a real admin JWT client.
+    adminReader = (await makeUser("reader", true)).client;
   });
 
   afterAll(async () => {
@@ -120,28 +127,31 @@ suite("account deletion (purge_customer_account_data + auth deletion)", () => {
   it("purges owned slab + card-scan data, then the auth user deletes cleanly", async () => {
     const u = await makeUser("full");
     const slabId = await makeSlab(u.client);
-    const scanId = await makeCardScan(u.id);
+    const scan = await makeCardScan(u.id);
 
     const { data: summary, error } = await u.client.rpc("purge_customer_account_data", {});
     expect(error).toBeNull();
     expect(summary.slabs_deleted).toBe(1);
     expect(summary.card_scans_deleted).toBe(1);
-    expect(summary.storage_paths_queued).toBeGreaterThanOrEqual(1);
+    // At least the slab front image (slab-images) + the card scan (card-scans).
+    expect(summary.storage_paths_queued).toBeGreaterThanOrEqual(2);
 
     // Owned rows are gone.
     expect((await service.from("slabs").select("id").eq("id", slabId)).data).toEqual([]);
-    expect((await service.from("card_scans").select("id").eq("id", scanId)).data).toEqual([]);
+    expect((await service.from("card_scans").select("id").eq("id", scan.id)).data).toEqual([]);
 
-    // Evidence is retained.
-    const tomb = await service.rpc("get_slab_deletion_tombstone", { p_slab_id: slabId });
+    // Evidence is retained (read through an admin JWT — the reader is
+    // admin-gated and the service role has no auth.uid()).
+    const tomb = await adminReader.rpc("get_slab_deletion_tombstone", { p_slab_id: slabId });
     expect(((tomb.data ?? []) as unknown[]).length).toBe(1);
     const audit = await service.from("audit_log").select("action").eq("entity_id", u.id).eq("action", "account_data_purged");
     expect((audit.data ?? []).length).toBe(1);
 
-    // Storage cleanup queued for BOTH buckets.
-    const q = await service.from("slab_storage_cleanup_queue").select("bucket_id");
-    const buckets = new Set((q.data ?? []).map((r: { bucket_id: string }) => r.bucket_id));
-    expect(buckets.has("card-scans")).toBe(true);
+    // The card-scans object was queued for cleanup (its path is "<uid>/…",
+    // which slab-images paths ("slabs/<n>/…") never match).
+    const queue = await adminReader.rpc("list_pending_slab_storage_cleanup");
+    const paths = ((queue.data ?? []) as Array<{ storage_path: string }>).map((r) => r.storage_path);
+    expect(paths).toContain(scan.path);
 
     // Phase 2: the Auth user now deletes cleanly (RESTRICT dependencies gone),
     // cascading customer_profiles / quota / admin rows.
