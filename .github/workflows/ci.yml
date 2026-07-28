@@ -119,7 +119,7 @@ jobs:
           SLABVAULT_TEST_URL="$API_URL" \
           SLABVAULT_TEST_ANON_KEY="$TEST_ANON_KEY" \
           SLABVAULT_TEST_SERVICE_KEY="$TEST_SERVICE_KEY" \
-            bunx vitest run src/test/integration \
+            bunx vitest run --config vitest.integration.config.ts \
               --reporter=verbose --reporter=json --outputFile=/tmp/integration.json
 
       - name: Upload integration report
