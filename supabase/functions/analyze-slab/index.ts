@@ -12,7 +12,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.110.2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
 import { consumeDailyQuota, consumeUserDailyQuota } from "../_shared/quota.ts";
-import { decideAnalyzeAccess } from "../_shared/analyze-access.ts";
+import { decideAnalyzeAccess, isCustomerAnalysisEnabled } from "../_shared/analyze-access.ts";
 // deno-lint-ignore no-explicit-any
 import { analyzeSlabImages, validateAnalyzeImageInput } from "../_shared/analyze-slab-bundle.js";
 
@@ -203,10 +203,16 @@ Deno.serve(async (req) => {
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
+  // Rollout flag: fail-closed — only the exact string "true" enables
+  // non-admin traffic. Admin access is never affected.
+  const customerAccessEnabled = isCustomerAnalysisEnabled(Deno.env.get("ANALYZE_SLAB_CUSTOMER_ENABLED"));
+
   // Customer authorization facts. The profile is read with the service role,
-  // keyed strictly by the verified JWT user id — a lookup failure fails closed.
+  // keyed strictly by the verified JWT user id — a lookup failure fails
+  // closed. While the rollout flag is disabled, non-admin callers are refused
+  // before any profile lookup happens.
   let profile: { ok: true; accountStatus: string | null } | { ok: false } = { ok: true, accountStatus: null };
-  if (!isAdmin) {
+  if (!isAdmin && customerAccessEnabled) {
     const { data, error } = await admin.from("customer_profiles")
       .select("account_status")
       .eq("id", user.id)
@@ -216,6 +222,7 @@ Deno.serve(async (req) => {
   const access = decideAnalyzeAccess({
     user: { id: user.id, emailConfirmed: Boolean(user.email_confirmed_at) },
     isAdmin,
+    customerAccessEnabled,
     profile,
   });
   if (!access.allowed) {
