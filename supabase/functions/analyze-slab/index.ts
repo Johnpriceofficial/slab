@@ -14,7 +14,7 @@ import { isCallerAdmin, unauthorizedResponse } from "../_shared/auth.ts";
 import { consumeDailyQuota, consumeUserDailyQuota } from "../_shared/quota.ts";
 import { decideAnalyzeAccess, isCustomerAnalysisEnabled } from "../_shared/analyze-access.ts";
 // deno-lint-ignore no-explicit-any
-import { analyzeSlabImages, validateAnalyzeImageInput } from "../_shared/analyze-slab-bundle.js";
+import { analyzeSlabImages, runAnalyzeRequestPipeline } from "../_shared/analyze-slab-bundle.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
 const MODEL = Deno.env.get("OPENAI_ANALYZE_MODEL") ?? "gpt-5.6-terra";
@@ -229,34 +229,36 @@ Deno.serve(async (req) => {
     return json({ status: "error", error_code: access.errorCode, message: access.message }, access.statusCode);
   }
 
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
-  if (!apiKey) return json({ status: "error", error_code: "NOT_CONFIGURED", message: "OpenAI image analysis is not configured." }, 502);
+  // Steps 4–8 run through the pure, unit-tested pipeline so the strict order
+  // (parse → validate → quota → provider-config → provider) is guaranteed:
+  // a malformed body/image returns its typed 400/413 even when the provider
+  // key is absent, rejected payloads never consume quota or call the provider,
+  // and NOT_CONFIGURED is only reachable after authorization, validation and
+  // quota all pass.
+  const result = await runAnalyzeRequestPipeline({
+    role: access.role,
+    parseJson: async () => {
+      try { return { ok: true, value: await req.json() }; } catch { return { ok: false }; }
+    },
+    consumeQuota: (role: "admin" | "customer") =>
+      role === "admin"
+        ? consumeDailyQuota("analyze-slab-openai", DAILY_LIMIT)
+        : consumeUserDailyQuota(user.id, "analyze-slab-openai", USER_DAILY_LIMIT),
+    getApiKey: () => Deno.env.get("OPENAI_API_KEY"),
+    runAnalysis: (input: unknown, apiKey: string) => runAnalysis(admin, user.id, input, apiKey),
+  });
+  return json(result.body, result.statusCode);
+});
 
-  let input: unknown;
-  try { input = await req.json(); } catch { return json({ status: "error", error_code: "INVALID_PARAMETER", message: "Invalid JSON body." }, 400); }
-
-  // Server-side image validation BEFORE quota is spent and before any OpenAI
-  // request. The validator is total over unknown — any runtime shape yields a
-  // typed error, never a thrown TypeError. The bundled analyzer re-runs the
-  // same validation defensively.
-  const invalidImages = validateAnalyzeImageInput(input);
-  if (invalidImages) {
-    return json({ status: "error", error_code: invalidImages.code, message: invalidImages.message }, invalidImages.statusCode);
-  }
-
-  if (access.role === "admin") {
-    // Existing administrative quota behavior: shared bucket, fails open.
-    if (!(await consumeDailyQuota("analyze-slab-openai", DAILY_LIMIT))) {
-      return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily image-analysis limit reached. Try again tomorrow." }, 429);
-    }
-  } else {
-    // Per-user allowance (profile limit enforced inside the RPC, capped by the
-    // configured hard limit). Fails CLOSED on any counter failure.
-    if (!(await consumeUserDailyQuota(user.id, "analyze-slab-openai", USER_DAILY_LIMIT))) {
-      return json({ status: "error", error_code: "QUOTA_EXCEEDED", message: "Daily analysis limit reached for this account. Try again tomorrow." }, 429);
-    }
-  }
-
+// Step 8: the provider request + persistence, invoked only for a fully
+// authorized, parsed, validated and quota'd request.
+async function runAnalysis(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  ownerId: string,
+  input: unknown,
+  apiKey: string,
+): Promise<{ statusCode: number; body: unknown }> {
   const telemetry: Array<Record<string, unknown>> = [];
   try {
     const result = await analyzeSlabImages({ ...(input as Record<string, unknown>), strict_multi_pass: true }, { callModel: (modelReq: unknown) => openAIRequest(apiKey, modelReq, telemetry) });
@@ -264,12 +266,12 @@ Deno.serve(async (req) => {
     // not narrow the success/error union — and every read of `warnings` below then
     // fails `deno check`. Discriminate on the field we actually consume.
     const body = result.body;
-    if (body.status !== "success" || !("warnings" in body)) return json(body, result.statusCode);
+    if (body.status !== "success" || !("warnings" in body)) return { statusCode: result.statusCode, body };
 
     const totalLatency = telemetry.reduce((sum, row) => sum + Number(row.latency_ms ?? 0), 0);
     const { data: run } = await admin.from("ai_analysis_runs").insert({
       // Runs are never ownerless: the verified caller owns what they created.
-      owner_id: user.id,
+      owner_id: ownerId,
       provider: "OPENAI",
       model: String(telemetry[0]?.model ?? MODEL),
       schema_version: SCHEMA_VERSION,
@@ -289,7 +291,7 @@ Deno.serve(async (req) => {
       const rawFields = mainOutput?.fields ?? {};
       const evidence = Object.entries(rawFields).map(([fieldName, field]: [string, any]) => ({
         analysis_run_id: run.id,
-        owner_id: user.id,
+        owner_id: ownerId,
         field_name: fieldName,
         value: field.value,
         normalized_value: field.normalized_value,
@@ -306,21 +308,24 @@ Deno.serve(async (req) => {
       if (evidence.length > 0) await admin.from("ai_field_evidence").insert(evidence);
     }
 
-    return json({
-      ...body,
-      analysis_version: SCHEMA_VERSION,
-      model: String(telemetry[0]?.model ?? MODEL),
-      provider: "OPENAI",
-      analysis_run_id: run?.id ?? null,
-      request_ids: telemetry.map((row) => row.request_id).filter(Boolean),
-      latency_ms: totalLatency,
-      overall_status: /disagree|could not read/i.test(body.warnings.join(" ")) ? "NEEDS_REVIEW" : "PROPOSED",
-      images_evaluated: (input as { back_image_base64?: string }).back_image_base64 ? ["front_original", "back_original"] : ["front_original"],
-      identity_conflicts: body.warnings.filter((warning: string) => /disagree|inconsistent|conflict/i.test(warning)),
-      required_user_actions: body.warnings.length ? ["Review every flagged field against the original photograph before linking a product."] : [],
-      search_queries: ((telemetry.find((row) => row.analysis_type === "slab_identity")?.structured_output as { search_queries?: string[] } | undefined)?.search_queries ?? []),
-    }, 200);
+    return {
+      statusCode: 200,
+      body: {
+        ...body,
+        analysis_version: SCHEMA_VERSION,
+        model: String(telemetry[0]?.model ?? MODEL),
+        provider: "OPENAI",
+        analysis_run_id: run?.id ?? null,
+        request_ids: telemetry.map((row) => row.request_id).filter(Boolean),
+        latency_ms: totalLatency,
+        overall_status: /disagree|could not read/i.test(body.warnings.join(" ")) ? "NEEDS_REVIEW" : "PROPOSED",
+        images_evaluated: (input as { back_image_base64?: string }).back_image_base64 ? ["front_original", "back_original"] : ["front_original"],
+        identity_conflicts: body.warnings.filter((warning: string) => /disagree|inconsistent|conflict/i.test(warning)),
+        required_user_actions: body.warnings.length ? ["Review every flagged field against the original photograph before linking a product."] : [],
+        search_queries: ((telemetry.find((row) => row.analysis_type === "slab_identity")?.structured_output as { search_queries?: string[] } | undefined)?.search_queries ?? []),
+      },
+    };
   } catch {
-    return json({ status: "error", error_code: "OPENAI_ANALYSIS_ERROR", message: "OpenAI image analysis failed safely; no fields were verified." }, 502);
+    return { statusCode: 502, body: { status: "error", error_code: "OPENAI_ANALYSIS_ERROR", message: "OpenAI image analysis failed safely; no fields were verified." } };
   }
-});
+}

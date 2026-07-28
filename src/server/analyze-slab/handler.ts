@@ -59,6 +59,12 @@ export {
   type ImageValidationLimits,
 } from "./validate-images";
 
+export {
+  runAnalyzeRequestPipeline,
+  type AnalyzePipelineDeps,
+  type AnalyzePipelineResult,
+} from "./request-pipeline";
+
 export type FieldSource = "front" | "back" | "label" | "card" | "unknown";
 
 export interface ProposedField {

@@ -201,6 +201,34 @@ function validateAnalyzeImageInput(raw, limits = DEFAULT_IMAGE_LIMITS) {
   return null;
 }
 
+// src/server/analyze-slab/request-pipeline.ts
+var QUOTA_MESSAGE = {
+  admin: "Daily image-analysis limit reached. Try again tomorrow.",
+  customer: "Daily analysis limit reached for this account. Try again tomorrow."
+};
+async function runAnalyzeRequestPipeline(deps) {
+  const parsed = await deps.parseJson();
+  if (!parsed.ok) {
+    return err(400, "INVALID_PARAMETER", "Invalid JSON body.");
+  }
+  const invalid = validateAnalyzeImageInput(parsed.value, deps.imageLimits);
+  if (invalid) {
+    return err(invalid.statusCode, invalid.code, invalid.message);
+  }
+  const allowed = await deps.consumeQuota(deps.role);
+  if (!allowed) {
+    return err(429, "QUOTA_EXCEEDED", QUOTA_MESSAGE[deps.role]);
+  }
+  const apiKey = deps.getApiKey();
+  if (!apiKey) {
+    return err(502, "NOT_CONFIGURED", "OpenAI image analysis is not configured.");
+  }
+  return deps.runAnalysis(parsed.value, apiKey);
+}
+function err(statusCode, code, message) {
+  return { statusCode, body: { status: "error", error_code: code, message } };
+}
+
 // src/server/analyze-slab/handler.ts
 var ANALYZE_FIELD_KEYS = [
   "card_name",
@@ -472,17 +500,17 @@ function applyIdentityReconciliation(proposed) {
 async function analyzeSlabImages(input, deps) {
   const images = [];
   const invalid = validateAnalyzeImageInput(input, deps.imageLimits);
-  if (invalid) return err(invalid.statusCode, invalid.code, invalid.message);
+  if (invalid) return err2(invalid.statusCode, invalid.code, invalid.message);
   if (!input.front_image_base64 || !input.front_mime) {
-    return err(400, "MISSING_IMAGE", "A front image is required to analyze a slab.");
+    return err2(400, "MISSING_IMAGE", "A front image is required to analyze a slab.");
   }
   if (!ALLOWED_MIME.has(input.front_mime)) {
-    return err(400, "UNSUPPORTED_IMAGE", `Unsupported front image type: ${input.front_mime}.`);
+    return err2(400, "UNSUPPORTED_IMAGE", `Unsupported front image type: ${input.front_mime}.`);
   }
   images.push({ label: "front", image: { base64: input.front_image_base64, mime: input.front_mime } });
   if (input.back_image_base64 && input.back_mime) {
     if (!ALLOWED_MIME.has(input.back_mime)) {
-      return err(400, "UNSUPPORTED_IMAGE", `Unsupported back image type: ${input.back_mime}.`);
+      return err2(400, "UNSUPPORTED_IMAGE", `Unsupported back image type: ${input.back_mime}.`);
     }
     images.push({ label: "back", image: { base64: input.back_image_base64, mime: input.back_mime } });
   }
@@ -494,13 +522,13 @@ async function analyzeSlabImages(input, deps) {
   try {
     text = await deps.callModel({ system: SYSTEM_PROMPT, instruction: INSTRUCTION, images });
   } catch (e) {
-    return err(502, "ANALYSIS_PROVIDER_ERROR", e instanceof Error ? e.message : "The analysis provider failed.");
+    return err2(502, "ANALYSIS_PROVIDER_ERROR", e instanceof Error ? e.message : "The analysis provider failed.");
   }
   let parsed;
   try {
     parsed = JSON.parse(stripFence(text));
   } catch {
-    return err(502, "ANALYSIS_PARSE_ERROR", "The analysis provider returned an unreadable response.");
+    return err2(502, "ANALYSIS_PARSE_ERROR", "The analysis provider returned an unreadable response.");
   }
   const rawFields = parsed.fields ?? {};
   const proposed = {};
@@ -536,7 +564,7 @@ async function analyzeSlabImages(input, deps) {
   };
   return { statusCode: 200, body };
 }
-function err(statusCode, code, message) {
+function err2(statusCode, code, message) {
   return { statusCode, body: { status: "error", error_code: code, message } };
 }
 export {
@@ -545,5 +573,6 @@ export {
   analyzeSlabImages,
   reconcileGradeReadings,
   reconcileVariationReadings,
+  runAnalyzeRequestPipeline,
   validateAnalyzeImageInput
 };
