@@ -3,8 +3,8 @@
   "repository": "Johnpriceofficial/slab",
   "pullRequest": 91,
   "branch": "fix/atomic-confirmed-slab-save",
-  "verifiedCommit": "c4e7a12dfeda4b4a82683daed7741ab9a8543e6a",
-  "verifiedAt": "2026-07-29T08:17:16Z",
+  "verifiedCommit": "7d7922036fbea343f6e44d6a43dc4416733b9e99",
+  "verifiedAt": "2026-07-29T08:22:55Z",
   "productionTouched": false,
   "promotionPerformed": false,
   "migrationsUnderTest": [
@@ -22,19 +22,25 @@
   },
   "githubActions": {
     "workflow": "CI",
-    "runId": 30434720177,
-    "runNumber": 327,
-    "integrationArtifactId": 8717002481,
-    "integrationArtifactDigest": "sha256:d0c9431e7f64ee09a4558c42c3217dbbb4ae428c38606d8e49cc572c5c0c8c27",
+    "runId": 30435117048,
+    "runNumber": 329,
+    "integrationArtifactId": 8717145783,
+    "integrationArtifactDigest": "sha256:6c7de079f20299bf0088a014b1125f399295f37a8f7502a11f11d20bb6d4b3ac",
+    "atomicPermissionCases": {
+      "total": 95,
+      "passed": 95,
+      "failed": 0,
+      "skipped": 0
+    },
     "testSuites": {
-      "total": 56,
-      "passed": 56,
+      "total": 58,
+      "passed": 58,
       "failed": 0,
       "skipped": 0
     },
     "tests": {
-      "total": 225,
-      "passed": 225,
+      "total": 241,
+      "passed": 241,
       "failed": 0,
       "skipped": 0,
       "todo": 0
@@ -44,6 +50,7 @@
   },
   "result": "PASS",
   "releaseGate": {
+    "requiredAtomicPermissionCases": 95,
     "requiredFailed": 0,
     "requiredSkipped": 0,
     "satisfied": true
