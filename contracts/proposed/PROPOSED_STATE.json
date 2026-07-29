@@ -1,0 +1,133 @@
+{
+  "artifact": "proposed-backend-state",
+  "purpose": "Authoritative merge, deployment and verification state for the contract revision on this branch. Read this before treating anything under contracts/ as live. scripts/build-contract-snapshot.mjs refuses to emit an artifact that disagrees with this file.",
+  "repository": "Johnpriceofficial/slab",
+
+  "snapshotSeparation": {
+    "canonical": "contracts/canonical/backend-capabilities.json — merged main only. Generated with `--mode canonical`. This is the ONLY snapshot a frontend runtime may consume.",
+    "proposed": "contracts/proposed/ — this file plus backend-capabilities.proposed.json. Generated with `--mode proposed`. Review artifact only; runtime code must never import it.",
+    "rule": "Default generation is canonical. Proposed mode never writes to a canonical path, and canonical mode refuses to publish an operation whose status is PROPOSED_NOT_DEPLOYED or PROPOSED_CONTRACT_CORRECTION."
+  },
+
+  "baseCommitInspected": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+
+  "mergedMainCommit": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+  "mergedMigrationCount": 67,
+  "mergedFinalMigration": "20260906000000_account_deletion",
+  "mergedContractVersion": "1.1.0-ba3953fd-m65",
+
+  "proposedBranch": "fix/atomic-confirmed-slab-save",
+  "proposedBranchCommit": null,
+  "proposedMigration": "20260907000000_save_confirmed_slab_from_analysis",
+  "proposedMigrationCount": 68,
+  "proposedContractVersion": "1.3.0-merged-d8088f2a-m67-proposed-m68",
+
+  "liveVerificationState": "not-run-staging-verification-required",
+  "stagingVerifiedAt": null,
+  "mergeState": "proposed-unmerged",
+  "mergeCommit": null,
+  "deploymentState": "not-deployed",
+  "deployedCommit": null,
+  "deployedAt": null,
+  "productionSchemaContainsProposedMigration": false,
+  "rpcIsProductionReady": false,
+
+  "determinism": {
+    "generatedAt": "Not emitted. The generator inserts no clock value; it derives a timestamp only from SOURCE_DATE_EPOCH when that variable is supplied, so identical inputs always produce identical output bytes and checksums."
+  },
+
+  "authoritativeSourceTree": {
+    "root": "backend-patches/20260907-atomic-confirmed-save/branch/",
+    "rule": "There is exactly ONE editable copy of the migration, contracts, generator and tests. Duplicate .txt copies, duplicate migration folders and hand-maintained patch files were removed; the root README points here instead of restating content."
+  },
+
+  "operationStatus": {
+    "saveConfirmedSlabFromAnalysis": "PROPOSED_NOT_DEPLOYED",
+    "startSlabAnalysis": "PROPOSED_CONTRACT_CORRECTION"
+  },
+  "operationStatusMeaning": {
+    "PROPOSED_NOT_DEPLOYED": "The backend resource itself exists only on this branch. Nothing may call it.",
+    "PROPOSED_CONTRACT_CORRECTION": "The backend resource IS merged and deployed, but this manifest's corrected description of it (resource name, request shape, limits) lives only on this branch and has not been exercised against the live handler. Nothing may rely on the corrected shape yet.",
+    "READY": "Merged, deployed and live-verified."
+  },
+
+  "stateDefinitions": {
+    "baseCommitInspected": "The commit whose source was read to author this change.",
+    "mergedMainCommit": "What Johnpriceofficial/slab main actually contains right now.",
+    "proposed*": "What this branch adds on top of merged main. Not in any database.",
+    "proposedBranchCommit": "Head commit of the review branch once it exists on the remote; null while it does not.",
+    "mergeState": "proposed-unmerged | merged",
+    "mergeCommit": "The merge commit on main; null while unmerged.",
+    "deploymentState": "not-deployed | deployed",
+    "deployedCommit": "The commit whose migrations were applied to the target database; null while undeployed.",
+    "liveVerificationState": "not-run-staging-verification-required | passed-staging | passed-production"
+  },
+
+  "contractCorrections": {
+    "startSlabAnalysis": "Request type replaced with the real handler body read at supabase/functions/analyze-slab/index.ts: front_image_base64 + front_mime required, back_image_base64/back_mime optional and forwarded ONLY when both are present, variants[] {label,image_base64,mime} max 8. There is no slabId argument. Limits from src/server/analyze-slab/validate-images.ts: 15728640 bytes per image, 41943040 bytes aggregate, MIME jpeg/png/webp/heic/heif. The manifest separates an application-facing camelCase StartSlabAnalysisRequest from the snake_case StartSlabAnalysisWireRequest, with toStartSlabAnalysisWireRequest as the only sanctioned conversion. That serializer rejects blank and whitespace-only front, back and variant image data, rejects blank and whitespace-only variant labels with INVALID_VARIANT_LABEL, accepts exactly eight variants and rejects nine, emits both back keys or neither, never emits an empty variants array, emits only the exact wire keys, and mutates nothing it is given. Status is PROPOSED_CONTRACT_CORRECTION: the handler is deployed, this description of it is not yet verified against it.",
+    "duplicateCertificationRace": "The wrapper takes pg_advisory_xact_lock(918273645) — the same transaction-scoped lock canonical create_slab (20260833000000) uses — BEFORE its certification probe, so a concurrent intake cannot insert a matching normalized grader/certification between probe and insert. Without it the probe could miss and create_slab would raise an uncaught 23505 instead of returning result='duplicate_certification'.",
+    "fieldEvidenceOwnership": "Canonical link_ai_analysis_run applies its ai_field_evidence ownership check only to non-admins. Because this wrapper is self-owned-only, the check is meaningful for every caller and is applied unconditionally before anything is created (42501)."
+  },
+
+  "liveIntegrationTests": {
+    "file": "src/test/integration/atomic-confirmed-save.integration.test.ts",
+    "caseCount": 95,
+    "state": "WRITTEN BUT NOT RUN — STAGING VERIFICATION REQUIRED",
+    "envGate": "SLABVAULT_TEST_URL / SLABVAULT_TEST_ANON_KEY / SLABVAULT_TEST_SERVICE_KEY / SLABVAULT_TEST_DB_URL; refuses to run against anything that looks like production",
+    "extraDevDependency": "pg — required only so the rollback fixture can install and remove a temporary, test-only trigger. No testing hook exists in the migration.",
+    "coverage": [
+      "test-harness safety (production-URL refusal, credential gate, fixture refusal on production-looking URLs, finally-cleanup)",
+      "transaction and rollback (forced post-create link failure, no orphan slab, run left unlinked, no audit row, truthful non-transactional sequence behaviour, successful single retry, fixture removal verified)",
+      "replay and concurrency (2 and 5 simultaneous saves, one created + rest already_saved, identical slab id, 2 and 4 runs sharing one certification, typed duplicates, no raw 23505, repeated duplicate retries, stable inventory identity across replays)",
+      "certification behaviour (distinct certifications, canonical normalization of grader and certification separately, cross-owner isolation, genuinely different grader, certification-less replay, two certification-less runs, blank vs null)",
+      "permanent inventory identity (replay, duplicate response, update attempts on number and code, deletion does not renumber, no reuse, concurrent uniqueness)",
+      "images and extensions (front-only, front+back, null and present back paths, invalid front and back extensions, blank and whitespace front extension, blank back extension, capitalization, cross-owner path privacy)",
+      "accounts, roles and privacy (anon, PUBLIC grant, owner, profile-less, inactive, suspended, admin self-save, admin cross-owner refusal, customer cross-owner refusal, ownerless run, foreign and mixed evidence, no admin status bypass, payload owner_id cannot redirect, duplicate and replay privacy, cross-owner field privacy)",
+      "status and input validation (succeeded, needs_review, running, failed, missing run, null run id, null/array/scalar payload, empty object, nothing created on refusal)",
+      "audit behaviour (exactly one row, none on replay, none on duplicate, none on authorization or input refusal, correct owner and actor role for customer and admin, no sensitive material, only approved keys)",
+      "result contracts (exact created / already_saved / duplicate_certification shapes, no private fields)",
+      "cleanup contract (teardown ledger, cleanup failure fails the run)"
+    ]
+  },
+  "verifiedProperties": [
+    "static SQL text assertions (function signature, auth.uid()-only identity, advisory-lock ordering, evidence-ownership assertion, typed error codes, revoke/grant)",
+    "contract manifest assertions (startSlabAnalysis maps to edge:analyze-slab with the real base64 wire body; application/wire types, hardened serializer and its purity; saveConfirmedSlabFromAnalysis declared idempotent, retriable and PROPOSED_NOT_DEPLOYED)",
+    "generator assertions (derived version string, lifecycle consistency, migrations on disk, migration-derived proposed operations, this file, checksum coverage, canonical/proposed separation, deterministic output)"
+  ],
+  "unverifiedProperties": [
+    "runtime atomicity and rollback",
+    "idempotent replay",
+    "concurrency serialization under FOR UPDATE and the advisory lock",
+    "cross-owner isolation",
+    "duplicate-certification behaviour at runtime",
+    "administrator self-owned save and administrator cross-owner refusal at runtime",
+    "suspended-profile refusal at runtime",
+    "field-evidence ownership refusal at runtime",
+    "the corrected analyze-slab request shape against the live handler"
+  ],
+
+  "promotionProcess": [
+    "1. Create the review branch and open a DRAFT pull request.",
+    "2. Run clean backend installation, typecheck, lint, formatting and unit tests in pull-request CI.",
+    "3. Apply the proposed migration only to an isolated STAGING database. Never production.",
+    "4. Run the complete live integration suite (95 cases) with zero skips and zero retries.",
+    "5. Record the staging verification commit, timestamp and results here (liveVerificationState='passed-staging', stagingVerifiedAt).",
+    "6. Review and merge the pull request. Set mergeState='merged', mergeCommit, mergedMainCommit, mergedMigrationCount=68, mergedFinalMigration.",
+    "7. Deploy the merged migration through the controlled deployment process. Set deploymentState='deployed', deployedCommit, deployedAt.",
+    "8. Run the approved deployed verification subset against the deployed database.",
+    "9. Only then set saveConfirmedSlabFromAnalysis to READY, and startSlabAnalysis to READY only after its corrected request shape has been exercised against the deployed handler.",
+    "10. Regenerate the canonical frontend snapshot (bun scripts/build-contract-snapshot.mjs --mode canonical --frontend <path>) and re-reconcile the frontend claim map.",
+    "11. Connect the frontend call sites in a separate milestone."
+  ],
+
+  "rollback": "Drop only public.save_confirmed_slab_from_analysis(uuid, jsonb, text, text) and revert contract metadata. The REVOKE/GRANT statements in the migration apply solely to that new function and disappear with it; no existing grant, table, policy or trigger is touched, and there is no data migration to reverse.",
+  "ownershipPolicy": {
+    "policy": "fail-closed-self-owned-only",
+    "targetOwner": "v_target_owner := auth.uid(), for every caller",
+    "administrators": "An administrator may save only an analysis run they own. Saving another account's run is refused with 42501; no slab is created and the run stays unlinked.",
+    "rationale": "Canonical public.create_slab inserts owner_id = auth.uid() and accepts no owner argument, and the repository contains no owner-aware slab creation path (verified by repository-wide search). Allowing an admin to save another account's run could only create the card in the admin's inventory, so it is refused instead.",
+    "statusGate": "'succeeded'/'needs_review' required of every caller; no administrator override.",
+    "evidenceGate": "ai_field_evidence rows for the run must all belong to the target owner; applied to every caller, including administrators.",
+    "postCreateAssertion": "The created slab's owner_id must equal v_target_owner or the whole transaction is rolled back (42501)."
+  }
+}

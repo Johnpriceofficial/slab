@@ -1,8 +1,15 @@
 // contracts/backend-operations.ts
 // The typed, frontend-facing operation contract for Graded Card Value V2.
 //
-// Source of truth: production Supabase schema at 65 migrations
-// (20260709000000..20260904000000), repo commit ba3953fdb68c31435c7dac732f67d8d53aa2adcb.
+// Merged source of truth: Supabase schema at 67 migrations
+// (20260709000000..20260906000000), main commit d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271.
+//
+// PROPOSED, NOT MERGED, NOT DEPLOYED: this revision additionally declares the
+// atomic save path added by 20260907000000_save_confirmed_slab_from_analysis.sql
+// on branch `fix/atomic-confirmed-slab-save` (68 migrations proposed). That
+// migration is NOT part of the deployed production schema. The version suffix
+// `-d8088f2a-m68` identifies the base commit plus the proposed migration count;
+// see contracts/PROPOSED_STATE.json for the authoritative merge/deploy state.
 // The Lovable V2 frontend must consume ONLY this surface via its BackendProvider —
 // never raw tables, arbitrary RPCs, service-role behavior, cleanup queues, storage
 // deletion, credential retrieval, or unrestricted admin mutation.
@@ -43,11 +50,31 @@ export type SecurityClassification =
   | "SECURITY_REVIEW_REQUIRED";
 
 export type IntegrationStatus =
+  /**
+   * Merged, deployed, and verified against a live database. Only a READY
+   * operation may be called by a consumer.
+   */
   | "READY"
+  /**
+   * The backend resource exists only on an unmerged branch and is not deployed.
+   * Consumers MUST NOT call it. Promote to READY only after staging
+   * verification + merge + deploy (see contracts/PROPOSED_STATE.json).
+   */
+  | "PROPOSED_NOT_DEPLOYED"
+  /**
+   * The backend resource IS merged and deployed, but the description of it in
+   * this manifest (resource, request shape, limits, authorization) is a
+   * correction that lives only on an unmerged branch and has not been verified
+   * against the live handler. The operation is real; this contract's account of
+   * it is not yet proven. Consumers MUST NOT rely on the corrected shape until
+   * it is promoted to READY.
+   */
+  | "PROPOSED_CONTRACT_CORRECTION"
   | "ADAPTER_REQUIRED"
   | "BACKEND_CONTRACT_REQUIRED"
   | "SECURITY_REVIEW_REQUIRED"
   | "DEFERRED";
+
 
 export type OperationDomain =
   | "auth"
@@ -111,8 +138,213 @@ export interface UploadSlabImageRequest {
 }
 
 // ── Analysis ─────────────────────────────────────────────────────────────────
+/**
+ * Real request body accepted by `supabase/functions/analyze-slab/index.ts` at
+ * Johnpriceofficial/slab@d8088f2a. The handler reads JSON with snake_case keys
+ * and base64 image payloads; there is NO `slabId` field — the slab does not
+ * exist yet at analysis time. Limits come from
+ * `src/server/analyze-slab/validate-images.ts`.
+ */
+export const ANALYZE_SLAB_LIMITS = {
+  /** 15 MiB per decoded image. */
+  maxImageBytes: 15_728_640,
+  /** 40 MiB aggregate across front + back + variants. */
+  maxAggregateBytes: 41_943_040,
+  maxVariants: 8,
+  mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"] as const,
+} as const;
+
+export type AnalyzeSlabMime = (typeof ANALYZE_SLAB_LIMITS.mimeTypes)[number];
+
+// ── Wire boundary (snake_case, exactly what the handler parses) ──────────────
+
+export interface AnalyzeSlabVariant {
+  label: string;
+  /** Base64-encoded bytes, no data: URL prefix. */
+  image_base64: string;
+  mime: AnalyzeSlabMime;
+}
+
+/**
+ * WIRE type. The literal JSON body of `POST edge:analyze-slab`. Never build
+ * this by hand in application code: compose a `StartSlabAnalysisRequest` and
+ * call `toStartSlabAnalysisWireRequest`, which is the only sanctioned place
+ * where camelCase application state becomes snake_case wire state.
+ */
+export interface StartSlabAnalysisWireRequest {
+  /** Required. Base64-encoded bytes, no data: URL prefix. */
+  front_image_base64: string;
+  front_mime: AnalyzeSlabMime;
+  back_image_base64?: string;
+  back_mime?: AnalyzeSlabMime;
+  /** Optional additional captures (angles, label close-ups); max 8. */
+  variants?: AnalyzeSlabVariant[];
+}
+
+// ── Application boundary (camelCase, what the frontend composes) ─────────────
+
+/** One image the frontend holds: bytes and their MIME always travel together. */
+export interface AnalyzeSlabImage {
+  /** Base64-encoded bytes, no data: URL prefix. */
+  base64: string;
+  mime: AnalyzeSlabMime;
+}
+
+export interface AnalyzeSlabVariantInput {
+  label: string;
+  image: AnalyzeSlabImage;
+}
+
+/**
+ * APPLICATION type for `startSlabAnalysis`.
+ *
+ * The back image is modelled as one optional `AnalyzeSlabImage`, not as two
+ * independent optional fields, because the canonical handler forwards the back
+ * image only when BOTH `back_image_base64` and `back_mime` are present
+ * (`src/server/analyze-slab/validate-images.ts`): a half-populated pair is
+ * silently dropped, and the analysis would then claim a front-only evaluation
+ * while the UI believed a back image was analyzed. Making the pair
+ * unrepresentable at the type level removes that failure mode.
+ */
 export interface StartSlabAnalysisRequest {
-  slabId: string;
+  front: AnalyzeSlabImage;
+  back?: AnalyzeSlabImage;
+  variants?: AnalyzeSlabVariantInput[];
+}
+
+export type AnalyzeSlabSerializationErrorCode =
+  | "MISSING_FRONT_IMAGE"
+  | "UNSUPPORTED_IMAGE_MIME"
+  | "TOO_MANY_VARIANTS"
+  | "INCOMPLETE_BACK_IMAGE"
+  | "INVALID_VARIANT_LABEL";
+
+export interface AnalyzeSlabSerializationError {
+  code: AnalyzeSlabSerializationErrorCode;
+  message: string;
+}
+
+const isAnalyzeSlabMime = (value: unknown): value is AnalyzeSlabMime =>
+  typeof value === "string" &&
+  (ANALYZE_SLAB_LIMITS.mimeTypes as readonly string[]).includes(value);
+
+/**
+ * Bytes must be a non-empty, non-whitespace base64 string. A blank or
+ * whitespace-only payload is never a real image: sending it would consume
+ * quota and come back as a provider error.
+ */
+const hasBytes = (image: AnalyzeSlabImage | undefined): boolean =>
+  Boolean(image && typeof image.base64 === "string" && image.base64.trim().length > 0);
+
+/**
+ * The single sanctioned application -> wire conversion for `startSlabAnalysis`.
+ *
+ * Client-side validation here is a UX nicety, never a security control: the
+ * server re-validates every byte, MIME and limit in
+ * `validateAnalyzeImageInput`. It exists so an obviously malformed request
+ * fails locally with a typed code instead of consuming quota.
+ *
+ * PURITY: the function never mutates `input`, its nested image objects, its
+ * variant array or its variant objects. Every emitted object is freshly
+ * constructed, so a frozen input is a valid input.
+ */
+export function toStartSlabAnalysisWireRequest(
+  input: StartSlabAnalysisRequest,
+):
+  | { ok: true; value: StartSlabAnalysisWireRequest }
+  | { ok: false; error: AnalyzeSlabSerializationError } {
+  const err = (
+    code: AnalyzeSlabSerializationErrorCode,
+    message: string,
+  ): { ok: false; error: AnalyzeSlabSerializationError } => ({ ok: false, error: { code, message } });
+
+  if (!hasBytes(input?.front)) {
+    return err("MISSING_FRONT_IMAGE", "A front image with image bytes is required to analyze a slab.");
+  }
+  if (!isAnalyzeSlabMime(input.front.mime)) {
+    return err("UNSUPPORTED_IMAGE_MIME", `Unsupported front image type: ${String(input.front.mime)}.`);
+  }
+  if (input.back !== undefined) {
+    if (!hasBytes(input.back)) {
+      return err(
+        "INCOMPLETE_BACK_IMAGE",
+        "A back image was supplied without image bytes; omit it instead of sending a partial pair.",
+      );
+    }
+    if (!isAnalyzeSlabMime(input.back.mime)) {
+      return err("UNSUPPORTED_IMAGE_MIME", `Unsupported back image type: ${String(input.back.mime)}.`);
+    }
+  }
+
+  const variants = input.variants ?? [];
+  if (variants.length > ANALYZE_SLAB_LIMITS.maxVariants) {
+    return err(
+      "TOO_MANY_VARIANTS",
+      `At most ${ANALYZE_SLAB_LIMITS.maxVariants} image variants are accepted per request.`,
+    );
+  }
+  for (const variant of variants) {
+    if (typeof variant?.label !== "string" || variant.label.trim().length === 0) {
+      return err("INVALID_VARIANT_LABEL", "Every image variant needs a non-blank label.");
+    }
+    if (!hasBytes(variant?.image)) {
+      return err("UNSUPPORTED_IMAGE_MIME", `Variant "${variant.label}" is missing image bytes.`);
+    }
+    if (!isAnalyzeSlabMime(variant.image.mime)) {
+      return err("UNSUPPORTED_IMAGE_MIME", `Variant "${variant.label}" uses an unsupported image type.`);
+    }
+  }
+
+  // Freshly constructed: only the exact backend wire keys, never a reference
+  // to any caller-owned object.
+  const value: StartSlabAnalysisWireRequest = {
+    front_image_base64: input.front.base64,
+    front_mime: input.front.mime,
+  };
+  if (input.back) {
+    // Both keys or neither - never a half pair.
+    value.back_image_base64 = input.back.base64;
+    value.back_mime = input.back.mime;
+  }
+  if (variants.length > 0) {
+    // An empty array is never emitted: the canonical handler treats an absent
+    // `variants` key and an empty list identically, and omitting it keeps the
+    // wire body minimal.
+    value.variants = variants.map((variant) => ({
+      label: variant.label,
+      image_base64: variant.image.base64,
+      mime: variant.image.mime,
+    }));
+  }
+  return { ok: true, value };
+}
+
+
+/** Arguments of rpc:save_confirmed_slab_from_analysis (positional, snake_case). */
+export interface SaveConfirmedSlabFromAnalysisRequest {
+  p_analysis_run_id: string;
+  /** Reviewed intake payload passed through verbatim to public.create_slab. */
+  p: Record<string, unknown>;
+  p_front_ext: string;
+  p_back_ext?: string | null;
+}
+
+export type SaveConfirmedSlabResult =
+  | "created"
+  | "already_saved"
+  | "duplicate_certification";
+
+export interface SaveConfirmedSlabFromAnalysisResponse {
+  result: SaveConfirmedSlabResult;
+  created: boolean;
+  analysis_run_id: string;
+  analysis_run_linked: boolean;
+  owner_id: string;
+  slab_id: string;
+  inventory_number: number;
+  inventory_code: string | null;
+  front_image_path: string | null;
+  back_image_path: string | null;
 }
 export interface AnalysisResult {
   run: AnalysisRunRow;
@@ -180,7 +412,15 @@ export interface OperationSpec {
   notes?: string;
 }
 
-export const CONTRACT_VERSION = "1.1.0-ba3953fd-m65" as const;
+/**
+ * Version string carries BOTH states explicitly, because a single
+ * `<semver>-<commit>-m<count>` form made migration 68 look like part of the
+ * merged commit. Shape: `<semver>-merged-<short merged commit>-m<merged
+ * migration count>-proposed-m<proposed migration count>`.
+ * scripts/build-contract-snapshot.mjs derives and enforces every component.
+ */
+export const CONTRACT_VERSION = "1.3.0-merged-d8088f2a-m67-proposed-m68" as const;
+
 
 export const OPERATIONS: readonly OperationSpec[] = [
   // auth
@@ -436,16 +676,35 @@ export const OPERATIONS: readonly OperationSpec[] = [
     name: "startSlabAnalysis",
     domain: "analysis",
     role: "customer",
-    backendResource: ["edge:scan-card"],
+    backendResource: ["edge:analyze-slab"],
     reads: false,
     writes: true,
-    authorization: "JWT; per-user daily quota (fails closed)",
+    authorization:
+      "JWT; admin, or customer with ANALYZE_SLAB_CUSTOMER_ENABLED=true + confirmed email + active customer_profiles row; per-user daily quota fails closed",
     classification: "BROWSER_CUSTOMER_SAFE",
-    status: "READY",
+    status: "PROPOSED_CONTRACT_CORRECTION",
     idempotent: false,
     retriable: false,
-    sideEffects: "AI provider call; card_scans/ai_analysis_runs/evidence rows; quota consumption",
-    notes: "Admin bulk analysis uses edge:analyze-slab (admin quota fails open).",
+    sideEffects: "AI provider call; ai_analysis_runs/ai_field_evidence rows; quota consumption",
+    notes:
+      "The handler edge:analyze-slab IS merged and deployed. What is PROPOSED here is this manifest's CORRECTED account of it (branch fix/atomic-confirmed-slab-save): the previous entry named edge:scan-card and an invented { slabId } body. Corrected shape, read at supabase/functions/analyze-slab/index.ts and src/server/analyze-slab/validate-images.ts: JSON with snake_case keys, front_image_base64 + front_mime required, back_image_base64/back_mime optional AND ONLY FORWARDED WHEN BOTH ARE PRESENT, variants[] (label/image_base64/mime) max 8; 15 MiB per image, 40 MiB aggregate, MIME in jpeg/png/webp/heic/heif with magic-byte match. There is NO slabId argument — the slab does not exist yet. Returns a run in 'succeeded' or 'needs_review'. edge:scan-card is the separate multipart V1 intake path and is NOT this operation. Compose StartSlabAnalysisRequest and serialize with toStartSlabAnalysisWireRequest; do not hand-build the wire body. Not READY: the corrected shape has not been exercised against the live handler.",
+  },
+  {
+    name: "saveConfirmedSlabFromAnalysis",
+    domain: "analysis",
+    role: "customer",
+    backendResource: ["rpc:save_confirmed_slab_from_analysis"],
+    reads: false,
+    writes: true,
+    authorization:
+      "auth.uid() only, fail closed and self-owned only: EVERY caller — administrators included — must own the analysis run (owner_id = auth.uid()) and the run must be in status 'succeeded' or 'needs_review'; there is no administrator override for either rule and no owner is ever read from the payload. Non-admins additionally need an active customer_profiles row. An administrator saving another account's run is refused with 42501 and creates nothing. EXECUTE revoked from public/anon, granted to authenticated.",
+    classification: "BROWSER_CUSTOMER_SAFE",
+    status: "PROPOSED_NOT_DEPLOYED",
+    idempotent: true,
+    retriable: true,
+    sideEffects: "slabs row + ai_analysis_runs.slab_id link + audit row, in ONE transaction",
+    notes:
+      "PROPOSED on branch fix/atomic-confirmed-slab-save; not merged, not deployed, live cases not run — do not call. Atomic replacement for create_slab-then-link_ai_analysis_run. Locks the run FOR UPDATE, so a replay returns result='already_saved' with the existing slab instead of creating a second one. Takes pg_advisory_xact_lock(918273645) — the same lock create_slab uses — before the certification probe, so a concurrent intake cannot slip a duplicate in between probe and insert. An existing certification returns result='duplicate_certification' (never overwritten) and leaves the run unlinked. Asserts field-evidence ownership for every caller (canonical link_ai_analysis_run skips that check for admins). A failed link rolls the created slab back.",
   },
   {
     name: "getAnalysis",
