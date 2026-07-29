@@ -1,0 +1,640 @@
+{
+  "$schema": "./backend-capabilities.schema.json",
+  "snapshotMode": "proposed",
+  "provenance": {
+    "backendRepository": "Johnpriceofficial/slab",
+    "baseCommitInspected": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+    "backendCommit": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+    "mergedMainCommit": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+    "migrationCount": 67,
+    "finalMigration": "20260906000000_account_deletion",
+    "proposedBranch": "fix/atomic-confirmed-slab-save",
+    "proposedBranchCommit": "e1e5f8f0af871de01458a3c95d73f84e520e92cc",
+    "proposedMigrationCount": 68,
+    "proposedFinalMigration": "20260907000000_save_confirmed_slab_from_analysis",
+    "liveVerificationState": "not-run-staging-verification-required",
+    "stagingVerifiedAt": null,
+    "liveCaseCount": 95,
+    "mergeState": "proposed-unmerged",
+    "mergeCommit": null,
+    "deploymentState": "not-deployed",
+    "deployedCommit": null,
+    "deployedAt": null,
+    "contractVersion": "1.3.0-merged-d8088f2a-m67-proposed-m68"
+  },
+  "operations": [
+    {
+      "operation": "getSession",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "anon",
+      "reads": true,
+      "writes": false,
+      "authorization": "session JWT",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "signIn",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "anon",
+      "reads": false,
+      "writes": true,
+      "authorization": "password + hCaptcha",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "creates session"
+    },
+    {
+      "operation": "signUp",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "anon",
+      "reads": false,
+      "writes": true,
+      "authorization": "email verification required + hCaptcha; customer_profiles row created by signup trigger",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "auth user + customer_profiles row (trigger); verification email"
+    },
+    {
+      "operation": "requestPasswordReset",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "anon",
+      "reads": false,
+      "writes": true,
+      "authorization": "email ownership via recovery link + hCaptcha",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "recovery email"
+    },
+    {
+      "operation": "updatePassword",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "active session (or recovery session) JWT",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": false,
+      "sideEffects": "credential update; other sessions may be revoked"
+    },
+    {
+      "operation": "signOut",
+      "domain": "auth",
+      "backendResource": [
+        "auth:gotrue"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "session JWT",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "revokes session"
+    },
+    {
+      "operation": "getCurrentProfile",
+      "domain": "profile",
+      "backendResource": [
+        "table:customer_profiles"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner (user_id = auth.uid())",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "getDashboardSummary",
+      "domain": "dashboard",
+      "backendResource": [
+        "table:slabs",
+        "table:cards",
+        "table:valuation_snapshots"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "ADAPTER_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "Client-side aggregation today; a summary RPC is a future optimization, not a blocker."
+    },
+    {
+      "operation": "listSlabs",
+      "domain": "inventory",
+      "backendResource": [
+        "table:slabs"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "getSlab",
+      "domain": "inventory",
+      "backendResource": [
+        "table:slabs",
+        "table:slab_images",
+        "storage:slab-images"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin; signed URLs (3600s)",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "listRawCards",
+      "domain": "inventory",
+      "backendResource": [
+        "table:cards"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "getRawCard",
+      "domain": "inventory",
+      "backendResource": [
+        "table:cards",
+        "table:card_scans",
+        "storage:card-scans"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin; signed URLs",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "archiveSlab",
+      "domain": "inventory",
+      "backendResource": [
+        "rpc:archive_slab"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "in-body owner-or-admin (auth.uid())",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "slabs.archived_at set; audit row"
+    },
+    {
+      "operation": "unarchiveSlab",
+      "domain": "inventory",
+      "backendResource": [
+        "rpc:unarchive_slab"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "in-body owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "slabs.archived_at cleared; audit row"
+    },
+    {
+      "operation": "createSlabIntake",
+      "domain": "intake",
+      "backendResource": [
+        "rpc:create_slab"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "in-body: authenticated, not suspended; owner stamped",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "slabs row + inventory id + identity derivation triggers; audit",
+      "notes": "Duplicate certification → DUPLICATE_CERTIFICATION."
+    },
+    {
+      "operation": "createRawCardIntake",
+      "domain": "intake",
+      "backendResource": [
+        "rpc:stage_raw_card"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "in-body: authenticated, not suspended",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "cards row + R-code assignment"
+    },
+    {
+      "operation": "uploadSlabImage",
+      "domain": "intake",
+      "backendResource": [
+        "storage:slab-images",
+        "table:slab_images"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "storage policy owner-or-admin via slab_object_owner(); bucket MIME/size limits",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "ADAPTER_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "storage object + slab_images row (+ acquired_at backfill trigger)",
+      "notes": "V1 does a direct slab_images insert after upload; V2 adapter must wrap upload+register as one operation (incl. HEIC normalization)."
+    },
+    {
+      "operation": "startSlabAnalysis",
+      "domain": "analysis",
+      "backendResource": [
+        "edge:analyze-slab"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "JWT; admin, or customer with ANALYZE_SLAB_CUSTOMER_ENABLED=true + confirmed email + active customer_profiles row; per-user daily quota fails closed",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "PROPOSED_CONTRACT_CORRECTION",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "AI provider call; ai_analysis_runs/ai_field_evidence rows; quota consumption",
+      "notes": "The handler edge:analyze-slab IS merged and deployed. What is PROPOSED here is this manifest's CORRECTED account of it (branch fix/atomic-confirmed-slab-save): the previous entry named edge:scan-card and an invented { slabId } body. Corrected shape, read at supabase/functions/analyze-slab/index.ts and src/server/analyze-slab/validate-images.ts: JSON with snake_case keys, front_image_base64 + front_mime required, back_image_base64/back_mime optional AND ONLY FORWARDED WHEN BOTH ARE PRESENT, variants[] (label/image_base64/mime) max 8; 15 MiB per image, 40 MiB aggregate, MIME in jpeg/png/webp/heic/heif with magic-byte match. There is NO slabId argument — the slab does not exist yet. Returns a run in 'succeeded' or 'needs_review'. edge:scan-card is the separate multipart V1 intake path and is NOT this operation. Compose StartSlabAnalysisRequest and serialize with toStartSlabAnalysisWireRequest; do not hand-build the wire body. Not READY: the corrected shape has not been exercised against the live handler."
+    },
+    {
+      "operation": "saveConfirmedSlabFromAnalysis",
+      "domain": "analysis",
+      "backendResource": [
+        "rpc:save_confirmed_slab_from_analysis"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "auth.uid() only, fail closed and self-owned only: EVERY caller — administrators included — must own the analysis run (owner_id = auth.uid()) and the run must be in status 'succeeded' or 'needs_review'; there is no administrator override for either rule and no owner is ever read from the payload. Non-admins additionally need an active customer_profiles row. An administrator saving another account's run is refused with 42501 and creates nothing. EXECUTE revoked from public/anon, granted to authenticated.",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "PROPOSED_NOT_DEPLOYED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "slabs row + ai_analysis_runs.slab_id link + audit row, in ONE transaction",
+      "notes": "PROPOSED on branch fix/atomic-confirmed-slab-save; not merged, not deployed, live cases not run — do not call. Atomic replacement for create_slab-then-link_ai_analysis_run. Locks the run FOR UPDATE, so a replay returns result='already_saved' with the existing slab instead of creating a second one. Takes pg_advisory_xact_lock(918273645) — the same lock create_slab uses — before the certification probe, so a concurrent intake cannot slip a duplicate in between probe and insert. An existing certification returns result='duplicate_certification' (never overwritten) and leaves the run unlinked. Asserts field-evidence ownership for every caller (canonical link_ai_analysis_run skips that check for admins). A failed link rolls the created slab back."
+    },
+    {
+      "operation": "getAnalysis",
+      "domain": "analysis",
+      "backendResource": [
+        "table:ai_analysis_runs",
+        "table:ai_field_evidence"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "confirmAnalysis",
+      "domain": "analysis",
+      "backendResource": [
+        "rpc:record_pricecharting_confirmation"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "in-body owner-or-admin; append-only event + CHECK constraints",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "slab state patch + slab_pricecharting_events append + audit"
+    },
+    {
+      "operation": "correctAnalysis",
+      "domain": "analysis",
+      "backendResource": [
+        "table:slabs"
+      ],
+      "role": "customer",
+      "reads": false,
+      "writes": true,
+      "authorization": "RLS owner-or-admin UPDATE policy",
+      "classification": "SECURITY_REVIEW_REQUIRED",
+      "integration": "BACKEND_CONTRACT_REQUIRED",
+      "idempotent": true,
+      "retriable": false,
+      "sideEffects": "slabs field updates; identity re-derivation triggers",
+      "notes": "V1 patches slabs with an unwhitelisted Partial<Slab>. V2 needs a whitelisted correction RPC (see V2_INTEGRATION_GAPS)."
+    },
+    {
+      "operation": "getPricingEvidence",
+      "domain": "pricing",
+      "backendResource": [
+        "table:valuation_snapshots",
+        "table:slab_product_links",
+        "table:slab_product_candidates",
+        "table:slab_pricecharting_events"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "ADAPTER_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "Multi-table aggregation into one evidence view happens in the adapter."
+    },
+    {
+      "operation": "refreshPricing",
+      "domain": "pricing",
+      "backendResource": [
+        "edge:pricecharting-search",
+        "rpc:apply_slab_pricing"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": true,
+      "authorization": "JWT admin; durable 1req/s provider pacing; stale-write guard",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "ADAPTER_REQUIRED",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "provider lookup; valuation snapshot + tier updates; audit",
+      "notes": "Rate-limit → RATE_LIMITED; stale guard → STALE_WRITE."
+    },
+    {
+      "operation": "listSoldComparables",
+      "domain": "pricing",
+      "backendResource": [
+        "table:sold_comps",
+        "table:slab_comps"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-or-admin",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "getCgcPopulation",
+      "domain": "population",
+      "backendResource": [
+        "table:cgc_population_cards",
+        "table:cgc_population_sets"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "NONE USABLE — admin-read policies exist but client grants are absent (surface is postgres-internal today)",
+      "classification": "SECURITY_REVIEW_REQUIRED",
+      "integration": "BACKEND_CONTRACT_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "Needs a read view/RPC + grant decision before any V2 exposure."
+    },
+    {
+      "operation": "listActivity",
+      "domain": "activity",
+      "backendResource": [
+        "table:audit_log"
+      ],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS owner-read (audit_log_owner_read); admin sees all",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "getAdminReviewQueue",
+      "domain": "admin",
+      "backendResource": [
+        "table:card_scan_reviews",
+        "table:card_scans"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS admin policies (is_admin)",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "resolveAdminReview",
+      "domain": "admin",
+      "backendResource": [
+        "table:card_scan_reviews"
+      ],
+      "role": "admin",
+      "reads": false,
+      "writes": true,
+      "authorization": "RLS admin UPDATE policy",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "ADAPTER_REQUIRED",
+      "idempotent": true,
+      "retriable": false,
+      "sideEffects": "review resolution fields",
+      "notes": "Direct table write today; acceptable under admin RLS, wrapped by the adapter."
+    },
+    {
+      "operation": "getMarketplaceState",
+      "domain": "marketplace",
+      "backendResource": [
+        "table:pricecharting_marketplace_settings",
+        "table:pricecharting_offers",
+        "table:pricecharting_sync_runs"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS admin policies",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "connectEbayAccount",
+      "domain": "ebay",
+      "backendResource": [
+        "edge:ebay-oauth-start",
+        "edge:ebay-oauth-callback"
+      ],
+      "role": "admin",
+      "reads": false,
+      "writes": true,
+      "authorization": "JWT admin; single-flight hashed OAuth state; callback verifies state+code",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "READY",
+      "idempotent": false,
+      "retriable": false,
+      "sideEffects": "ebay_accounts row; encrypted credential storage via service RPCs",
+      "notes": "Browser never sees tokens; reconnect flow surfaces EBAY_RECONNECT_REQUIRED."
+    },
+    {
+      "operation": "listEbayListings",
+      "domain": "ebay",
+      "backendResource": [
+        "table:ebay_listing_intents",
+        "table:ebay_listing_mappings"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "RLS admin policies",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none"
+    },
+    {
+      "operation": "listEbayOrders",
+      "domain": "ebay",
+      "backendResource": [
+        "private:ebay_orders",
+        "private:ebay_order_line_items"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "NONE — orders live in the private schema with deny-all RLS; no admin reader RPC exists",
+      "classification": "SECURITY_REVIEW_REQUIRED",
+      "integration": "BACKEND_CONTRACT_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "Needs an is_admin-gated SECURITY DEFINER reader RPC (see V2_INTEGRATION_GAPS)."
+    },
+    {
+      "operation": "getBuilderRuns",
+      "domain": "builder",
+      "backendResource": [
+        "table:builder_runs",
+        "table:builder_steps",
+        "table:builder_approvals",
+        "table:builder_tool_calls",
+        "table:builder_audit_events"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "authenticated SELECT (20260903) + admin-read RLS (initplan)",
+      "classification": "BROWSER_ADMIN_GATED",
+      "integration": "READY",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "Read-only spine; run creation/approval is DEFERRED until the builder write plane ships."
+    },
+    {
+      "operation": "getAdminUsers",
+      "domain": "admin",
+      "backendResource": [
+        "table:customer_profiles"
+      ],
+      "role": "admin",
+      "reads": true,
+      "writes": false,
+      "authorization": "NONE USABLE — customer_profiles RLS is self-read-only with no admin policy and no admin user-list RPC exists",
+      "classification": "SECURITY_REVIEW_REQUIRED",
+      "integration": "BACKEND_CONTRACT_REQUIRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "/admin/users needs an is_admin-gated reader (RPC or admin RLS policy) — see V2_INTEGRATION_GAPS G4."
+    },
+    {
+      "operation": "getSubscriptionState",
+      "domain": "profile",
+      "backendResource": [],
+      "role": "customer",
+      "reads": true,
+      "writes": false,
+      "authorization": "n/a",
+      "classification": "SECURITY_REVIEW_REQUIRED",
+      "integration": "DEFERRED",
+      "idempotent": true,
+      "retriable": true,
+      "sideEffects": "none",
+      "notes": "No billing/subscription backend exists; /account/subscription ships as static placeholder."
+    }
+  ]
+}

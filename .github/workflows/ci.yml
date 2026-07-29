@@ -106,19 +106,73 @@ jobs:
           exit 1
 
       - name: Reset database from migrations
-        run: supabase db reset --local --no-seed
+        run: |
+          supabase db reset --local --no-seed
+          # Proof-of-freshness marker: consumed by the fail-closed guard below.
+          echo "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" > /tmp/disposable-db-reset.marker
 
       - name: Run database integration tests
+        env:
+          # Never inherited from repository or environment secrets: the direct
+          # database address must come from the disposable stack started above.
+          SLABVAULT_TEST_DB_URL: ""
         run: |
+          set -euo pipefail
           eval "$(supabase status -o env)"
           TEST_ANON_KEY="${ANON_KEY:-$PUBLISHABLE_KEY}"
           TEST_SERVICE_KEY="${SERVICE_ROLE_KEY:-$SECRET_KEY}"
           test -n "$API_URL"
           test -n "$TEST_ANON_KEY"
           test -n "$TEST_SERVICE_KEY"
+
+          # ── FAIL-CLOSED DISPOSABLE-TARGET ASSERTIONS ────────────────────────
+          # Every one of these must hold BEFORE the direct database address is
+          # exported. Any doubt aborts the job instead of touching a database
+          # that might not be disposable.
+          fail() { echo "::error::$1"; exit 1; }
+
+          # 1. the disposable stack really started in THIS job
+          [ -f /tmp/disposable-db-reset.marker ] || fail "no reset marker: the disposable stack was not reset in this job"
+          [ "$(cat /tmp/disposable-db-reset.marker)" = "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" ] \
+            || fail "reset marker belongs to a different job run"
+          docker ps --format '{{.Names}}' | grep -q '^supabase_db_' \
+            || fail "no local disposable Supabase database container is running"
+
+          # 2. the direct database address exists and is the local disposable one
+          [ -n "${DB_URL:-}" ] || fail "supabase status reported no DB_URL"
+          DB_HOST=$(printf '%s' "$DB_URL" | sed -E 's#^[a-z]+://[^@]*@([^:/]+).*#\1#')
+          case "$DB_HOST" in
+            127.0.0.1|localhost|::1|host.docker.internal|supabase_db_*) ;;
+            *) fail "refusing non-disposable database host: $DB_HOST" ;;
+          esac
+
+          # 3. the API URL is local too
+          case "$API_URL" in
+            http://127.0.0.1:*|http://localhost:*) ;;
+            *) fail "refusing non-local API URL: $API_URL" ;;
+          esac
+
+          # 4. neither address may reference the production project
+          case "$DB_URL$API_URL" in
+            *rcbwemkfcefarqnlgrmv*) fail "production project reference present — aborting" ;;
+          esac
+          case "$DB_URL$API_URL" in
+            *supabase.co*|*supabase.in*|*pooler.supabase.com*) fail "hosted Supabase address present — aborting" ;;
+          esac
+
+          # 5. no production-like environment label anywhere in the addresses
+          printf '%s' "$DB_URL$API_URL" | grep -Eiq '(^|[^a-z])(prod|production|live)([^a-z]|$)' \
+            && fail "production-like label present in the target addresses" || true
+
+          # 6. no stored production database URL may be in play
+          [ -z "${PRODUCTION_DB_URL:-}" ] || fail "a stored production database URL is present in the environment"
+
+          echo "disposable target verified: host=$DB_HOST api=$API_URL"
+
           SLABVAULT_TEST_URL="$API_URL" \
           SLABVAULT_TEST_ANON_KEY="$TEST_ANON_KEY" \
           SLABVAULT_TEST_SERVICE_KEY="$TEST_SERVICE_KEY" \
+          SLABVAULT_TEST_DB_URL="$DB_URL" \
             bunx vitest run --config vitest.integration.config.ts \
               --reporter=verbose --reporter=json --outputFile=/tmp/integration.json
 
@@ -142,6 +196,15 @@ jobs:
           fi
           if [ "$TOTAL" = "0" ]; then
             echo "::error::No integration tests ran at all."
+            exit 1
+          fi
+          FAILED=$(bun -e "const r = await Bun.file('/tmp/integration.json').json(); console.log(r.numFailedTests)")
+          if [ "$FAILED" != "0" ]; then
+            echo "::error::$FAILED integration test(s) FAILED."
+            exit 1
+          fi
+          if [ "$TOTAL" -lt 95 ]; then
+            echo "::error::expected at least 95 live database cases, discovered $TOTAL."
             exit 1
           fi
 
