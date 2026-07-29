@@ -1,0 +1,58 @@
+{
+  "artifact": "pr91-staging-verification",
+  "repository": "Johnpriceofficial/slab",
+  "pullRequest": 91,
+  "branch": "fix/atomic-confirmed-slab-save",
+  "verifiedCommit": "c4e7a12dfeda4b4a82683daed7741ab9a8543e6a",
+  "verifiedAt": "2026-07-29T08:17:16Z",
+  "productionTouched": false,
+  "promotionPerformed": false,
+  "migrationsUnderTest": [
+    "20260907000000_save_confirmed_slab_from_analysis",
+    "20260908000000_slab_permission_model"
+  ],
+  "hostedStaging": {
+    "projectRef": "msbdwwgojuvgnuugrrry",
+    "atomicSaveMigrationApplied": true,
+    "permissionModelApplied": true,
+    "ownerIsolationSmoke": {
+      "passed": 10,
+      "failed": 0
+    }
+  },
+  "githubActions": {
+    "workflow": "CI",
+    "runId": 30434720177,
+    "runNumber": 327,
+    "integrationArtifactId": 8717002481,
+    "integrationArtifactDigest": "sha256:d0c9431e7f64ee09a4558c42c3217dbbb4ae428c38606d8e49cc572c5c0c8c27",
+    "testSuites": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests": {
+      "total": 225,
+      "passed": 225,
+      "failed": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "verifyJob": "passed",
+    "supabaseIntegrationJob": "passed"
+  },
+  "result": "PASS",
+  "releaseGate": {
+    "requiredFailed": 0,
+    "requiredSkipped": 0,
+    "satisfied": true
+  },
+  "remainingControls": [
+    "PR remains draft and unmerged",
+    "security and owner review",
+    "controlled production migration deployment",
+    "deployed production verification",
+    "frontend adapter connection in a separate milestone"
+  ]
+}
