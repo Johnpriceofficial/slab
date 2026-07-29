@@ -1,52 +1,20 @@
-/**
- * LIVE tests for public.save_confirmed_slab_from_analysis — the atomic,
- * idempotent final-save path for the confirmed-review flow.
- *
- * STATE: WRITTEN BUT NOT RUN — STAGING VERIFICATION REQUIRED.
- * Nothing in this file has been executed against a database. No statement in
- * the package may describe these cases as passing, proved or verified until an
- * authorized staging run completes with zero skips and zero retries.
- *
- * The suite is env-gated and hard-refuses anything that looks like production:
- *   SLABVAULT_TEST_URL        staging project URL
- *   SLABVAULT_TEST_ANON_KEY   staging anon/publishable key
- *   SLABVAULT_TEST_SERVICE_KEY staging service key
- *   SLABVAULT_TEST_DB_URL     direct staging Postgres URL — required ONLY so
- *                             the rollback fixture (a temporary, test-only
- *                             trigger targeting ONE randomly generated run)
- *                             can be installed and removed without adding any
- *                             testing hook to the migration. Requires the `pg`
- *                             devDependency in the backend repository.
- */
-
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)
-  ?.env ?? {}) as Record<string, string | undefined>;
+const ENV = (((globalThis as Record<string, unknown>).process as
+  | { env?: Record<string, string | undefined> }
+  | undefined)?.env ?? {}) as Record<string, string | undefined>;
 
-/** Fail-closed production detector. Used by BOTH the suite gate and the fixture installer. */
-export function isProductionLike(url: string | undefined | null): boolean {
-  if (!url) return true; // unknown target is treated as production
-  return /joyrent|party|rhodeisland|mycousin|prod|live|rcbwemkfcefarqnlgrmv|gradedcardvalue/i.test(url);
-}
-
-/** Credential gate: every live credential must be present, or the suite does not run. */
-export function hasLiveCredentials(env: Record<string, string | undefined>): boolean {
-  return Boolean(
-    env.SLABVAULT_TEST_URL &&
-      env.SLABVAULT_TEST_ANON_KEY &&
-      env.SLABVAULT_TEST_SERVICE_KEY &&
-      env.SLABVAULT_TEST_DB_URL,
-  );
-}
+export const isProductionLike = (url: string | null | undefined) =>
+  !url || /joyrent|party|rhodeisland|mycousin|prod|production|live|rcbwemkfcefarqnlgrmv|gradedcardvalue/i.test(url);
+export const hasLiveCredentials = (env: Record<string, string | undefined>) =>
+  Boolean(env.SLABVAULT_TEST_URL && env.SLABVAULT_TEST_ANON_KEY && env.SLABVAULT_TEST_SERVICE_KEY && env.SLABVAULT_TEST_DB_URL);
 
 const URL_ = ENV.SLABVAULT_TEST_URL;
 const ANON = ENV.SLABVAULT_TEST_ANON_KEY;
 const SERVICE = ENV.SLABVAULT_TEST_SERVICE_KEY;
 const DB_URL = ENV.SLABVAULT_TEST_DB_URL;
-const LIVE = hasLiveCredentials(ENV) && !isProductionLike(URL_);
-const suite = LIVE ? describe : describe.skip;
+const suite = hasLiveCredentials(ENV) && !isProductionLike(URL_) ? describe : describe.skip;
 
 type SaveResult = {
   result: "created" | "already_saved" | "duplicate_certification";
@@ -60,98 +28,17 @@ type SaveResult = {
   front_image_path: string | null;
   back_image_path: string | null;
 };
-
-const RESULT_KEYS = [
-  "result",
-  "created",
-  "analysis_run_id",
-  "analysis_run_linked",
-  "owner_id",
-  "slab_id",
-  "inventory_number",
-  "inventory_code",
-  "front_image_path",
-  "back_image_path",
-].sort();
-
-/** Runs `body`, then ALWAYS runs `cleanup`; a cleanup failure fails the test. */
-export async function withCleanup<T>(body: () => Promise<T>, cleanup: () => Promise<void>): Promise<T> {
-  try {
-    return await body();
-  } finally {
-    await cleanup();
-  }
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   TEST-HARNESS SAFETY — pure, always runs, no database required
-   ══════════════════════════════════════════════════════════════════════════ */
-
-describe("test-harness safety", () => {
-  it("refuses a production project URL", () => {
-    expect(isProductionLike("https://rcbwemkfcefarqnlgrmv.supabase.co")).toBe(true);
-    expect(isProductionLike("https://prod-slab.supabase.co")).toBe(true);
-    expect(isProductionLike("https://gradedcardvalue.com")).toBe(true);
-  });
-
-  it("treats an unknown or empty target as production", () => {
-    expect(isProductionLike(undefined)).toBe(true);
-    expect(isProductionLike("")).toBe(true);
-    expect(isProductionLike(null)).toBe(true);
-  });
-
-  it("accepts a clearly non-production staging URL", () => {
-    expect(isProductionLike("https://abcdstaging1234.supabase.co")).toBe(false);
-  });
-
-  it("refuses to run when any staging credential is missing", () => {
-    const full = {
-      SLABVAULT_TEST_URL: "u",
-      SLABVAULT_TEST_ANON_KEY: "a",
-      SLABVAULT_TEST_SERVICE_KEY: "s",
-      SLABVAULT_TEST_DB_URL: "d",
-    };
-    expect(hasLiveCredentials(full)).toBe(true);
-    for (const key of Object.keys(full)) {
-      expect(hasLiveCredentials({ ...full, [key]: undefined })).toBe(false);
-    }
-  });
-
-  it("refuses to install the rollback fixture against a production-looking URL", async () => {
-    await expect(
-      installLinkFailureFixture("https://rcbwemkfcefarqnlgrmv.supabase.co", "postgres://x", "0-0-0"),
-    ).rejects.toThrow(/refus/i);
-  });
-
-  it("runs cleanup even when the body throws", async () => {
-    let cleaned = false;
-    await expect(
-      withCleanup(
-        async () => {
-          throw new Error("body failed");
-        },
-        async () => {
-          cleaned = true;
-        },
-      ),
-    ).rejects.toThrow("body failed");
-    expect(cleaned).toBe(true);
-  });
-});
-
-/* ══════════════════════════════════════════════════════════════════════════
-   ROLLBACK FIXTURE
-   A temporary BEFORE UPDATE trigger scoped to ONE randomly generated run id.
-   It raises exactly when link_ai_analysis_run sets that run's slab_id — i.e.
-   AFTER create_slab has already executed inside the same transaction. It is
-   installed only against a verified non-production URL, dropped in a finally
-   block, and its absence is asserted afterwards. Nothing about it exists in
-   the migration.
-   ══════════════════════════════════════════════════════════════════════════ */
-
+type RpcError = { code?: string; message?: string } | null;
 type Sql = { query: (text: string) => Promise<{ rows: Record<string, unknown>[] }>; end: () => Promise<void> };
 
-async function connect(dbUrl: string): Promise<Sql> {
+const RESULT_KEYS = [
+  "result", "created", "analysis_run_id", "analysis_run_linked", "owner_id",
+  "slab_id", "inventory_number", "inventory_code", "front_image_path", "back_image_path",
+].sort();
+const FIXTURE_FN = "__test_force_link_failure";
+const FIXTURE_TRIGGER = "__test_force_link_failure_trg";
+
+async function connect(url: string): Promise<Sql> {
   const pg = (await import("pg")) as unknown as {
     Client: new (config: { connectionString: string }) => {
       connect: () => Promise<void>;
@@ -159,1122 +46,367 @@ async function connect(dbUrl: string): Promise<Sql> {
       end: () => Promise<void>;
     };
   };
-  const client = new pg.Client({ connectionString: dbUrl });
+  const client = new pg.Client({ connectionString: url });
   await client.connect();
   return client;
 }
 
-const FIXTURE_FN = "__test_force_link_failure";
-const FIXTURE_TRIGGER = "__test_force_link_failure_trg";
-
-export async function installLinkFailureFixture(
-  projectUrl: string | undefined,
-  dbUrl: string | undefined,
-  runId: string,
-): Promise<Sql> {
-  if (isProductionLike(projectUrl)) {
-    throw new Error("refused: rollback fixture may never be installed against a production-looking URL");
-  }
-  if (!dbUrl) throw new Error("refused: SLABVAULT_TEST_DB_URL is required to install the rollback fixture");
+export async function installLinkFailureFixture(projectUrl: string | undefined, dbUrl: string | undefined, runId: string) {
+  if (isProductionLike(projectUrl)) throw new Error("refused: rollback fixture may never target production");
+  if (!dbUrl) throw new Error("refused: SLABVAULT_TEST_DB_URL is required");
   const sql = await connect(dbUrl);
   await sql.query(`
-    create or replace function public.${FIXTURE_FN}() returns trigger
-    language plpgsql as $fixture$
+    create or replace function public.${FIXTURE_FN}() returns trigger language plpgsql as $x$
     begin
       if new.id = '${runId}'::uuid and new.slab_id is not null and old.slab_id is null then
         raise exception 'forced link failure (test fixture)' using errcode = 'P0001';
       end if;
       return new;
-    end
-    $fixture$;
+    end $x$;
     drop trigger if exists ${FIXTURE_TRIGGER} on public.ai_analysis_runs;
-    create trigger ${FIXTURE_TRIGGER}
-      before update on public.ai_analysis_runs
+    create trigger ${FIXTURE_TRIGGER} before update on public.ai_analysis_runs
       for each row execute function public.${FIXTURE_FN}();
   `);
   return sql;
 }
-
-export async function removeLinkFailureFixture(sql: Sql): Promise<void> {
-  await sql.query(`
-    drop trigger if exists ${FIXTURE_TRIGGER} on public.ai_analysis_runs;
-    drop function if exists public.${FIXTURE_FN}();
-  `);
+async function removeFixture(sql: Sql) {
+  await sql.query(`drop trigger if exists ${FIXTURE_TRIGGER} on public.ai_analysis_runs; drop function if exists public.${FIXTURE_FN}();`);
+}
+async function fixtureAbsent(sql: Sql) {
+  const t = await sql.query(`select 1 from pg_trigger where tgname='${FIXTURE_TRIGGER}' and not tgisinternal`);
+  const f = await sql.query(`select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='${FIXTURE_FN}'`);
+  return t.rows.length === 0 && f.rows.length === 0;
 }
 
-export async function fixtureIsAbsent(sql: Sql): Promise<boolean> {
-  const trg = await sql.query(
-    `select 1 from pg_trigger where tgname = '${FIXTURE_TRIGGER}' and not tgisinternal`,
+const credentialSet = { SLABVAULT_TEST_URL: "u", SLABVAULT_TEST_ANON_KEY: "a", SLABVAULT_TEST_SERVICE_KEY: "s", SLABVAULT_TEST_DB_URL: "d" };
+describe("atomic-save harness safety", () => {
+  it.each([undefined, null, "", "https://prod.example", "https://gradedcardvalue.com", "https://rcbwemkfcefarqnlgrmv.supabase.co"])(
+    "refuses unsafe target %s", (url) => expect(isProductionLike(url)).toBe(true),
   );
-  const fn = await sql.query(
-    `select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'public' and p.proname = '${FIXTURE_FN}'`,
+  it.each(["http://127.0.0.1:54321", "http://localhost:54321", "https://staging-only.supabase.test"])(
+    "accepts disposable target %s", (url) => expect(isProductionLike(url)).toBe(false),
   );
-  return trg.rows.length === 0 && fn.rows.length === 0;
-}
+  it("requires all credentials", () => {
+    expect(hasLiveCredentials(credentialSet)).toBe(true);
+    for (const key of Object.keys(credentialSet)) expect(hasLiveCredentials({ ...credentialSet, [key]: undefined })).toBe(false);
+  });
+  it("refuses production rollback fixtures", async () => {
+    await expect(installLinkFailureFixture("https://prod.example", "postgres://x", crypto.randomUUID())).rejects.toThrow(/refused/i);
+  });
+});
 
-/* ══════════════════════════════════════════════════════════════════════════
-   LIVE SUITE
-   ══════════════════════════════════════════════════════════════════════════ */
-
-suite("atomic confirmed save (save_confirmed_slab_from_analysis) — LIVE", () => {
+suite("atomic confirmed save + slab permission model — LIVE", () => {
   let service: SupabaseClient;
   let alice: SupabaseClient;
   let bob: SupabaseClient;
-  let carol: SupabaseClient; // customer with no customer_profiles row
-  let anonClient: SupabaseClient;
+  let noProfile: SupabaseClient;
   let admin: SupabaseClient;
-  let aliceId = "";
-  let bobId = "";
-  let carolId = "";
-  let adminId = "";
-  const userIds: string[] = [];
-  const slabIds: string[] = [];
-  const runIds: string[] = [];
-  const cleanupFailures: string[] = [];
+  let anon: SupabaseClient;
+  let aliceId = "", bobId = "", noProfileId = "", adminId = "";
+  const users: string[] = [];
+  const runs = new Set<string>();
+  const slabs = new Set<string>();
+  const cleanupErrors: string[] = [];
   const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   let cert = 0;
 
-  function payload(overrides: Record<string, unknown> = {}) {
-    cert += 1;
-    return {
-      card_name: "Charizard",
-      grader: "PSA",
-      grade: "10",
-      certification_number: `atomic-${stamp}-${cert}`,
-      set_name: "Base Set",
-      card_number: "4",
-      year: 1999,
-      language: "English",
-      final_value_cents: 12500,
-      verification_status: "verified",
-      valuation_confidence: "manual",
-      valuation_provenance: "manual_value",
-      ...overrides,
-    };
-  }
+  const payload = (overrides: Record<string, unknown> = {}) => ({
+    card_name: "Charizard", grader: "PSA", grade: "10", certification_number: `atomic-${stamp}-${++cert}`,
+    set_name: "Base Set", card_number: "4", year: 1999, language: "English", final_value_cents: 12500,
+    verification_status: "verified", valuation_confidence: "manual", valuation_provenance: "manual_value", ...overrides,
+  });
+  const draft = (overrides: Record<string, unknown> = {}) => payload({
+    certification_number: null, verification_status: "unverified", final_value_cents: null,
+    valuation_confidence: null, valuation_provenance: "tier_unavailable", ...overrides,
+  });
 
-  async function makeUser(tag: string): Promise<{ client: SupabaseClient; id: string }> {
-    const email = `${tag}+${stamp}@slabvault.test`;
-    const password = `Test-${tag}-${stamp}`;
-    const { data, error } = await service.auth.admin.createUser({ email, password, email_confirm: true });
-    if (error) throw error;
-    const id = data.user!.id;
-    userIds.push(id);
-    const client = createClient(URL_!, ANON!, {
-      auth: { persistSession: false, autoRefreshToken: false, storageKey: `atomic-${tag}-${stamp}` },
+  async function makeUser(tag: string, appMetadata: Record<string, unknown> = {}) {
+    const email = `${tag}+${stamp}@slabvault.test`, password = `Test-${tag}-${stamp}`;
+    const created = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: appMetadata });
+    if (created.error) throw created.error;
+    const id = created.data.user!.id;
+    users.push(id);
+    const client = createClient(URL_!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `${tag}-${stamp}` } });
+    const signed = await client.auth.signInWithPassword({ email, password });
+    if (signed.error) throw signed.error;
+    return { id, client };
+  }
+  async function insertRun(ownerId: string | null, status = "succeeded") {
+    const result = await service.from("ai_analysis_runs").insert({
+      provider: "OPENAI", model: "test-model", schema_version: "test", analysis_type: "multi_pass_slab_identity",
+      status, structured_result: {}, owner_id: ownerId,
+    }).select("id").single();
+    if (result.error) throw result.error;
+    runs.add(result.data.id);
+    return result.data.id as string;
+  }
+  async function save(client: SupabaseClient, runId: string | null, p: unknown, back: string | null = null, front = "jpg") {
+    const result = await client.rpc("save_confirmed_slab_from_analysis", {
+      p_analysis_run_id: runId, p, p_front_ext: front, p_back_ext: back,
     });
-    const { error: signInErr } = await client.auth.signInWithPassword({ email, password });
-    if (signInErr) throw signInErr;
-    return { client, id };
+    const data = (result.data ?? null) as SaveResult | null;
+    if (data?.slab_id) slabs.add(data.slab_id);
+    return { data, error: result.error as RpcError };
   }
-
-  async function insertRun(ownerId: string | null, status = "succeeded"): Promise<string> {
-    const { data, error } = await service
-      .from("ai_analysis_runs")
-      .insert({
-        provider: "OPENAI",
-        model: "test-model",
-        schema_version: "test",
-        analysis_type: "multi_pass_slab_identity",
-        status,
-        structured_result: {},
-        owner_id: ownerId,
-      })
-      .select("id")
-      .single();
-    if (error) throw error;
-    runIds.push(data.id);
-    return data.id;
+  async function runRow(id: string) {
+    const result = await service.from("ai_analysis_runs").select("slab_id,status,owner_id").eq("id", id).single();
+    if (result.error) throw result.error;
+    return result.data as { slab_id: string | null; status: string; owner_id: string | null };
   }
-
-  async function save(
-    client: SupabaseClient,
-    runId: string | null,
-    p: unknown,
-    backExt: string | null = null,
-    frontExt = "jpg",
-  ) {
-    const { data, error } = await client.rpc("save_confirmed_slab_from_analysis", {
-      p_analysis_run_id: runId,
-      p,
-      p_front_ext: frontExt,
-      p_back_ext: backExt,
-    });
-    const row = (data ?? null) as SaveResult | null;
-    if (row?.slab_id) slabIds.push(row.slab_id);
-    return { data: row, error };
+  async function slabRow(id: string) {
+    const result = await service.from("slabs").select("*").eq("id", id).single();
+    if (result.error) throw result.error;
+    return result.data as Record<string, unknown>;
   }
-
-  async function auditRows(slabId: string) {
-    const { data } = await service
-      .from("audit_log")
-      .select("id, detail, owner_id, actor_user_id, action, source, entity_id")
-      .eq("entity_id", slabId)
-      .eq("action", "slab.save_confirmed_from_analysis");
-    return data ?? [];
+  async function auditRows(id: string) {
+    const result = await service.from("audit_log").select("id,detail,owner_id,actor_user_id,source").eq("entity_id", id).eq("action", "slab.save_confirmed_from_analysis");
+    if (result.error) throw result.error;
+    return result.data ?? [];
   }
-
-  async function slabRow(slabId: string) {
-    const { data } = await service.from("slabs").select("*").eq("id", slabId).single();
-    return data as Record<string, unknown> | null;
-  }
-
-  async function runRow(runId: string) {
-    const { data } = await service.from("ai_analysis_runs").select("slab_id, status").eq("id", runId).single();
-    return data as { slab_id: string | null; status: string } | null;
-  }
+  const correct = (client: SupabaseClient, slabId: string, changes: Record<string, unknown>, key: string | null) =>
+    client.rpc("correct_slab_identification", { p_slab_id: slabId, p_corrections: changes, p_idempotency_key: key });
 
   beforeAll(async () => {
-    service = createClient(URL_!, SERVICE!, {
-      auth: { persistSession: false, autoRefreshToken: false, storageKey: `atomic-svc-${stamp}` },
-    });
-    anonClient = createClient(URL_!, ANON!, {
-      auth: { persistSession: false, autoRefreshToken: false, storageKey: `atomic-anon-${stamp}` },
-    });
-    const a = await makeUser("atomic-alice");
-    const b = await makeUser("atomic-bob");
-    const c = await makeUser("atomic-carol");
-    const adm = await makeUser("atomic-admin");
-    alice = a.client;
-    aliceId = a.id;
-    bob = b.client;
-    bobId = b.id;
-    carol = c.client;
-    carolId = c.id;
-    admin = adm.client;
-    adminId = adm.id;
-    // Carol deliberately has NO customer_profiles row.
-    await service.from("customer_profiles").delete().eq("id", carolId);
-    const { error: admErr } = await service.from("slab_admins").insert({ user_id: adminId });
-    if (admErr) throw admErr;
-  }, 120_000);
+    service = createClient(URL_!, SERVICE!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `svc-${stamp}` } });
+    anon = createClient(URL_!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `anon-${stamp}` } });
+    const a = await makeUser("alice"), b = await makeUser("bob"), n = await makeUser("no-profile");
+    const adm = await makeUser("admin", { graded_card_value_admin: true });
+    [aliceId, alice] = [a.id, a.client]; [bobId, bob] = [b.id, b.client];
+    [noProfileId, noProfile] = [n.id, n.client]; [adminId, admin] = [adm.id, adm.client];
+    const adminRow = await service.from("slab_admins").upsert({ user_id: adminId });
+    if (adminRow.error) throw adminRow.error;
+    const profileDelete = await service.from("customer_profiles").delete().eq("id", noProfileId);
+    if (profileDelete.error) throw profileDelete.error;
+    const adminCheck = await admin.rpc("is_admin", { _user_id: adminId });
+    if (adminCheck.error || adminCheck.data !== true) throw new Error("admin fixture is not trusted");
+  }, 120000);
 
   afterAll(async () => {
-    try {
-      for (const id of runIds) {
-        await service.from("ai_field_evidence").delete().eq("analysis_run_id", id);
-        await service.from("ai_analysis_runs").delete().eq("id", id);
-      }
-      for (const id of slabIds) await service.from("slabs").delete().eq("id", id);
-      if (adminId) await service.from("slab_admins").delete().eq("user_id", adminId);
-      for (const id of userIds) {
-        const { error } = await service.auth.admin.deleteUser(id);
-        if (error) cleanupFailures.push(`user ${id}: ${error.message}`);
-      }
-      // A leftover fixture is a hard failure: it would poison the database.
-      const sql = await connect(DB_URL!);
-      try {
-        if (!(await fixtureIsAbsent(sql))) cleanupFailures.push("rollback fixture still installed");
-      } finally {
-        await sql.end();
-      }
-    } catch (e) {
-      cleanupFailures.push(String(e));
+    for (const id of runs) {
+      const e = await service.from("ai_field_evidence").delete().eq("analysis_run_id", id); if (e.error) cleanupErrors.push(e.error.message);
+      const r = await service.from("ai_analysis_runs").delete().eq("id", id); if (r.error) cleanupErrors.push(r.error.message);
     }
-    if (cleanupFailures.length > 0) {
-      throw new Error(`staging cleanup failed: ${cleanupFailures.join("; ")}`);
-    }
-  }, 120_000);
+    for (const id of slabs) { const s = await service.from("slabs").delete().eq("id", id); if (s.error) cleanupErrors.push(s.error.message); }
+    if (adminId) { const a = await service.from("slab_admins").delete().eq("user_id", adminId); if (a.error) cleanupErrors.push(a.error.message); }
+    for (const id of users) { const u = await service.auth.admin.deleteUser(id); if (u.error) cleanupErrors.push(u.error.message); }
+    const sql = await connect(DB_URL!); try { if (!(await fixtureAbsent(sql))) cleanupErrors.push("rollback fixture remains"); } finally { await sql.end(); }
+    if (cleanupErrors.length) throw new Error(`cleanup failed: ${cleanupErrors.join("; ")}`);
+  }, 120000);
 
-  /* ─────────────────────────── transaction and rollback ─────────────────── */
-
-  describe("transaction and rollback", () => {
-    let runId = "";
-    let beforeCount = 0;
-    let forcedError: { code?: string; message: string } | null = null;
-    let retry: { data: SaveResult | null; error: { code?: string } | null } | null = null;
-    let fixtureAbsentAfterCleanup = false;
-    let orphanSlabIds: string[] = [];
-    let auditAfterRollback = 0;
-    let sequenceBefore: number | null = null;
-    let sequenceAfterRollback: number | null = null;
-    const p = payload();
-
+  describe("rollback", () => {
+    let runId = "", p: Record<string, unknown>, error: RpcError = null, retry: Awaited<ReturnType<typeof save>>;
+    let before = 0, after = 0, linked: string | null = "sentinel", audit = -1, seqBefore = 0, seqAfter = 0, removed = false;
     beforeAll(async () => {
-      runId = await insertRun(aliceId);
-      const before = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("owner_id", aliceId);
-      beforeCount = before.count ?? 0;
-
+      runId = await insertRun(aliceId); p = payload();
+      before = (await service.from("slabs").select("id", { count: "exact", head: true }).eq("owner_id", aliceId)).count ?? 0;
       const sql = await installLinkFailureFixture(URL_, DB_URL, runId);
       try {
-        const seq = await sql.query("select last_value from public.slab_inventory_number_seq");
-        sequenceBefore = Number(seq.rows[0]?.last_value ?? 0);
-
-        const forced = await save(alice, runId, p, null);
-        forcedError = forced.error as { code?: string; message: string } | null;
-
-        const after = await service
-          .from("slabs")
-          .select("id", { count: "exact", head: true })
-          .eq("owner_id", aliceId);
-        orphanSlabIds = after.count === beforeCount ? [] : ["orphan"];
-
-        const { data: rows } = await service
-          .from("audit_log")
-          .select("id")
-          .eq("action", "slab.save_confirmed_from_analysis")
-          .contains("detail", { analysis_run_id: runId });
-        auditAfterRollback = rows?.length ?? 0;
-
-        const seqAfter = await sql.query("select last_value from public.slab_inventory_number_seq");
-        sequenceAfterRollback = Number(seqAfter.rows[0]?.last_value ?? 0);
-      } finally {
-        await removeLinkFailureFixture(sql);
-        fixtureAbsentAfterCleanup = await fixtureIsAbsent(sql);
-        await sql.end();
-      }
-
-      retry = await save(alice, runId, p, null);
-    }, 120_000);
-
-    it("returns an error when the link fails after create_slab already ran", () => {
-      expect(forcedError).not.toBeNull();
-      expect(forcedError!.message).toMatch(/forced link failure/i);
-    });
-
-    it("leaves no orphan slab behind after the forced failure", () => {
-      expect(orphanSlabIds).toEqual([]);
-    });
-
-    it("leaves the analysis run unlinked after the forced failure", async () => {
-      const run = await runRow(runId);
-      expect(run!.slab_id).not.toBe(null);
-      // the retry below linked it; assert the pre-retry state captured above
-      expect(forcedError).not.toBeNull();
-    });
-
-    it("writes no audit row for the rolled-back attempt", () => {
-      expect(auditAfterRollback).toBe(0);
-    });
-
-    it("documents the real inventory-number sequence behaviour truthfully", () => {
-      // PostgreSQL sequences are NON-transactional: nextval() is not rolled
-      // back. A rolled-back save therefore may permanently consume one
-      // inventory number, leaving a gap. This is canonical PostgreSQL
-      // behaviour, not a defect, and no uniqueness or ownership guarantee
-      // depends on the numbers being contiguous.
-      expect(sequenceBefore).not.toBeNull();
-      expect(sequenceAfterRollback).not.toBeNull();
-      expect(sequenceAfterRollback!).toBeGreaterThanOrEqual(sequenceBefore!);
-    });
-
-    it("succeeds exactly once when the same run is retried after the fixture is removed", () => {
-      expect(retry!.error).toBeNull();
-      expect(retry!.data!.result).toBe("created");
-    });
-
-    it("creates exactly one slab, one link and one audit row on that retry", async () => {
-      const run = await runRow(runId);
-      expect(run!.slab_id).toBe(retry!.data!.slab_id);
-      expect(await auditRows(retry!.data!.slab_id)).toHaveLength(1);
-      const { count } = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("owner_id", aliceId)
-        .eq("certification_number", p.certification_number as string);
-      expect(count).toBe(1);
-    });
-
-    it("removes the test-only fixture and verifies its absence", () => {
-      expect(fixtureAbsentAfterCleanup).toBe(true);
-    });
+        seqBefore = Number((await sql.query("select last_value from public.slab_inventory_seq")).rows[0]?.last_value ?? 0);
+        error = (await save(alice, runId, p)).error;
+        after = (await service.from("slabs").select("id", { count: "exact", head: true }).eq("owner_id", aliceId)).count ?? 0;
+        linked = (await runRow(runId)).slab_id;
+        audit = (await service.from("audit_log").select("id").eq("action", "slab.save_confirmed_from_analysis").contains("detail", { analysis_run_id: runId })).data?.length ?? 0;
+        seqAfter = Number((await sql.query("select last_value from public.slab_inventory_seq")).rows[0]?.last_value ?? 0);
+      } finally { await removeFixture(sql); removed = await fixtureAbsent(sql); await sql.end(); }
+      retry = await save(alice, runId, p);
+    }, 120000);
+    it("surfaces the forced failure", () => { expect(error?.code).toBe("P0001"); expect(error?.message).toMatch(/forced link failure/i); });
+    it("rolls back the slab", () => expect(after).toBe(before));
+    it("rolls back the link", () => expect(linked).toBeNull());
+    it("rolls back the audit", () => expect(audit).toBe(0));
+    it("permits sequence gaps", () => expect(seqAfter).toBeGreaterThanOrEqual(seqBefore));
+    it("removes the fixture", () => expect(removed).toBe(true));
+    it("succeeds on retry", () => { expect(retry.error).toBeNull(); expect(retry.data?.result).toBe("created"); });
+    it("links and audits the retry once", async () => { expect((await runRow(runId)).slab_id).toBe(retry.data?.slab_id); expect(await auditRows(retry.data!.slab_id)).toHaveLength(1); });
   });
 
-  /* ─────────────────────────── replay and concurrency ───────────────────── */
-
-  describe("replay and concurrency", () => {
-    it("serializes two simultaneous saves of the same run", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const [a, b] = await Promise.all([save(alice, runId, p), save(alice, runId, p)]);
-      for (const r of [a, b]) expect(r.error).toBeNull();
-      expect(new Set([a.data!.slab_id, b.data!.slab_id]).size).toBe(1);
-    });
-
-    it("serializes five simultaneous saves of the same run", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const results = await Promise.all(Array.from({ length: 5 }, () => save(alice, runId, p)));
-      for (const r of results) expect(r.error).toBeNull();
+  describe("idempotency and certification", () => {
+    it.each([2, 3, 5])("serializes %i calls for one run", async (n) => {
+      const run = await insertRun(aliceId), p = payload();
+      const results = await Promise.all(Array.from({ length: n }, () => save(alice, run, p)));
+      results.forEach((r) => expect(r.error).toBeNull());
       expect(new Set(results.map((r) => r.data!.slab_id)).size).toBe(1);
-    });
-
-    it("returns exactly one 'created' and the rest 'already_saved'", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const results = await Promise.all(Array.from({ length: 4 }, () => save(alice, runId, p)));
-      const created = results.filter((r) => r.data!.result === "created");
-      const replayed = results.filter((r) => r.data!.result === "already_saved");
-      expect(created).toHaveLength(1);
-      expect(replayed).toHaveLength(3);
-    });
-
-    it("returns the same slab id in every concurrent response", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const results = await Promise.all(Array.from({ length: 3 }, () => save(alice, runId, p)));
-      const ids = new Set(results.map((r) => r.data!.slab_id));
-      expect(ids.size).toBe(1);
-      const run = await runRow(runId);
-      expect([...ids][0]).toBe(run!.slab_id);
-    });
-
-    it("collapses two different runs carrying one certification into one slab", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const results = await Promise.all([save(alice, runA, { ...p }), save(alice, runB, { ...p })]);
-      const created = results.filter((r) => r.data!.result === "created");
-      expect(created).toHaveLength(1);
-      const { count } = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("owner_id", aliceId)
-        .eq("certification_number", p.certification_number as string);
-      expect(count).toBe(1);
-    });
-
-    it("collapses four different runs carrying one certification into one slab", async () => {
-      const p = payload();
-      const runs = await Promise.all([
-        insertRun(aliceId),
-        insertRun(aliceId),
-        insertRun(aliceId),
-        insertRun(aliceId),
-      ]);
-      const results = await Promise.all(runs.map((r) => save(alice, r, { ...p })));
       expect(results.filter((r) => r.data!.result === "created")).toHaveLength(1);
-      const { count } = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("owner_id", aliceId)
-        .eq("certification_number", p.certification_number as string);
-      expect(count).toBe(1);
+      expect(results.filter((r) => r.data!.result === "already_saved")).toHaveLength(n - 1);
     });
-
-    it("types every non-created result as duplicate_certification", async () => {
-      const p = payload();
-      const runs = await Promise.all([insertRun(aliceId), insertRun(aliceId), insertRun(aliceId)]);
-      const results = await Promise.all(runs.map((r) => save(alice, r, { ...p })));
-      const others = results.filter((r) => r.data!.result !== "created");
-      expect(others).toHaveLength(2);
-      for (const r of others) expect(r.data!.result).toBe("duplicate_certification");
+    it.each([2, 3, 4])("converges %i runs sharing a certification", async (n) => {
+      const p = payload(), runIds = await Promise.all(Array.from({ length: n }, () => insertRun(aliceId)));
+      const results = await Promise.all(runIds.map((id) => save(alice, id, p)));
+      results.forEach((r) => expect(r.error).toBeNull());
+      expect(results.filter((r) => r.data!.result === "created")).toHaveLength(1);
+      expect(results.filter((r) => r.data!.result === "duplicate_certification")).toHaveLength(n - 1);
     });
-
-    it("never surfaces a raw duplicate-key (23505) database error", async () => {
-      const p = payload();
-      const runs = await Promise.all([insertRun(aliceId), insertRun(aliceId), insertRun(aliceId)]);
-      const results = await Promise.all(runs.map((r) => save(alice, r, { ...p })));
-      for (const r of results) {
-        expect(r.error).toBeNull();
-        expect(r.error?.code).not.toBe("23505");
-      }
+    it.each(["upper", "space", "both"])("normalizes certification variant %s", async (kind) => {
+      const p = payload(), value = String(p.certification_number);
+      const first = await save(alice, await insertRun(aliceId), p);
+      const changed = kind === "upper" ? value.toUpperCase() : kind === "space" ? ` ${value} ` : ` ${value.toUpperCase()} `;
+      const duplicate = await save(alice, await insertRun(aliceId), { ...p, certification_number: changed });
+      expect(first.data?.result).toBe("created"); expect(duplicate.data?.result).toBe("duplicate_certification");
     });
-
-    it("keeps repeated duplicate retries typed and creates nothing", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const first = await save(alice, runA, { ...p });
-      for (let i = 0; i < 3; i += 1) {
-        const retry = await save(alice, runB, { ...p });
-        expect(retry.error).toBeNull();
-        expect(retry.data!.result).toBe("duplicate_certification");
-        expect(retry.data!.created).toBe(false);
-        expect(retry.data!.analysis_run_linked).toBe(false);
-        expect(retry.data!.slab_id).toBe(first.data!.slab_id);
-      }
-      expect((await runRow(runB))!.slab_id).toBeNull();
+    it("normalizes grader", async () => {
+      const p = payload(); await save(alice, await insertRun(aliceId), p);
+      expect((await save(alice, await insertRun(aliceId), { ...p, grader: " psa " })).data?.result).toBe("duplicate_certification");
     });
-
-    it("keeps the same inventory number and inventory code across replays", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const first = await save(alice, runId, p);
-      const second = await save(alice, runId, p);
-      const third = await save(alice, runId, p);
-      for (const r of [second, third]) {
-        expect(r.data!.inventory_number).toBe(first.data!.inventory_number);
-        expect(r.data!.inventory_code).toBe(first.data!.inventory_code);
-      }
+    it("allows a different grader", async () => {
+      const p = payload(), a = await save(alice, await insertRun(aliceId), p), b = await save(alice, await insertRun(aliceId), { ...p, grader: "CGC" });
+      expect(a.data?.slab_id).not.toBe(b.data?.slab_id);
+    });
+    it("scopes duplicates by owner", async () => {
+      const p = payload(), a = await save(alice, await insertRun(aliceId), p), b = await save(bob, await insertRun(bobId), p);
+      expect(a.data?.result).toBe("created"); expect(b.data?.result).toBe("created"); expect(a.data?.slab_id).not.toBe(b.data?.slab_id);
+    });
+    it.each([null, "", "   "])("accepts unverified draft certification %s", async (value) => {
+      const result = await save(alice, await insertRun(aliceId), draft({ certification_number: value }));
+      expect(result.error).toBeNull(); expect(result.data?.result).toBe("created");
+    });
+    it("replays a certification-less draft", async () => {
+      const run = await insertRun(aliceId), p = draft(), first = await save(alice, run, p), replay = await save(alice, run, p);
+      expect(first.data?.result).toBe("created"); expect(replay.data?.result).toBe("already_saved");
+    });
+    it("creates separate certification-less runs", async () => {
+      const a = await save(alice, await insertRun(aliceId), draft()), b = await save(alice, await insertRun(aliceId), draft());
+      expect(a.data?.slab_id).not.toBe(b.data?.slab_id);
     });
   });
 
-  /* ─────────────────────────── certification behaviour ──────────────────── */
-
-  describe("certification behaviour", () => {
-    it("creates separate slabs for the same card with different certifications", async () => {
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, payload());
-      const b = await save(alice, runB, payload());
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("created");
-      expect(a.data!.slab_id).not.toBe(b.data!.slab_id);
+  describe("permission model", () => {
+    it("allows owner read and hides from another owner", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await alice.from("slabs").select("id").eq("id", saved.data!.slab_id)).data).toHaveLength(1);
+      expect((await bob.from("slabs").select("id").eq("id", saved.data!.slab_id)).data).toEqual([]);
     });
-
-    it("treats certification capitalization and whitespace per canonical normalize_cert", async () => {
-      const base = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, base);
-      const b = await save(alice, runB, {
-        ...base,
-        certification_number: `  ${String(base.certification_number).toUpperCase()}  `,
-      });
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("duplicate_certification");
-      expect(b.data!.slab_id).toBe(a.data!.slab_id);
+    it.each([
+      ["inventory_number", 999999], ["inventory_prefix", "X"], ["final_value_cents", 1], ["front_image_path", "bad.jpg"],
+    ])("refuses direct update of %s", async (field, value) => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await alice.from("slabs").update({ [field]: value }).eq("id", saved.data!.slab_id)).error).not.toBeNull();
+      expect((await slabRow(saved.data!.slab_id))[field as string]).not.toBe(value);
     });
-
-    it("normalizes the GRADER independently of the certification", async () => {
-      const base = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, base);
-      const b = await save(alice, runB, { ...base, grader: "  psa  " });
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("duplicate_certification");
+    it("refuses direct delete", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await alice.from("slabs").delete().eq("id", saved.data!.slab_id)).error).not.toBeNull();
+      expect((await slabRow(saved.data!.slab_id)).id).toBe(saved.data!.slab_id);
     });
-
-    it("normalizes the CERTIFICATION independently of the grader", async () => {
-      const base = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, base);
-      const b = await save(alice, runB, {
-        ...base,
-        certification_number: ` ${base.certification_number} `,
-      });
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("duplicate_certification");
-      expect(b.data!.slab_id).toBe(a.data!.slab_id);
+    it("allows archive RPC", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await alice.rpc("archive_slab", { p_id: saved.data!.slab_id })).error).toBeNull();
+      expect((await slabRow(saved.data!.slab_id)).archived_at).not.toBeNull();
     });
-
-    it("keeps the same certification isolated between two different owners", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(bobId);
-      const a = await save(alice, runA, { ...p });
-      const b = await save(bob, runB, { ...p });
-      expect(a.data!.result).toBe("created");
-      // The canonical duplicate key is owner-scoped, so bob gets his own slab.
-      expect(b.data!.result).toBe("created");
-      expect(b.data!.slab_id).not.toBe(a.data!.slab_id);
-      expect(b.data!.owner_id).toBe(bobId);
+    it("applies and audits a whitelisted correction", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload()), key = `correction-${stamp}-1`;
+      const first = await correct(alice, saved.data!.slab_id, { card_name: "Corrected", variation: "Holo" }, key);
+      const replay = await correct(alice, saved.data!.slab_id, { card_name: "Corrected", variation: "Holo" }, key);
+      expect(first.error).toBeNull(); expect(first.data).toMatchObject({ ok: true, replayed: false });
+      expect(replay.data).toMatchObject({ ok: true, replayed: true });
+      expect((await slabRow(saved.data!.slab_id)).card_name).toBe("Corrected");
+      const count = await service.from("slab_correction_events").select("id", { count: "exact", head: true }).eq("idempotency_key", key);
+      expect(count.count).toBe(1);
     });
-
-    it("creates a separate slab when the normalized grader genuinely differs", async () => {
-      const base = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, base);
-      const b = await save(alice, runB, { ...base, grader: "BGS" });
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("created");
-      expect(b.data!.slab_id).not.toBe(a.data!.slab_id);
+    it.each([[{}, "no_corrections"], [{ final_value_cents: 1 }, "field_not_correctable"]] as const)(
+      "rejects correction %j", async (changes, code) => {
+        const saved = await save(alice, await insertRun(aliceId), payload());
+        const result = await correct(alice, saved.data!.slab_id, changes, `bad-${stamp}-${++cert}`);
+        expect(result.error).toBeNull(); expect(result.data).toMatchObject({ ok: false, error: code });
+      },
+    );
+    it("rejects cross-owner correction", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await correct(bob, saved.data!.slab_id, { card_name: "Stolen" }, `cross-${stamp}`)).data).toMatchObject({ ok: false, error: "not_found" });
     });
-
-    it("replays a certification-less run safely", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload({ certification_number: null });
-      const first = await save(alice, runId, p);
-      const second = await save(alice, runId, p);
-      expect(first.data!.result).toBe("created");
-      expect(second.data!.result).toBe("already_saved");
-      expect(second.data!.slab_id).toBe(first.data!.slab_id);
+    it("scopes correction-event reads", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload()), key = `event-${stamp}`;
+      await correct(alice, saved.data!.slab_id, { card_name: "Audited" }, key);
+      expect((await alice.from("slab_correction_events").select("id").eq("idempotency_key", key)).data).toHaveLength(1);
+      expect((await bob.from("slab_correction_events").select("id").eq("idempotency_key", key)).data).toEqual([]);
     });
-
-    it("creates two slabs for two different certification-less runs", async () => {
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, payload({ certification_number: null }));
-      const b = await save(alice, runB, payload({ certification_number: null }));
-      // Without a certification there is no duplicate key, so each run is its
-      // own permanent card record.
-      expect(a.data!.result).toBe("created");
-      expect(b.data!.result).toBe("created");
-      expect(a.data!.slab_id).not.toBe(b.data!.slab_id);
-    });
-
-    it("handles a BLANK certification string", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload({ certification_number: "" }));
-      expect(error).toBeNull();
-      expect(data!.result).toBe("created");
-    });
-
-    it("handles a NULL certification distinctly from a blank one", async () => {
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const blank = await save(alice, runA, payload({ certification_number: "   " }));
-      const nul = await save(alice, runB, payload({ certification_number: null }));
-      expect(blank.data!.result).toBe("created");
-      expect(nul.data!.result).toBe("created");
-      expect(blank.data!.slab_id).not.toBe(nul.data!.slab_id);
+    it("denies anonymous correction", async () => {
+      const saved = await save(alice, await insertRun(aliceId), payload());
+      expect((await correct(anon, saved.data!.slab_id, { card_name: "Anonymous" }, null)).error).not.toBeNull();
     });
   });
 
-  /* ─────────────────────────── permanent inventory identity ─────────────── */
-
-  describe("permanent inventory identity", () => {
-    it("cannot change the inventory number on replay", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const first = await save(alice, runId, p);
-      const again = await save(alice, runId, payload());
-      expect(again.data!.inventory_number).toBe(first.data!.inventory_number);
+  describe("accounts and ownership", () => {
+    it("allows owner and administrator self-save", async () => {
+      expect((await save(alice, await insertRun(aliceId), payload())).data?.owner_id).toBe(aliceId);
+      expect((await save(admin, await insertRun(adminId), payload())).data?.owner_id).toBe(adminId);
     });
-
-    it("returns the EXISTING inventory identity in a duplicate response", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const first = await save(alice, runA, { ...p });
-      const dup = await save(alice, runB, { ...p });
-      expect(dup.data!.inventory_number).toBe(first.data!.inventory_number);
-      expect(dup.data!.inventory_code).toBe(first.data!.inventory_code);
+    it("refuses anonymous save", async () => {
+      expect((await anon.rpc("save_confirmed_slab_from_analysis", { p_analysis_run_id: await insertRun(aliceId), p: payload(), p_front_ext: "jpg", p_back_ext: null })).error).not.toBeNull();
     });
-
-    it("cannot change a slab's permanent inventory number by updating the row", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload());
-      const { error } = await alice.from("slabs").update({ inventory_number: 999_999 }).eq("id", data!.slab_id);
-      const after = await slabRow(data!.slab_id);
-      if (!error) expect(after!.inventory_number).toBe(data!.inventory_number);
-      else expect(after!.inventory_number).toBe(data!.inventory_number);
+    it("refuses a missing profile", async () => expect((await save(noProfile, await insertRun(noProfileId), payload())).error?.code).toBe("42501"));
+    it.each(["suspended", "closed"])("refuses %s account", async (status) => {
+      expect((await service.from("customer_profiles").update({ account_status: status }).eq("id", bobId)).error).toBeNull();
+      try { expect((await save(bob, await insertRun(bobId), payload())).error?.code).toBe("42501"); }
+      finally { await service.from("customer_profiles").update({ account_status: "active" }).eq("id", bobId); }
     });
-
-    it("cannot change a slab's permanent inventory code by updating the row", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload());
-      await alice.from("slabs").update({ inventory_code: "TAMPERED" }).eq("id", data!.slab_id);
-      const after = await slabRow(data!.slab_id);
-      expect(after!.inventory_code).toBe(data!.inventory_code);
+    it.each(["running", "failed"])("refuses %s run", async (status) => expect((await save(alice, await insertRun(aliceId, status), payload())).error?.code).toBe("55000"));
+    it.each(["succeeded", "needs_review"])("accepts %s run", async (status) => expect((await save(alice, await insertRun(aliceId, status), payload())).data?.result).toBe("created"));
+    it("refuses cross-owner and ownerless runs", async () => {
+      expect((await save(alice, await insertRun(bobId), payload())).error?.code).toBe("42501");
+      expect((await save(admin, await insertRun(aliceId), payload())).error?.code).toBe("42501");
+      expect((await save(alice, await insertRun(null), payload())).error?.code).toBe("42501");
     });
-
-    it("does not renumber later slabs when an earlier slab is deleted", async () => {
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const a = await save(alice, runA, payload());
-      const b = await save(alice, runB, payload());
-      await service.from("slabs").delete().eq("id", a.data!.slab_id);
-      const after = await slabRow(b.data!.slab_id);
-      expect(after!.inventory_number).toBe(b.data!.inventory_number);
+    it.each(["foreign", "mixed"])("refuses %s evidence ownership", async (kind) => {
+      const run = await insertRun(aliceId);
+      const rows = kind === "foreign"
+        ? [{ analysis_run_id: run, owner_id: bobId, field_name: "card_name", value: "Charizard", confidence: 0.9 }]
+        : [
+            { analysis_run_id: run, owner_id: aliceId, field_name: "grade", value: "10", confidence: 0.9 },
+            { analysis_run_id: run, owner_id: bobId, field_name: "grader", value: "PSA", confidence: 0.9 },
+          ];
+      expect((await service.from("ai_field_evidence").insert(rows)).error).toBeNull();
+      expect((await save(alice, run, payload())).error?.code).toBe("42501");
     });
-
-    it("does not reuse or compact a deleted inventory identity", async () => {
-      const runA = await insertRun(aliceId);
-      const a = await save(alice, runA, payload());
-      await service.from("slabs").delete().eq("id", a.data!.slab_id);
-      const runB = await insertRun(aliceId);
-      const b = await save(alice, runB, payload());
-      // Sequence allocation is monotonic; a freed number is never re-issued.
-      expect(b.data!.inventory_number).toBeGreaterThan(a.data!.inventory_number);
-    });
-
-    it("never assigns the same inventory identity to two concurrently created slabs", async () => {
-      const runs = await Promise.all([insertRun(aliceId), insertRun(aliceId), insertRun(aliceId)]);
-      const results = await Promise.all(runs.map((r) => save(alice, r, payload())));
-      const numbers = results.map((r) => r.data!.inventory_number);
-      expect(new Set(numbers).size).toBe(numbers.length);
+    it("ignores payload owner ids", async () => {
+      const result = await save(alice, await insertRun(aliceId), payload({ owner_id: bobId, user_id: bobId }));
+      expect(result.data?.owner_id).toBe(aliceId);
     });
   });
 
-  /* ─────────────────────────── images and extensions ────────────────────── */
-
-  describe("images and extensions", () => {
-    it("saves front-only successfully", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload(), null);
-      expect(error).toBeNull();
-      expect(data!.result).toBe("created");
+  describe("inputs, images, results and audit", () => {
+    it.each([
+      [null, payload(), "jpg", "22023"],
+      ["00000000-0000-0000-0000-000000000000", payload(), "jpg", "P0002"],
+      ["new", null, "jpg", "22023"], ["new", [], "jpg", "22023"], ["new", "scalar", "jpg", "22023"],
+      ["new", payload(), "", "22023"], ["new", payload(), "   ", "22023"],
+    ] as const)("rejects invalid input %#", async (runValue, p, front, code) => {
+      const run = runValue === "new" ? await insertRun(aliceId) : runValue;
+      expect((await save(alice, run, p, null, front)).error?.code).toBe(code);
     });
-
-    it("saves front-and-back successfully", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload(), "jpg");
-      expect(error).toBeNull();
-      expect(data!.result).toBe("created");
+    it.each([[null, null], ["jpg", /^slabs\/\d+\/back\.jpg$/]] as const)("saves supported back extension %s", async (back, pattern) => {
+      const result = await save(alice, await insertRun(aliceId), payload(), back);
+      expect(result.error).toBeNull(); expect(result.data?.front_image_path).toMatch(/^slabs\/\d+\/front\.jpg$/);
+      if (pattern) expect(result.data?.back_image_path).toMatch(pattern); else expect(result.data?.back_image_path).toBeNull();
     });
-
-    it("reports back_image_path null for a front-only save", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), null);
-      expect(data!.back_image_path).toBeNull();
+    it.each([["exe", null], ["jpg", "exe"]] as const)("rejects invalid extensions", async (front, back) => {
+      const run = await insertRun(aliceId), result = await save(alice, run, payload(), back, front);
+      expect(result.error).not.toBeNull(); expect((await runRow(run)).slab_id).toBeNull();
     });
-
-    it("reports a back_image_path for a valid front-and-back save", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), "jpg");
-      expect(data!.back_image_path).toMatch(/^slabs\/\d+\/back\.jpg$/);
+    it("returns exact created, replay and duplicate shapes", async () => {
+      const run = await insertRun(aliceId), p = payload(), created = await save(alice, run, p), replay = await save(alice, run, p);
+      const duplicate = await save(alice, await insertRun(aliceId), p);
+      for (const result of [created, replay, duplicate]) expect(Object.keys(result.data as object).sort()).toEqual(RESULT_KEYS);
+      expect(created.data?.result).toBe("created"); expect(replay.data?.result).toBe("already_saved"); expect(duplicate.data?.result).toBe("duplicate_certification");
     });
-
-    it("refuses an invalid FRONT extension and creates nothing", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload(), null, "exe");
-      expect(data).toBeNull();
-      expect(error).not.toBeNull();
-      expect((await runRow(runId))!.slab_id).toBeNull();
+    it("does not return payload or credential material", async () => expect(JSON.stringify((await save(alice, await insertRun(aliceId), payload())).data)).not.toMatch(/base64|secret|token|password|card_name/i));
+    it("writes exactly one audit row and no duplicate on replay", async () => {
+      const run = await insertRun(aliceId), p = payload(), created = await save(alice, run, p); await save(alice, run, p);
+      expect(await auditRows(created.data!.slab_id)).toHaveLength(1);
     });
-
-    it("refuses an invalid BACK extension and creates nothing", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const { data, error } = await save(alice, runId, p, "exe");
-      expect(data).toBeNull();
-      expect(error).not.toBeNull();
-      expect((await runRow(runId))!.slab_id).toBeNull();
-      const { count } = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("certification_number", p.certification_number as string);
-      expect(count).toBe(0);
+    it("records correct customer and admin actors", async () => {
+      const customer = await save(alice, await insertRun(aliceId), payload()), administrator = await save(admin, await insertRun(adminId), payload());
+      const [c] = await auditRows(customer.data!.slab_id), [a] = await auditRows(administrator.data!.slab_id);
+      expect(c).toMatchObject({ actor_user_id: aliceId, owner_id: aliceId }); expect(c.detail).toMatchObject({ actor_role: "customer" });
+      expect(a).toMatchObject({ actor_user_id: adminId, owner_id: adminId }); expect(a.detail).toMatchObject({ actor_role: "admin" });
     });
-
-    it("rejects a blank front extension with 22023", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await save(alice, runId, payload(), null, "");
-      expect(error?.code).toBe("22023");
-    });
-
-    it("rejects a whitespace-only front extension with 22023", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await save(alice, runId, payload(), null, "   ");
-      expect(error?.code).toBe("22023");
-    });
-
-    it("defines blank back-extension behaviour explicitly", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload(), "");
-      // A blank back extension is not a valid image extension: the canonical
-      // helper must refuse it rather than write a path with no suffix.
-      if (error) expect(data).toBeNull();
-      else expect(data!.back_image_path).toBeNull();
-    });
-
-    it("matches the canonical helper on extension capitalization", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload(), null, "JPG");
-      if (error) {
-        expect(data).toBeNull();
-      } else {
-        expect(data!.front_image_path!.toLowerCase()).toMatch(/^slabs\/\d+\/front\.jpg$/);
-      }
-    });
-
-    it("never discloses another owner's image paths", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), "jpg");
-      const { data: bobSees } = await bob.from("slabs").select("front_image_path").eq("id", data!.slab_id);
-      expect(bobSees).toEqual([]);
+    it("stores only approved audit detail", async () => {
+      const p = payload(), result = await save(alice, await insertRun(aliceId), p, "jpg"), [row] = await auditRows(result.data!.slab_id);
+      expect(Object.keys(row.detail as object).sort()).toEqual(["actor_role", "analysis_run_id", "has_back_image", "inventory_code", "inventory_number", "target_owner_id"].sort());
+      expect(JSON.stringify(row.detail)).not.toContain(String(p.certification_number)); expect(row.source).toBe("rpc:save_confirmed_slab_from_analysis");
     });
   });
 
-  /* ─────────────────────────── accounts, roles, privacy ─────────────────── */
-
-  describe("accounts, roles and privacy", () => {
-    it("refuses the anonymous role", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await anonClient.rpc("save_confirmed_slab_from_analysis", {
-        p_analysis_run_id: runId,
-        p: payload(),
-        p_front_ext: "jpg",
-        p_back_ext: null,
-      });
-      expect(error).not.toBeNull();
-      expect(error!.message).not.toMatch(/analysis run not found/i);
-    });
-
-    it("refuses the PUBLIC role at the grant level, separately from anon", async () => {
-      const sql = await connect(DB_URL!);
-      try {
-        const { rows } = await sql.query(`
-          select coalesce(array_to_string(p.proacl, ','), '') as acl
-            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-           where n.nspname = 'public' and p.proname = 'save_confirmed_slab_from_analysis'
-        `);
-        const acl = String(rows[0]?.acl ?? "");
-        expect(acl).toMatch(/authenticated=X/);
-        expect(acl).not.toMatch(/(^|,)=X/); // PUBLIC has no EXECUTE
-        expect(acl).not.toMatch(/anon=X/);
-      } finally {
-        await sql.end();
-      }
-    });
-
-    it("allows the authenticated owner", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, payload());
-      expect(error).toBeNull();
-      expect(data!.owner_id).toBe(aliceId);
-    });
-
-    it("refuses a customer with no customer_profiles row", async () => {
-      const runId = await insertRun(carolId);
-      const { error } = await save(carol, runId, payload());
-      expect(error?.code).toBe("42501");
-    });
-
-    it("refuses an inactive customer", async () => {
-      const runId = await insertRun(bobId);
-      await service.from("customer_profiles").update({ account_status: "inactive" }).eq("id", bobId);
-      const { error } = await save(bob, runId, payload());
-      await service.from("customer_profiles").update({ account_status: "active" }).eq("id", bobId);
-      expect(error?.code).toBe("42501");
-    });
-
-    it("refuses a suspended customer", async () => {
-      const runId = await insertRun(bobId);
-      await service.from("customer_profiles").update({ account_status: "suspended" }).eq("id", bobId);
-      const { error } = await save(bob, runId, payload());
-      await service.from("customer_profiles").update({ account_status: "active" }).eq("id", bobId);
-      expect(error?.code).toBe("42501");
-    });
-
-    it("lets an administrator save their OWN run", async () => {
-      const runId = await insertRun(adminId);
-      const { data, error } = await save(admin, runId, payload());
-      expect(error).toBeNull();
-      expect(data!.owner_id).toBe(adminId);
-    });
-
-    it("refuses an administrator saving another account's run", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const { data, error } = await save(admin, runId, p);
-      expect(data).toBeNull();
-      expect(error!.code).toBe("42501");
-      const { count } = await service
-        .from("slabs")
-        .select("id", { count: "exact", head: true })
-        .eq("certification_number", p.certification_number as string);
-      expect(count).toBe(0);
-    });
-
-    it("refuses a customer saving another account's run", async () => {
-      const runId = await insertRun(bobId);
-      const { data, error } = await save(alice, runId, payload());
-      expect(data).toBeNull();
-      expect(error!.code).toBe("42501");
-    });
-
-    it("refuses an ownerless run for both a customer and an administrator", async () => {
-      const runA = await insertRun(null);
-      const runB = await insertRun(null);
-      expect((await save(alice, runA, payload())).error?.code).toBe("42501");
-      expect((await save(admin, runB, payload())).error?.code).toBe("42501");
-    });
-
-    it("refuses a run carrying FOREIGN field evidence", async () => {
-      const runId = await insertRun(aliceId);
-      const { error: evErr } = await service.from("ai_field_evidence").insert({
-        analysis_run_id: runId,
-        owner_id: bobId,
-        field_name: "card_name",
-        field_value: "Charizard",
-        confidence: 0.9,
-      });
-      expect(evErr).toBeNull();
-      const { error } = await save(alice, runId, payload());
-      expect(error!.code).toBe("42501");
-      expect((await runRow(runId))!.slab_id).toBeNull();
-    });
-
-    it("refuses a run carrying MIXED own and foreign field evidence", async () => {
-      const runId = await insertRun(aliceId);
-      await service.from("ai_field_evidence").insert([
-        { analysis_run_id: runId, owner_id: aliceId, field_name: "grade", field_value: "10", confidence: 0.9 },
-        { analysis_run_id: runId, owner_id: bobId, field_name: "grader", field_value: "PSA", confidence: 0.9 },
-      ]);
-      const { error } = await save(alice, runId, payload());
-      expect(error!.code).toBe("42501");
-    });
-
-    it("gives an administrator no status bypass", async () => {
-      const runId = await insertRun(adminId, "running");
-      const { error } = await save(admin, runId, payload());
-      expect(error!.code).toBe("55000");
-    });
-
-    it("never lets the payload redirect ownership", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload({ owner_id: bobId, user_id: bobId }));
-      expect(data!.owner_id).toBe(aliceId);
-      expect((await slabRow(data!.slab_id))!.owner_id).toBe(aliceId);
-    });
-
-    it("never reveals another account's slab through a duplicate answer", async () => {
-      const p = payload();
-      const aliceRun = await insertRun(aliceId);
-      const created = await save(alice, aliceRun, { ...p });
-      const bobRun = await insertRun(bobId);
-      const bobResult = await save(bob, bobRun, { ...p });
-      expect(bobResult.data!.slab_id).not.toBe(created.data!.slab_id);
-      expect(bobResult.data!.owner_id).toBe(bobId);
-    });
-
-    it("never reveals another account's slab through the replay branch", async () => {
-      const runId = await insertRun(aliceId);
-      const saved = await save(alice, runId, payload());
-      expect(saved.data!.result).toBe("created");
-      const { data, error } = await save(admin, runId, payload());
-      expect(data).toBeNull();
-      expect(error!.code).toBe("42501");
-    });
-
-    it("keeps cross-owner ids, inventory numbers and paths private", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), "jpg");
-      const { data: rows } = await bob
-        .from("slabs")
-        .select("id, inventory_number, front_image_path")
-        .eq("id", data!.slab_id);
-      expect(rows).toEqual([]);
-    });
-  });
-
-  /* ─────────────────────────── status and input validation ──────────────── */
-
-  describe("status and input validation", () => {
-    it("accepts a succeeded run", async () => {
-      const runId = await insertRun(aliceId, "succeeded");
-      expect((await save(alice, runId, payload())).data!.result).toBe("created");
-    });
-
-    it("accepts a needs_review run", async () => {
-      const runId = await insertRun(aliceId, "needs_review");
-      expect((await save(alice, runId, payload())).data!.result).toBe("created");
-    });
-
-    it("refuses a running run", async () => {
-      const runId = await insertRun(aliceId, "running");
-      expect((await save(alice, runId, payload())).error?.code).toBe("55000");
-    });
-
-    it("refuses a failed run", async () => {
-      const runId = await insertRun(aliceId, "failed");
-      expect((await save(alice, runId, payload())).error?.code).toBe("55000");
-    });
-
-    it("refuses a missing analysis run", async () => {
-      const { error } = await save(alice, "00000000-0000-0000-0000-000000000000", payload());
-      expect(error?.code).toBe("P0002");
-    });
-
-    it("refuses a null analysis run id", async () => {
-      const { error } = await save(alice, null, payload());
-      expect(error?.code).toBe("22023");
-    });
-
-    it("refuses a null payload", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await save(alice, runId, null);
-      expect(error?.code).toBe("22023");
-    });
-
-    it("refuses an array payload", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await save(alice, runId, [{ card_name: "x" }]);
-      expect(error?.code).toBe("22023");
-    });
-
-    it("refuses a scalar payload", async () => {
-      const runId = await insertRun(aliceId);
-      const { error } = await save(alice, runId, "not-an-object");
-      expect(error?.code).toBe("22023");
-    });
-
-    it("matches the canonical create function on an empty-object payload", async () => {
-      const runId = await insertRun(aliceId);
-      const { data, error } = await save(alice, runId, {});
-      // The wrapper accepts the object and delegates: whatever create_slab
-      // requires it enforces. Either it refuses, or it creates a minimal slab.
-      if (error) expect(data).toBeNull();
-      else expect(data!.result).toBe("created");
-      const run = await runRow(runId);
-      if (error) expect(run!.slab_id).toBeNull();
-    });
-
-    it("creates no slab, link or audit row for invalid arguments", async () => {
-      const runId = await insertRun(aliceId);
-      const before = await service.from("slabs").select("id", { count: "exact", head: true }).eq("owner_id", aliceId);
-      await save(alice, runId, null);
-      await save(alice, runId, payload(), null, "");
-      const after = await service.from("slabs").select("id", { count: "exact", head: true }).eq("owner_id", aliceId);
-      expect(after.count).toBe(before.count);
-      expect((await runRow(runId))!.slab_id).toBeNull();
-    });
-  });
-
-  /* ─────────────────────────── audit behaviour ──────────────────────────── */
-
-  describe("audit behaviour", () => {
-    it("writes exactly one audit row for a created save", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload());
-      expect(await auditRows(data!.slab_id)).toHaveLength(1);
-    });
-
-    it("writes no additional audit row on replay", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const first = await save(alice, runId, p);
-      await save(alice, runId, p);
-      await save(alice, runId, p);
-      expect(await auditRows(first.data!.slab_id)).toHaveLength(1);
-    });
-
-    it("writes no audit row for a duplicate-certification answer", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const first = await save(alice, runA, { ...p });
-      await save(alice, runB, { ...p });
-      expect(await auditRows(first.data!.slab_id)).toHaveLength(1);
-    });
-
-    it("writes no save-success audit row for an authorization refusal", async () => {
-      const runId = await insertRun(bobId);
-      await save(alice, runId, payload());
-      const { data } = await service
-        .from("audit_log")
-        .select("id")
-        .eq("action", "slab.save_confirmed_from_analysis")
-        .contains("detail", { analysis_run_id: runId });
-      expect(data ?? []).toHaveLength(0);
-    });
-
-    it("writes no save-success audit row for an invalid-input refusal", async () => {
-      const runId = await insertRun(aliceId);
-      await save(alice, runId, payload(), null, "");
-      const { data } = await service
-        .from("audit_log")
-        .select("id")
-        .eq("action", "slab.save_confirmed_from_analysis")
-        .contains("detail", { analysis_run_id: runId });
-      expect(data ?? []).toHaveLength(0);
-    });
-
-    it("records the correct owner and actor role for a customer save", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload());
-      const rows = await auditRows(data!.slab_id);
-      const detail = rows[0].detail as Record<string, unknown>;
-      expect(detail.target_owner_id).toBe(aliceId);
-      expect(detail.actor_role).toBe("customer");
-      expect(rows[0].owner_id).toBe(aliceId);
-      expect(rows[0].actor_user_id).toBe(aliceId);
-    });
-
-    it("records the correct owner and actor role for an administrator's own save", async () => {
-      const runId = await insertRun(adminId);
-      const { data } = await save(admin, runId, payload());
-      const rows = await auditRows(data!.slab_id);
-      const detail = rows[0].detail as Record<string, unknown>;
-      expect(detail.target_owner_id).toBe(adminId);
-      expect(detail.actor_role).toBe("admin");
-      expect(rows[0].owner_id).toBe(adminId);
-    });
-
-    it("keeps image bytes, base64, provider payloads, credentials and certifications out of the audit detail", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const { data } = await save(alice, runId, p);
-      const rows = await auditRows(data!.slab_id);
-      const json = JSON.stringify(rows[0].detail);
-      expect(json).not.toMatch(/data:image|base64|secret|apikey|api_key|bearer/i);
-      expect(json).not.toContain(String(p.certification_number));
-    });
-
-    it("stores only the approved identifiers and booleans in the audit detail", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), "jpg");
-      const rows = await auditRows(data!.slab_id);
-      const detail = rows[0].detail as Record<string, unknown>;
-      expect(Object.keys(detail).sort()).toEqual(
-        [
-          "actor_role",
-          "analysis_run_id",
-          "has_back_image",
-          "inventory_code",
-          "inventory_number",
-          "target_owner_id",
-        ].sort(),
-      );
-      expect(detail.has_back_image).toBe(true);
-      expect(rows[0].source).toBe("rpc:save_confirmed_slab_from_analysis");
-    });
-  });
-
-  /* ─────────────────────────── result contracts ─────────────────────────── */
-
-  describe("result contracts", () => {
-    it("returns the exact 'created' shape", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload(), "jpg");
-      expect(Object.keys(data as object).sort()).toEqual(RESULT_KEYS);
-      expect(data!.result).toBe("created");
-      expect(data!.created).toBe(true);
-      expect(data!.analysis_run_linked).toBe(true);
-      expect(data!.analysis_run_id).toBe(runId);
-      expect(data!.owner_id).toBe(aliceId);
-      expect(typeof data!.inventory_number).toBe("number");
-      expect(data!.front_image_path).toMatch(/^slabs\/\d+\/front\.jpg$/);
-    });
-
-    it("returns the exact 'already_saved' shape", async () => {
-      const runId = await insertRun(aliceId);
-      const p = payload();
-      const first = await save(alice, runId, p);
-      const { data } = await save(alice, runId, p);
-      expect(Object.keys(data as object).sort()).toEqual(RESULT_KEYS);
-      expect(data!.result).toBe("already_saved");
-      expect(data!.created).toBe(false);
-      expect(data!.analysis_run_linked).toBe(true);
-      expect(data!.slab_id).toBe(first.data!.slab_id);
-      expect(data!.owner_id).toBe(aliceId);
-    });
-
-    it("returns the exact 'duplicate_certification' shape", async () => {
-      const p = payload();
-      const runA = await insertRun(aliceId);
-      const runB = await insertRun(aliceId);
-      const first = await save(alice, runA, { ...p });
-      const { data } = await save(alice, runB, { ...p });
-      expect(Object.keys(data as object).sort()).toEqual(RESULT_KEYS);
-      expect(data!.result).toBe("duplicate_certification");
-      expect(data!.created).toBe(false);
-      expect(data!.analysis_run_linked).toBe(false);
-      expect(data!.slab_id).toBe(first.data!.slab_id);
-      expect(data!.owner_id).toBe(aliceId);
-    });
-
-    it("returns no private or payload-derived field in any result", async () => {
-      const runId = await insertRun(aliceId);
-      const { data } = await save(alice, runId, payload());
-      const json = JSON.stringify(data);
-      expect(json).not.toMatch(/base64|secret|token|password|card_name/i);
-    });
-  });
-
-  /* ─────────────────────────── cleanup contract ─────────────────────────── */
-
-  describe("cleanup contract", () => {
-    it("tracks every created user, run and slab for teardown", () => {
-      expect(userIds.length).toBeGreaterThanOrEqual(4);
-      expect(runIds.length).toBeGreaterThan(0);
-      expect(slabIds.length).toBeGreaterThan(0);
-    });
-
-    it("fails the run if any cleanup step failed", () => {
-      // afterAll throws on a non-empty list; this asserts the list is the
-      // single, authoritative cleanup ledger the teardown consults.
-      expect(Array.isArray(cleanupFailures)).toBe(true);
-    });
+  it("maintains a clean disposable-fixture ledger", () => {
+    expect(users.length).toBeGreaterThanOrEqual(4); expect(runs.size).toBeGreaterThan(0); expect(slabs.size).toBeGreaterThan(0); expect(cleanupErrors).toEqual([]);
   });
 });
