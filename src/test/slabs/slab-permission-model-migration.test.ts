@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(
-  new URL("../../../supabase/migrations/20260908000000_slab_permission_model.sql", import.meta.url),
+  "supabase/migrations/20260908000000_slab_permission_model.sql",
   "utf8",
 );
 
