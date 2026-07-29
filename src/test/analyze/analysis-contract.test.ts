@@ -204,7 +204,10 @@ describe("analysis contract", () => {
     expect(finalMigration).toBe("20260906000000_account_deletion");
     expect(proposedMigrationCount).toBe(68);
     expect(proposedFinalMigration).toBe("20260907000000_save_confirmed_slab_from_analysis");
-    expect(p.proposedBranchCommit).toBeNull();
+    // The review branch now exists on the remote, so the branch commit is
+    // recorded. Merge and deployment remain null: pushing a draft PR is not
+    // merging and is not deploying.
+    expect(p.proposedBranchCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(p.mergeState).toBe("proposed-unmerged");
     expect(p.mergeCommit).toBeNull();
     expect(p.deploymentState).toBe("not-deployed");

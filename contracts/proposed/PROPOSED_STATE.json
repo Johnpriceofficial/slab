@@ -17,7 +17,9 @@
   "mergedContractVersion": "1.1.0-ba3953fd-m65",
 
   "proposedBranch": "fix/atomic-confirmed-slab-save",
-  "proposedBranchCommit": null,
+  "proposedBranchCommit": "e1e5f8f0af871de01458a3c95d73f84e520e92cc",
+  "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/pull/91",
+  "proposedPullRequestState": "draft-open-unmerged",
   "proposedMigration": "20260907000000_save_confirmed_slab_from_analysis",
   "proposedMigrationCount": 68,
   "proposedContractVersion": "1.3.0-merged-d8088f2a-m67-proposed-m68",

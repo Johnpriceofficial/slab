@@ -50,7 +50,7 @@ const PROVENANCE = {
   // What THIS branch proposes on top of merged main.
   proposedBranch: "fix/atomic-confirmed-slab-save",
   // Filled in once the branch exists on the remote; null while it does not.
-  proposedBranchCommit: null,
+  proposedBranchCommit: "e1e5f8f0af871de01458a3c95d73f84e520e92cc",
   proposedMigrationCount: 68,
   proposedFinalMigration: "20260907000000_save_confirmed_slab_from_analysis",
 
