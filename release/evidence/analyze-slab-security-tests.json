@@ -1,0 +1,21 @@
+{
+  "environment": "production (rcbwemkfcefarqnlgrmv), analyze-slab v87, verify_jwt=true",
+  "method": "live HTTPS calls with disposable accounts; disposable users deleted after (0 remain).",
+  "results": {
+    "no_authorization_header": "HTTP 401 (platform verify_jwt)",
+    "anon_key_no_user": "HTTP 401 {\"error\":\"Unauthorized\"} (function getCallerUser)",
+    "garbage_bearer": "HTTP 401",
+    "active_confirmed_customer_flag_off": "HTTP 403 CUSTOMER_ACCESS_DISABLED (fail-closed, before enable)",
+    "active_confirmed_customer_flag_on": "HTTP 400 MISSING_IMAGE (passed access gate -> image validation; enabled)",
+    "malformed_json_customer": "HTTP 400 (before provider) [verified on staging]",
+    "suspended_customer": "HTTP 403 ACCOUNT_NOT_ACTIVE",
+    "direct_slabs_insert_authenticated": "HTTP 403 (RLS + SELECT-only grant)",
+    "direct_slabs_update_authenticated": "HTTP 403",
+    "direct_slabs_delete_authenticated": "HTTP 403",
+    "direct_analysis_runs_insert_authenticated": "HTTP 404 (no grant)",
+    "anonymous_direct_slabs_select": "42501 permission denied (anon has no SELECT grant)"
+  },
+  "covered_by_backend_ci_green_72e6e58": ["admin allowed","unconfirmed-email denied","no-profile denied","quota enforcement (per-user fail-closed + admin)","MIME + magic-byte validation","aggregate + per-image size limits","front required / back optional","provider-key-missing","provider-error safe typed errors","owner assignment on run + evidence","cross-owner denial"],
+  "rpc_security": {"link_ai_analysis_run": "SECURITY DEFINER + owner guard (hardened) + search_path pinned", "save_confirmed_slab_from_analysis": "SECURITY DEFINER + owner guard + search_path", "correct_slab_identification": "SECURITY DEFINER + search_path", "slabs_rls": "enabled; authenticated=SELECT-only; owner/admin select policies; forbid-delete + guard-protected-columns triggers"},
+  "advisors": "0 CRITICAL, 0 HIGH (unchanged — deploy+secret did not alter DB schema/RLS/functions)"
+}

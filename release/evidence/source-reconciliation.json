@@ -1,0 +1,66 @@
+{
+  "recorded_at_utc": "2026-07-29",
+  "operator": "Claude Code (principal-engineer session, non-interactive)",
+  "note": "Heads re-queried live per Section 4. No source was edited before recording. No production change was made during reconciliation (read-only queries only).",
+  "backend": {
+    "repo": "Johnpriceofficial/slab",
+    "main_sha": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+    "main_matches_task_observed": true,
+    "canonical_release_pr": {
+      "number": 91,
+      "state": "OPEN",
+      "is_draft": true,
+      "title": "DRAFT — staging verified: atomic confirmed save + slab permission model",
+      "head_sha": "fc41be593744acce468347f9232f974284bc0fa6",
+      "head_matches_task_observed": true,
+      "base": "main",
+      "mergeable": "MERGEABLE",
+      "merge_state": "CLEAN",
+      "self_declared_state_in_branch_commits": "Multiple PR #91 branch commit messages read 'STATE: PROPOSED. Not staging-verified, not deployed, not live-verified.' and 'pushing a draft pull request is not merging, is not deploying and is not verification.' This CONTRADICTS the PR title and the Section 2 baseline; it could not be independently confirmed because staging is inaccessible (see blockers)."
+    },
+    "pr_92_status": "Superseded/closed per task; observed only as a stale preview deployment on branch review/atomic-confirmed-save."
+  },
+  "frontend": {
+    "repo": "Johnpriceofficial/slab-scribe-pro",
+    "main_sha": "b1e7daec516cd133067660bce1a8e9d37caa6c70",
+    "main_matches_task_observed": true,
+    "private": true,
+    "open_prs": 0,
+    "release_branch_created": false,
+    "lovable_project": "d3c023a7-ef76-49d3-83ec-29074c6d035e",
+    "lovable_source_export": "NOT OBTAINED — no verified capability in the connected toolset to export the exact Lovable runtime source tree and prove content-equivalence. Section 18 stop condition."
+  },
+  "supabase_production": {
+    "project_id": "rcbwemkfcefarqnlgrmv",
+    "status": "ACTIVE_HEALTHY",
+    "postgres": "17.6.1.141",
+    "region": "us-west-2",
+    "migration_tip": "20260904000000_slab_deletion_tombstones_rls",
+    "migration_count": 68,
+    "pr91_atomic_save_migration_present": false,
+    "pr91_migration_names_expected": ["save_confirmed_slab_from_analysis", "slab_permission_model_reconciled"],
+    "edge_functions_active": 18,
+    "edge_function_slugs": ["pricecharting-search","analyze-slab","pricecharting-marketplace","pricecharting-sync","marketplace-scheduler","ebay-oauth-start","ebay-oauth-callback","ebay-account-sync","ebay-reference-search","ebay-list-item","ebay-revise-item","ebay-end-item","ebay-order-sync","ebay-fulfillment","ebay-finances-sync","ebay-notification-handler","scan-card","market-intelligence"],
+    "contact_email_function_present": false,
+    "security_advisors": {"critical": 0, "high": 0, "warn": "SECURITY DEFINER RPCs executable by authenticated (intended write-via-RPC architecture) + leaked-password-protection disabled (auth setting)", "info": "rls_enabled_no_policy on private.* and internal counter tables (intended deny-all fail-closed posture)"}
+  },
+  "supabase_staging": {
+    "project_id": "msbdwwgojuvgnuugrrry",
+    "accessible_via_connected_tools": false,
+    "impact": "Section 13 staging deployment + Section 10 required live staging matrix CANNOT be executed. Section 18 stop condition."
+  },
+  "vercel": {
+    "team": "team_Aa6u5Idjikkysa6Y2mB8FOgE (john-price)",
+    "project": "slab-13rc",
+    "project_id": "prj_s3HNK69VRTNimpNMQnxxP9JyA575",
+    "builds_repo": "Johnpriceofficial/slab (BACKEND repo, which is also a Vite app)",
+    "current_production_target_deployment": {"id": "dpl_BHjDd7AHdERVqMTKxDpN4FgXwgay", "sha": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271", "state": "READY", "target": "production", "rollback_candidate": true},
+    "competing_frontend_risk": "Vercel has a PRODUCTION-target deployment of the slab repo while Lovable is the stated production frontend host. Which host the apex domain serves cannot be confirmed here (DNS not verifiable). Section 15 step 17 unresolved.",
+    "pr91_deployments": "preview only (target=null)"
+  },
+  "domain": {
+    "apex": "gradedcardvalue.com",
+    "routing_verified": false,
+    "impact": "Section 15 steps 16-17 and Section 16 domain verification not performable. Section 18 stop condition."
+  }
+}

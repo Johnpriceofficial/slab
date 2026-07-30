@@ -419,7 +419,7 @@ export interface OperationSpec {
  * migration count>-proposed-m<proposed migration count>`.
  * scripts/build-contract-snapshot.mjs derives and enforces every component.
  */
-export const CONTRACT_VERSION = "1.3.0-merged-d8088f2a-m67-proposed-m68" as const;
+export const CONTRACT_VERSION = "1.3.0-merged-72e6e58d-m69-proposed-m69" as const;
 
 
 export const OPERATIONS: readonly OperationSpec[] = [
@@ -682,12 +682,12 @@ export const OPERATIONS: readonly OperationSpec[] = [
     authorization:
       "JWT; admin, or customer with ANALYZE_SLAB_CUSTOMER_ENABLED=true + confirmed email + active customer_profiles row; per-user daily quota fails closed",
     classification: "BROWSER_CUSTOMER_SAFE",
-    status: "PROPOSED_CONTRACT_CORRECTION",
+    status: "READY",
     idempotent: false,
     retriable: false,
     sideEffects: "AI provider call; ai_analysis_runs/ai_field_evidence rows; quota consumption",
     notes:
-      "The handler edge:analyze-slab IS merged and deployed. What is PROPOSED here is this manifest's CORRECTED account of it (branch fix/atomic-confirmed-slab-save): the previous entry named edge:scan-card and an invented { slabId } body. Corrected shape, read at supabase/functions/analyze-slab/index.ts and src/server/analyze-slab/validate-images.ts: JSON with snake_case keys, front_image_base64 + front_mime required, back_image_base64/back_mime optional AND ONLY FORWARDED WHEN BOTH ARE PRESENT, variants[] (label/image_base64/mime) max 8; 15 MiB per image, 40 MiB aggregate, MIME in jpeg/png/webp/heic/heif with magic-byte match. There is NO slabId argument — the slab does not exist yet. Returns a run in 'succeeded' or 'needs_review'. edge:scan-card is the separate multipart V1 intake path and is NOT this operation. Compose StartSlabAnalysisRequest and serialize with toStartSlabAnalysisWireRequest; do not hand-build the wire body. Not READY: the corrected shape has not been exercised against the live handler.",
+      "The handler edge:analyze-slab IS merged and deployed. What is PROPOSED here is this manifest's CORRECTED account of it (branch fix/atomic-confirmed-slab-save): the previous entry named edge:scan-card and an invented { slabId } body. Corrected shape, read at supabase/functions/analyze-slab/index.ts and src/server/analyze-slab/validate-images.ts: JSON with snake_case keys, front_image_base64 + front_mime required, back_image_base64/back_mime optional AND ONLY FORWARDED WHEN BOTH ARE PRESENT, variants[] (label/image_base64/mime) max 8; 15 MiB per image, 40 MiB aggregate, MIME in jpeg/png/webp/heic/heif with magic-byte match. There is NO slabId argument — the slab does not exist yet. Returns a run in 'succeeded' or 'needs_review'. edge:scan-card is the separate multipart V1 intake path and is NOT this operation. Compose StartSlabAnalysisRequest and serialize with toStartSlabAnalysisWireRequest; do not hand-build the wire body. READY: the corrected handler is merged (72e6e58) and deployed to production as analyze-slab v87 (verify_jwt=true), and its request/authorization contract was exercised live — unauthenticated/invalid JWT → 401, active confirmed customer accepted then MISSING_IMAGE on an empty body, suspended → ACCOUNT_NOT_ACTIVE, customer flag fail-closed.",
   },
   {
     name: "saveConfirmedSlabFromAnalysis",
@@ -699,12 +699,12 @@ export const OPERATIONS: readonly OperationSpec[] = [
     authorization:
       "auth.uid() only, fail closed and self-owned only: EVERY caller — administrators included — must own the analysis run (owner_id = auth.uid()) and the run must be in status 'succeeded' or 'needs_review'; there is no administrator override for either rule and no owner is ever read from the payload. Non-admins additionally need an active customer_profiles row. An administrator saving another account's run is refused with 42501 and creates nothing. EXECUTE revoked from public/anon, granted to authenticated.",
     classification: "BROWSER_CUSTOMER_SAFE",
-    status: "PROPOSED_NOT_DEPLOYED",
+    status: "READY",
     idempotent: true,
     retriable: true,
     sideEffects: "slabs row + ai_analysis_runs.slab_id link + audit row, in ONE transaction",
     notes:
-      "PROPOSED on branch fix/atomic-confirmed-slab-save; not merged, not deployed, live cases not run — do not call. Atomic replacement for create_slab-then-link_ai_analysis_run. Locks the run FOR UPDATE, so a replay returns result='already_saved' with the existing slab instead of creating a second one. Takes pg_advisory_xact_lock(918273645) — the same lock create_slab uses — before the certification probe, so a concurrent intake cannot slip a duplicate in between probe and insert. An existing certification returns result='duplicate_certification' (never overwritten) and leaves the run unlinked. Asserts field-evidence ownership for every caller (canonical link_ai_analysis_run skips that check for admins). A failed link rolls the created slab back.",
+      "READY: merged into main (72e6e58) and live in production — SECURITY DEFINER with search_path pinned, auth.uid()-only self-owned ownership (references owner_id), EXECUTE granted to authenticated and revoked from anon/public (verified live). Atomic replacement for create_slab-then-link_ai_analysis_run. Locks the run FOR UPDATE, so a replay returns result='already_saved' with the existing slab instead of creating a second one. Takes pg_advisory_xact_lock(918273645) — the same lock create_slab uses — before the certification probe, so a concurrent intake cannot slip a duplicate in between probe and insert. An existing certification returns result='duplicate_certification' (never overwritten) and leaves the run unlinked. Asserts field-evidence ownership for every caller (canonical link_ai_analysis_run skips that check for admins). A failed link rolls the created slab back.",
   },
   {
     name: "getAnalysis",

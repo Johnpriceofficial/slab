@@ -1,0 +1,26 @@
+{
+  "release_id": "gcv-2026-07-30-backend-customer-analyze",
+  "generated": "2026-07-30 (backend/API/Supabase/security scope)",
+  "result": "PARTIAL — backend customer-analysis launch LIVE + verified; frontend publish + DNS/email are owner-gated",
+  "backend_commit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "frontend_commit_main": "a2bea65497825c69fbbc1ffd1b162773ae48d06a",
+  "frontend_pr_open": "PR #6 (release/lovable-reconcile-and-fixes @ ca29bea) — browser suite green + required gate; ready to merge (owner)",
+  "supabase": {
+    "production": "rcbwemkfcefarqnlgrmv",
+    "staging": "msbdwwgojuvgnuugrrry",
+    "prod_migration_tip": "20260904000000 (ledger); atomic-save + permission applied as 20260729131106/131134",
+    "analyze_slab_prod": {"version": 88, "version_note": "v88 config-only bump; ezbr_sha256 identical to deploy-time v87 => code unchanged", "verify_jwt": true, "ezbr_sha256": "14c4d158e047357fbf3cc132767cb763ed5769a994b1fe56e8ab409a7bf069d4", "customers_enabled": true},
+    "analyze_slab_prev": {"version": 86, "impl": "admin-only", "ezbr_sha256": "b5d567f526694a0b23f8c8df002160296c33e56097c5aaba7128b477be2a3be3"},
+    "security_advisors": {"prod": {"critical": 0, "high": 0}, "staging": {"critical": 0, "high": 0}, "warns_verified_benign": true},
+    "performance_advisors": {"prod": {"error": 0, "critical": 0, "top_warn": "multiple_permissive_policies on slabs SELECT (by design)"}},
+    "deep_audit": "release/evidence/deep-audit-and-stress-test.md (2026-07-29): edge verify_jwt audit, SECURITY DEFINER RPC guard review + live customer-JWT denial probe, 80-way analyze-slab concurrency stress (0 5xx)"
+  },
+  "core_rpcs_live": ["save_confirmed_slab_from_analysis","correct_slab_identification","archive_slab","unarchive_slab","link_ai_analysis_run(hardened)"],
+  "workflow_runs": {"backend_ci_72e6e58": 30454797696, "frontend_pr6_push": 30465019864, "frontend_pr6_pr": 30465023871},
+  "known_limitations": [
+    "Backend contract metadata stale (issue #1) — reconciliation steps documented, deferred (tooling change).",
+    "purge_customer_account_data (20260906) not in production — non-launch account-deletion feature; ledger version divergence documented.",
+    "Customer email confirmation appears auto (signup returned confirmed) — confirm intended in prod auth settings."
+  ],
+  "owner_controlled_remaining": ["Lovable publish of the verified frontend tree","DNS SPF/DKIM for notify.gradedcardvalue.com","final browser smoke against the published site","merge frontend PR #6"]
+}
