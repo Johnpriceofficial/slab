@@ -1,0 +1,14 @@
+{
+  "objective": "Deploy merged customer-capable analyze-slab (backend 72e6e58) to staging+production; enable customers per owner authorization.",
+  "source_commit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "deployed_files": ["functions/analyze-slab/index.ts","functions/_shared/analyze-slab-bundle.js","functions/_shared/analyze-access.ts","functions/_shared/quota.ts","functions/_shared/auth.ts","functions/_shared/cors.ts"],
+  "working_tree_matched_main": "verified byte-identical to origin/main for all 6 deployable files",
+  "deno_check": "clean (deno 2.9.4)",
+  "backend_ci": "green on 72e6e58 (run 30454797696) — full analyze unit + integration suite",
+  "previous_production": {"version": 86, "impl": "admin-only", "ezbr_sha256": "b5d567f526694a0b23f8c8df002160296c33e56097c5aaba7128b477be2a3be3"},
+  "staging": {"project": "msbdwwgojuvgnuugrrry", "deployed": true, "verify_jwt": true, "customer_flag": "ANALYZE_SLAB_CUSTOMER_ENABLED=true (set via CLI)"},
+  "production": {"project": "rcbwemkfcefarqnlgrmv", "version_at_deploy": 87, "version_current": 88, "version_note": "v88 is a config-only bump; ezbr_sha256 identical to v87 => deployed code unchanged, re-verified live 2026-07-29", "verify_jwt": true, "ezbr_sha256": "14c4d158e047357fbf3cc132767cb763ed5769a994b1fe56e8ab409a7bf069d4", "customer_flag": "ANALYZE_SLAB_CUSTOMER_ENABLED=true (set via CLI, owner-authorized)"},
+  "quota_defaults": {"ANALYZE_DAILY_LIMIT_admin": 200, "ANALYZE_USER_DAILY_LIMIT_customer": 25, "OPENAI_ANALYZE_MODEL": "set"},
+  "secrets_present_by_name": ["OPENAI_API_KEY","SUPABASE_URL","SUPABASE_ANON_KEY","SUPABASE_SERVICE_ROLE_KEY","OPENAI_ANALYZE_MODEL","ANALYZE_SLAB_CUSTOMER_ENABLED(added)"],
+  "rollback": "supabase functions deploy analyze-slab from the previous tree, or set ANALYZE_SLAB_CUSTOMER_ENABLED=false to instantly re-gate customers (admin unaffected)."
+}
