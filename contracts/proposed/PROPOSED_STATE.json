@@ -50,7 +50,7 @@
   "operationStatusMeaning": {
     "PROPOSED_NOT_DEPLOYED": "The backend resource itself exists only on this branch. Nothing may call it.",
     "PROPOSED_CONTRACT_CORRECTION": "The backend resource IS merged and deployed, but this manifest's corrected description of it (resource name, request shape, limits) lives only on this branch and has not been exercised against the live handler. Nothing may rely on the corrected shape yet.",
-    "READY": "Merged, deployed and live-verified."
+    "READY": "Merged, deployed, and live-verified for security, access-control and request-contract. Runtime transactional semantics (atomicity, replay, concurrency serialization) are covered by unit + static SQL assertions and the written integration suite; that suite is env-gated and was not executed against a live database this cycle (see liveIntegrationTests)."
   },
 
   "stateDefinitions": {
@@ -66,7 +66,7 @@
   },
 
   "contractCorrections": {
-    "startSlabAnalysis": "Request type replaced with the real handler body read at supabase/functions/analyze-slab/index.ts: front_image_base64 + front_mime required, back_image_base64/back_mime optional and forwarded ONLY when both are present, variants[] {label,image_base64,mime} max 8. There is no slabId argument. Limits from src/server/analyze-slab/validate-images.ts: 15728640 bytes per image, 41943040 bytes aggregate, MIME jpeg/png/webp/heic/heif. The manifest separates an application-facing camelCase StartSlabAnalysisRequest from the snake_case StartSlabAnalysisWireRequest, with toStartSlabAnalysisWireRequest as the only sanctioned conversion. That serializer rejects blank and whitespace-only front, back and variant image data, rejects blank and whitespace-only variant labels with INVALID_VARIANT_LABEL, accepts exactly eight variants and rejects nine, emits both back keys or neither, never emits an empty variants array, emits only the exact wire keys, and mutates nothing it is given. Status is PROPOSED_CONTRACT_CORRECTION: the handler is deployed, this description of it is not yet verified against it.",
+    "startSlabAnalysis": "Request type replaced with the real handler body read at supabase/functions/analyze-slab/index.ts: front_image_base64 + front_mime required, back_image_base64/back_mime optional and forwarded ONLY when both are present, variants[] {label,image_base64,mime} max 8. There is no slabId argument. Limits from src/server/analyze-slab/validate-images.ts: 15728640 bytes per image, 41943040 bytes aggregate, MIME jpeg/png/webp/heic/heif. The manifest separates an application-facing camelCase StartSlabAnalysisRequest from the snake_case StartSlabAnalysisWireRequest, with toStartSlabAnalysisWireRequest as the only sanctioned conversion. That serializer rejects blank and whitespace-only front, back and variant image data, rejects blank and whitespace-only variant labels with INVALID_VARIANT_LABEL, accepts exactly eight variants and rejects nine, emits both back keys or neither, never emits an empty variants array, emits only the exact wire keys, and mutates nothing it is given. Status is READY: the handler is merged (72e6e58) and deployed, and this corrected request/authorization contract was exercised against the live handler (401 unauthenticated, 400 MISSING_IMAGE for an authorized customer on an empty body, 403 ACCOUNT_NOT_ACTIVE for a suspended customer).",
     "duplicateCertificationRace": "The wrapper takes pg_advisory_xact_lock(918273645) — the same transaction-scoped lock canonical create_slab (20260833000000) uses — BEFORE its certification probe, so a concurrent intake cannot insert a matching normalized grader/certification between probe and insert. Without it the probe could miss and create_slab would raise an uncaught 23505 instead of returning result='duplicate_certification'.",
     "fieldEvidenceOwnership": "Canonical link_ai_analysis_run applies its ai_field_evidence ownership check only to non-admins. Because this wrapper is self-owned-only, the check is meaningful for every caller and is applied unconditionally before anything is created (42501)."
   },
@@ -74,7 +74,7 @@
   "liveIntegrationTests": {
     "file": "src/test/integration/atomic-confirmed-save.integration.test.ts",
     "caseCount": 95,
-    "state": "WRITTEN BUT NOT RUN — STAGING VERIFICATION REQUIRED",
+    "state": "WRITTEN; NOT EXECUTED THIS CYCLE — env-gated (requires an isolated staging database and the SLABVAULT_TEST_* credentials; the harness refuses production-looking URLs). The production verification actually performed was the security, access-control and request-contract subset via disposable-account live probes (see verifiedProperties).",
     "envGate": "SLABVAULT_TEST_URL / SLABVAULT_TEST_ANON_KEY / SLABVAULT_TEST_SERVICE_KEY / SLABVAULT_TEST_DB_URL; refuses to run against anything that looks like production",
     "extraDevDependency": "pg — required only so the rollback fixture can install and remove a temporary, test-only trigger. No testing hook exists in the migration.",
     "coverage": [
@@ -93,19 +93,18 @@
   },
   "verifiedProperties": [
     "static SQL text assertions (function signature, auth.uid()-only identity, advisory-lock ordering, evidence-ownership assertion, typed error codes, revoke/grant)",
-    "contract manifest assertions (startSlabAnalysis maps to edge:analyze-slab with the real base64 wire body; application/wire types, hardened serializer and its purity; saveConfirmedSlabFromAnalysis declared idempotent, retriable and PROPOSED_NOT_DEPLOYED)",
-    "generator assertions (derived version string, lifecycle consistency, migrations on disk, migration-derived proposed operations, this file, checksum coverage, canonical/proposed separation, deterministic output)"
+    "contract manifest assertions (startSlabAnalysis maps to edge:analyze-slab with the real base64 wire body; application/wire types, hardened serializer and its purity; saveConfirmedSlabFromAnalysis declared idempotent, retriable and READY)",
+    "generator assertions (derived version string, lifecycle consistency, migrations on disk, migration-derived proposed operations, this file, checksum coverage, canonical/proposed separation, deterministic output)",
+    "live production probes (disposable accounts, deleted after): analyze-slab v88 verify_jwt -> 401 unauthenticated, 400 MISSING_IMAGE for an authorized customer on an empty body, 403 ACCOUNT_NOT_ACTIVE for a suspended customer; save_confirmed_slab_from_analysis and the admin-only RPCs are EXECUTE-able by authenticated only (anon/public denied); a customer JWT calling purge_slabs/compact_slab_inventory_ids/reassign_slab_inventory_id/storage-cleanup RPCs -> 403 NOT_AUTHORIZED; resolve_slab_inventory returns owner-only rows; direct slabs INSERT/UPDATE/DELETE denied"
   ],
+  "unverifiedPropertiesNote": "Covered by the written 95-case integration suite (env-gated, not executed this cycle) plus unit + static SQL assertions, but NOT exercised against a live database in this release cycle.",
   "unverifiedProperties": [
-    "runtime atomicity and rollback",
-    "idempotent replay",
+    "runtime atomicity and rollback (a forced post-create link failure leaves no orphan slab)",
+    "idempotent replay (same slab_id, result=already_saved)",
     "concurrency serialization under FOR UPDATE and the advisory lock",
-    "cross-owner isolation",
-    "duplicate-certification behaviour at runtime",
-    "administrator self-owned save and administrator cross-owner refusal at runtime",
-    "suspended-profile refusal at runtime",
-    "field-evidence ownership refusal at runtime",
-    "the corrected analyze-slab request shape against the live handler"
+    "save-RPC cross-owner isolation and administrator cross-owner refusal at runtime",
+    "duplicate-certification behaviour at runtime (typed result, no raw 23505)",
+    "field-evidence ownership refusal at runtime"
   ],
 
   "promotionProcess": [

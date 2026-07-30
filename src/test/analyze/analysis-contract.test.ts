@@ -254,12 +254,24 @@ describe("analysis contract", () => {
     expect(steps.join(" ")).not.toMatch(/STAGING FIRST/);
   });
 
-  it("declares the live case count that the suite actually contains", () => {
+  it("declares the live case count and the honest verification state of the suite", () => {
     expect(proposedState.liveIntegrationTests.caseCount).toBe(95);
     expect(proposedState.liveIntegrationTests.caseCount).toBeGreaterThanOrEqual(66);
-    expect(proposedState.liveIntegrationTests.state).toBe(
-      "WRITTEN BUT NOT RUN — STAGING VERIFICATION REQUIRED",
+    // The 95-case suite is env-gated and was not executed this cycle; the state
+    // records that honestly and points to the live security/access/contract subset.
+    expect(proposedState.liveIntegrationTests.state).toMatch(/NOT EXECUTED THIS CYCLE/i);
+    expect(proposedState.liveIntegrationTests.state).toMatch(/env-gated/i);
+    expect(proposedState.liveIntegrationTests.state).toMatch(
+      /security, access-control and request-contract subset/i,
     );
+    // What WAS verified live in production is recorded in verifiedProperties, and
+    // items proven by those live probes are no longer listed as unverified.
+    expect(proposedState.verifiedProperties.some((p) => /live production probes/i.test(p))).toBe(
+      true,
+    );
+    expect(
+      proposedState.unverifiedProperties.some((p) => /suspended-profile refusal/i.test(p)),
+    ).toBe(false);
   });
 
   it("keeps canonical and proposed snapshot locations separated", () => {

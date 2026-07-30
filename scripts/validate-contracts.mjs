@@ -104,7 +104,14 @@ if (feArg !== -1) {
   if (existsSync(vPath)) {
     const v = readFileSync(vPath, "utf8");
     check(v.includes(`CONTRACT_VERSION=${CONTRACT_VERSION}`), "frontend CONTRACT_VERSION drift");
-    check(v.includes("BACKEND_COMMIT=d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271"), "frontend snapshot backend-commit drift");
+    // Derive the expected backend commit from the current contract provenance
+    // (the `-merged-<hash8>-` segment of CONTRACT_VERSION) instead of pinning a
+    // stale literal, so a release bump never leaves this validator behind.
+    const expectedCommitPrefix = (CONTRACT_VERSION.match(/-merged-([0-9a-f]{8})-/) || [])[1];
+    check(
+      Boolean(expectedCommitPrefix) && v.includes(`BACKEND_COMMIT=${expectedCommitPrefix}`),
+      "frontend snapshot backend-commit drift",
+    );
   }
 }
 
