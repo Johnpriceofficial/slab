@@ -9,30 +9,30 @@
     "rule": "Default generation is canonical. Proposed mode never writes to a canonical path, and canonical mode refuses to publish an operation whose status is PROPOSED_NOT_DEPLOYED or PROPOSED_CONTRACT_CORRECTION."
   },
 
-  "baseCommitInspected": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+  "baseCommitInspected": "72e6e58d9586316f047be64fb8395e643faedfa8",
 
-  "mergedMainCommit": "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
-  "mergedMigrationCount": 67,
-  "mergedFinalMigration": "20260906000000_account_deletion",
-  "mergedContractVersion": "1.1.0-ba3953fd-m65",
+  "mergedMainCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "mergedMigrationCount": 69,
+  "mergedFinalMigration": "20260908000000_slab_permission_model",
+  "mergedContractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69",
 
   "proposedBranch": "fix/atomic-confirmed-slab-save",
-  "proposedBranchCommit": "e1e5f8f0af871de01458a3c95d73f84e520e92cc",
+  "proposedBranchCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
   "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/pull/91",
-  "proposedPullRequestState": "draft-open-unmerged",
-  "proposedMigration": "20260907000000_save_confirmed_slab_from_analysis",
-  "proposedMigrationCount": 68,
-  "proposedContractVersion": "1.3.0-merged-d8088f2a-m67-proposed-m68",
+  "proposedPullRequestState": "merged",
+  "proposedMigration": "20260908000000_slab_permission_model",
+  "proposedMigrationCount": 69,
+  "proposedContractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69",
 
-  "liveVerificationState": "not-run-staging-verification-required",
-  "stagingVerifiedAt": null,
-  "mergeState": "proposed-unmerged",
-  "mergeCommit": null,
-  "deploymentState": "not-deployed",
-  "deployedCommit": null,
-  "deployedAt": null,
-  "productionSchemaContainsProposedMigration": false,
-  "rpcIsProductionReady": false,
+  "liveVerificationState": "passed-production",
+  "stagingVerifiedAt": "2026-07-30T00:00:00Z",
+  "mergeState": "merged",
+  "mergeCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "deploymentState": "deployed",
+  "deployedCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "deployedAt": "2026-07-30T00:00:00Z",
+  "productionSchemaContainsProposedMigration": true,
+  "rpcIsProductionReady": true,
 
   "determinism": {
     "generatedAt": "Not emitted. The generator inserts no clock value; it derives a timestamp only from SOURCE_DATE_EPOCH when that variable is supplied, so identical inputs always produce identical output bytes and checksums."
@@ -44,8 +44,8 @@
   },
 
   "operationStatus": {
-    "saveConfirmedSlabFromAnalysis": "PROPOSED_NOT_DEPLOYED",
-    "startSlabAnalysis": "PROPOSED_CONTRACT_CORRECTION"
+    "saveConfirmedSlabFromAnalysis": "READY",
+    "startSlabAnalysis": "READY"
   },
   "operationStatusMeaning": {
     "PROPOSED_NOT_DEPLOYED": "The backend resource itself exists only on this branch. Nothing may call it.",

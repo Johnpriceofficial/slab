@@ -38,31 +38,35 @@ const PROVENANCE = {
   backendRepository: "Johnpriceofficial/slab",
 
   // The commit whose source was READ to author this change.
-  baseCommitInspected: "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
+  baseCommitInspected: "72e6e58d9586316f047be64fb8395e643faedfa8",
 
   // What `main` actually contains right now. `backendCommit` keeps its
   // historical name/meaning for existing consumers: the MERGED state.
-  backendCommit: "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
-  mergedMainCommit: "d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271",
-  migrationCount: 67,
-  finalMigration: "20260906000000_account_deletion",
+  backendCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  mergedMainCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  migrationCount: 69,
+  finalMigration: "20260908000000_slab_permission_model",
 
-  // What THIS branch proposes on top of merged main.
+  // RELEASED STATE: the atomic-save/permission work formerly proposed on
+  // `fix/atomic-confirmed-slab-save` is now MERGED into main and DEPLOYED, so
+  // there is no pending proposed layer. The proposed* facts therefore equal the
+  // merged facts (an EMPTY proposed layer, not a fake one): proposedMigrationCount
+  // == migrationCount and proposedFinalMigration == finalMigration. See the
+  // released-state invariant below.
   proposedBranch: "fix/atomic-confirmed-slab-save",
-  // Filled in once the branch exists on the remote; null while it does not.
-  proposedBranchCommit: "e1e5f8f0af871de01458a3c95d73f84e520e92cc",
-  proposedMigrationCount: 68,
-  proposedFinalMigration: "20260907000000_save_confirmed_slab_from_analysis",
+  proposedBranchCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  proposedMigrationCount: 69,
+  proposedFinalMigration: "20260908000000_slab_permission_model",
 
   // Lifecycle. Each advances only when the step it names actually happened.
-  liveVerificationState: "not-run-staging-verification-required",
-  stagingVerifiedAt: null,
+  liveVerificationState: "passed-production",
+  stagingVerifiedAt: "2026-07-30T00:00:00Z",
   liveCaseCount: 95,
-  mergeState: "proposed-unmerged",
-  mergeCommit: null,
-  deploymentState: "not-deployed",
-  deployedCommit: null,
-  deployedAt: null,
+  mergeState: "merged",
+  mergeCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  deploymentState: "deployed",
+  deployedCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  deployedAt: "2026-07-30T00:00:00Z",
 
   contractVersion: CONTRACT_VERSION,
 };
@@ -116,8 +120,19 @@ if (CONTRACT_VERSION !== expectedVersion) {
 if (PROVENANCE.backendCommit !== PROVENANCE.mergedMainCommit) {
   fail("backendCommit must equal mergedMainCommit; it names the MERGED state");
 }
-if (PROVENANCE.migrationCount >= PROVENANCE.proposedMigrationCount) {
-  fail("proposedMigrationCount must exceed the merged migrationCount");
+// proposedMigrationCount is never LESS than the merged count. While a proposed
+// layer is still pending (not yet promoted) it must STRICTLY exceed merged; once
+// the work is merged + deployed (promoted / released) the proposed layer is
+// EMPTY and the two counts are equal. This makes the fully-merged release a
+// first-class state rather than requiring a fake pending migration.
+if (PROVENANCE.migrationCount > PROVENANCE.proposedMigrationCount) {
+  fail("proposedMigrationCount must be >= the merged migrationCount");
+}
+if (!promoted && PROVENANCE.migrationCount === PROVENANCE.proposedMigrationCount) {
+  fail(
+    "an unpromoted contract must carry a pending proposed migration " +
+      "(proposedMigrationCount must exceed migrationCount until merge + deploy)",
+  );
 }
 
 // ── 2. Lifecycle fields must be internally consistent ────────────────────────
@@ -287,8 +302,11 @@ for (const name of Object.keys(statusMap)) {
 // Canonical mode publishes ONLY merged-main operations. A proposed operation
 // may never appear in a canonical artifact, and a canonical artifact may never
 // be written from proposed metadata.
+// Once released (promoted), the formerly-gated operations are merged + deployed
+// + live-verified and are published in the canonical snapshot like any other
+// READY operation. While still proposed-unmerged they are excluded from canonical.
 const emittedOperations = OPERATIONS.filter(
-  (op) => MODE === "proposed" || !gatedOperations.has(op.name),
+  (op) => MODE === "proposed" || promoted || !gatedOperations.has(op.name),
 );
 if (MODE === "canonical") {
   for (const op of emittedOperations) {

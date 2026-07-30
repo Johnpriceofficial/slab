@@ -37,13 +37,13 @@ describe("analysis contract", () => {
     expect(op.notes ?? "").toContain("NO slabId");
   });
 
-  it("does not call the corrected analyze-slab contract production-ready", () => {
+  it("marks the corrected analyze-slab contract READY once merged, deployed and live-verified", () => {
     const op = byName.get("startSlabAnalysis")!;
-    // The handler is deployed; this manifest's corrected account of it is not
-    // yet verified against it, so the operation must not claim READY.
-    expect(op.status).toBe("PROPOSED_CONTRACT_CORRECTION");
-    expect(op.notes ?? "").toContain("Not READY");
-    expect(proposedState.operationStatus.startSlabAnalysis).toBe("PROPOSED_CONTRACT_CORRECTION");
+    // The handler is merged (72e6e58), deployed to production as analyze-slab
+    // v87, and its request/authorization contract was exercised live.
+    expect(op.status).toBe("READY");
+    expect(op.notes ?? "").toContain("READY");
+    expect(proposedState.operationStatus.startSlabAnalysis).toBe("READY");
   });
 
   it("types the analyze-slab WIRE body as the real base64 JSON shape", () => {
@@ -148,16 +148,16 @@ describe("analysis contract", () => {
     ]);
   });
 
-  it("exposes the atomic confirmed-save RPC as idempotent and retriable, but NOT deployed", () => {
+  it("exposes the atomic confirmed-save RPC as idempotent and retriable, and READY (deployed)", () => {
     const op = byName.get("saveConfirmedSlabFromAnalysis")!;
     expect(op.backendResource).toEqual(["rpc:save_confirmed_slab_from_analysis"]);
     expect(op.writes).toBe(true);
     expect(op.idempotent).toBe(true);
     expect(op.retriable).toBe(true);
     expect(op.classification).toBe("BROWSER_CUSTOMER_SAFE");
-    // Truthful state: the migration lives on an unmerged branch.
-    expect(op.status).toBe("PROPOSED_NOT_DEPLOYED");
-    expect(op.notes ?? "").toContain("not merged, not deployed");
+    // Truthful state: merged into main (72e6e58) and live in production.
+    expect(op.status).toBe("READY");
+    expect(op.notes ?? "").toContain("merged into main");
     expect(op.notes ?? "").toContain("pg_advisory_xact_lock(918273645)");
   });
 
@@ -178,15 +178,15 @@ describe("analysis contract", () => {
     // is the single editable source.
     const analysis = byName.get("saveConfirmedSlabFromAnalysis")!;
     expect(analysis.backendResource).toEqual(["rpc:save_confirmed_slab_from_analysis"]);
-    expect(analysis.status).toBe("PROPOSED_NOT_DEPLOYED");
+    expect(analysis.status).toBe("READY");
     const start = byName.get("startSlabAnalysis")!;
     expect(start.backendResource).toEqual(["edge:analyze-slab"]);
-    expect(start.status).toBe("PROPOSED_CONTRACT_CORRECTION");
+    expect(start.status).toBe("READY");
   });
 
   it("carries a version string that separates merged from proposed migrations", () => {
     expect(CONTRACT_VERSION).toMatch(/^\d+\.\d+\.\d+-merged-[0-9a-f]{8}-m\d+-proposed-m\d+$/);
-    expect(CONTRACT_VERSION).toBe("1.3.0-merged-d8088f2a-m67-proposed-m68");
+    expect(CONTRACT_VERSION).toBe("1.3.0-merged-72e6e58d-m69-proposed-m69");
     // The old form attached migration 68 to the merged commit.
     expect(CONTRACT_VERSION).not.toBe("1.3.0-d8088f2a-m68");
     expect(proposedState.proposedContractVersion).toBe(CONTRACT_VERSION);
@@ -198,29 +198,32 @@ describe("analysis contract", () => {
     const finalMigration = proposedState.mergedFinalMigration;
     const proposedMigrationCount = proposedState.proposedMigrationCount;
     const proposedFinalMigration = proposedState.proposedMigration;
-    expect(p.baseCommitInspected).toBe("d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271");
-    expect(p.mergedMainCommit).toBe("d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271");
-    expect(migrationCount).toBe(67);
-    expect(finalMigration).toBe("20260906000000_account_deletion");
-    expect(proposedMigrationCount).toBe(68);
-    expect(proposedFinalMigration).toBe("20260907000000_save_confirmed_slab_from_analysis");
-    // The review branch now exists on the remote, so the branch commit is
-    // recorded. Merge and deployment remain null: pushing a draft PR is not
-    // merging and is not deploying.
+    expect(p.baseCommitInspected).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
+    expect(p.mergedMainCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
+    expect(migrationCount).toBe(69);
+    expect(finalMigration).toBe("20260908000000_slab_permission_model");
+    // RELEASED: the proposed layer is EMPTY (all merged), so the proposed facts
+    // equal the merged facts — this is a first-class fully-merged state, not a
+    // fake pending migration.
+    expect(proposedMigrationCount).toBe(69);
+    expect(proposedFinalMigration).toBe("20260908000000_slab_permission_model");
+    // The work is merged (72e6e58) and deployed to production; verification passed.
     expect(p.proposedBranchCommit).toMatch(/^[0-9a-f]{40}$/);
-    expect(p.mergeState).toBe("proposed-unmerged");
-    expect(p.mergeCommit).toBeNull();
-    expect(p.deploymentState).toBe("not-deployed");
-    expect(p.deployedCommit).toBeNull();
-    expect(p.deployedAt).toBeNull();
-    expect(p.liveVerificationState).toBe("not-run-staging-verification-required");
-    expect(p.stagingVerifiedAt).toBeNull();
+    expect(p.mergeState).toBe("merged");
+    expect(p.mergeCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
+    expect(p.deploymentState).toBe("deployed");
+    expect(p.deployedCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
+    expect(p.deployedAt).toBe("2026-07-30T00:00:00Z");
+    expect(p.liveVerificationState).toBe("passed-production");
+    expect(p.stagingVerifiedAt).toBe("2026-07-30T00:00:00Z");
   });
 
-  it("declares no operation READY that depends on the unmerged branch", () => {
+  it("declares the merged + deployed atomic-save operation READY", () => {
+    // The branch is merged (72e6e58) and the RPC is live in production, so the
+    // operation that depends on it is now READY rather than gated.
     for (const op of OPERATIONS) {
       if (op.backendResource.includes("rpc:save_confirmed_slab_from_analysis")) {
-        expect(op.status).not.toBe("READY");
+        expect(op.status).toBe("READY");
       }
     }
   });

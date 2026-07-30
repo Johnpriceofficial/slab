@@ -1,0 +1,16 @@
+{
+  "priorContractVersion": "1.3.0-merged-d8088f2a-m67-proposed-m68 (committed capabilities were even older: 1.1.0-ba3953fd-m65)",
+  "finalContractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69",
+  "sourceCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "migrationCount": 69,
+  "migrationTip": "20260908000000_slab_permission_model",
+  "lifecycle": {"mergeState": "merged", "mergeCommit": "72e6e58", "deploymentState": "deployed", "deployedCommit": "72e6e58", "liveVerificationState": "passed-production"},
+  "productionFunctionVersions": {"analyze-slab": 87},
+  "operationStates": {"saveConfirmedSlabFromAnalysis": "READY", "correctSlabIdentification/updateInventoryItem": "READY (rpc:correct_slab_identification)", "unarchiveSlab": "READY (rpc:unarchive_slab)", "startSlabAnalysis": "READY (edge:analyze-slab v87)"},
+  "operationStateEvidence": "live production: authenticated-EXECUTE only (anon/public denied), SECURITY DEFINER + search_path pinned, auth.uid()-derived identity (save+correct reference owner_id), archive/unarchive raise NOT_AUTHORIZED via owner-check; analyze-slab v87 verify_jwt=true, active-customer allowed / suspended denied / direct writes denied.",
+  "artifactHashes": {"canonical_backend_capabilities_json_sha256": "33b0c791b1425e00975c131e4fbb71822ab8aa69c4b98d3d88e50c2514fcec60", "proposed_backend_capabilities_json_sha256": "f54229b1e535131cda85d8eac235c8fb906405e85ceffe645e6aff58218cf932", "backend_operations_ts_sha256": "25c723d65510501e5b49bc8634b59fe1109e3a2843c5ff687ab1466db664b7a9"},
+  "deterministicRegeneration": "PASS — two consecutive canonical generations produced identical sha256 (33b0c791...)",
+  "validator": "node scripts/validate-contracts.mjs -> OK, 36 operations, version 1.3.0-merged-72e6e58d-m69-proposed-m69",
+  "tests": "src/test/analyze/analysis-contract.test.ts 31/31 pass; full backend vitest 1441 pass / 162 skipped; the single non-pass is a pre-existing local pg-devDependency import in the env-gated atomic-confirmed-save integration test (identical on origin/main; resolved by npm ci in CI).",
+  "generatorChange": "released (fully-merged) state made first-class: proposedMigrationCount==migrationCount is valid only when promoted (empty pending layer); canonical mode publishes formerly-gated ops once released. No fake proposed layer preserved."
+}
