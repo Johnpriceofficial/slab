@@ -124,6 +124,14 @@ keep RLS-gated `SELECT`/DML. Draft migration `20260909000000_least_privilege_aut
 in **PR #94** (draft; apply after F4). Verify on staging that the admin UI still edits
 `slab_admins` and customers still read their own `user_roles` row.
 
+**Open decision (stricter option):** does the admin UI edit the admin list via direct
+`authenticated` DML, or via a service-role/edge path? If the latter, `authenticated`
+`INSERT/UPDATE/DELETE` on `slab_admins` can *also* be revoked as pure defence-in-depth
+(RLS already blocks non-admins). Confirm the admin UI's write path on staging first;
+PR #94 keeps DML by default so it cannot break the admin UI — tighten only if verified
+unused. This also interacts with F5: if `slab_admins` is deprecated in favour of a single
+canonical admin source, its client DML grant can be dropped outright.
+
 ### G2 — hosted DB tests in the release gate (P1) — OWNER (CI)
 Add a Postgres-service job that runs `npm run test:db:backend-patches` and add it to
 `release-gate.needs` so the highest-risk DB fixes can't regress silently.

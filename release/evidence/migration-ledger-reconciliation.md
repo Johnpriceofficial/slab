@@ -47,27 +47,42 @@ future migrations can't be cleanly pushed until the ledger is reconciled.
 
 ## Recommended reconciliation — non-destructive, OWNER-applied
 
-> Do **not** hand-insert fake rows or re-run applied migrations. Use the CLI's
-> repair mechanism so the ledger reflects reality.
+> Do **not** hand-insert fake rows, re-run applied migrations, or run `repair`
+> against production blind. Rehearse on staging first, then use the CLI's repair
+> mechanism so the ledger reflects reality.
 
+0. **Rehearse on an isolated staging DB first (never repair prod blind).** Confirm
+   the diagnosis before touching anything:
+   ```bash
+   supabase migration list        # local vs remote — see exactly which are unrecorded
+   supabase db diff               # schema drift: expect NONE for 20260905/20260907/20260908 (already applied)
+   supabase db push --dry-run     # what a push WOULD do — must not propose re-creating existing objects
+   ```
+   Interpretation: if `db diff` shows the `20260905/907/908` objects already present
+   (it should), they are safe to mark applied. If the dry run wants to **create**
+   `20260906` objects, that migration is genuinely unapplied — see step 2.
 1. **Mark the applied-but-unrecorded / timestamp-renamed canonical versions as applied**
-   (they are already in the schema — repair only records them):
+   (verified present in the classification table — repair only records them):
    ```bash
    supabase migration repair --status applied 20260905000000
    supabase migration repair --status applied 20260907000000
    supabase migration repair --status applied 20260908000000
    ```
-   Optionally also mark the two out-of-band rows reverted so the ledger stops
-   carrying duplicate entries for the same objects (verify first):
+   Optionally mark the two out-of-band rows reverted so the ledger stops carrying
+   duplicate entries for the same objects (verify with `migration list` first):
    ```bash
    supabase migration repair --status reverted 20260729131106 20260729131134
    ```
-2. **Decide `20260906_account_deletion`:** it is a non-launch feature and is not
-   applied. Either apply it deliberately on staging → prod, or move the file out of
-   the canonical `main` chain until the account-deletion feature is scheduled. Do
-   not leave it as a silent gap.
-3. **Re-run** `supabase migration list` (local vs remote) until they match, then
-   confirm branch status leaves `MIGRATIONS_FAILED`.
+2. **`20260906_account_deletion` — do NOT mark it applied.** Its object
+   `purge_customer_account_data` is confirmed **absent** in production, so
+   `repair --status applied 20260906000000` would lie to the ledger and hide a
+   missing function. Instead either (a) apply it deliberately on staging → prod (it
+   is a non-launch account-deletion feature), or (b) move the file out of the
+   canonical `main` chain until the feature is scheduled. Never mark it applied while
+   `db diff` still wants to create its objects.
+3. **Re-verify on staging** (`supabase migration list` → local == remote; branch
+   status leaves `MIGRATIONS_FAILED`), then repeat the exact same sequence against
+   production.
 4. Only after the ledger matches, apply later migrations (e.g.
    `20260909000000_least_privilege_authz_tables.sql` in PR #94).
 
