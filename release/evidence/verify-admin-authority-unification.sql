@@ -2,16 +2,20 @@
 --
 -- COVERAGE (be exact):
 --   * Section 1 (A-H): executable READ-ONLY assertions — no INSERT/UPDATE/DELETE.
---   * Section 2 (K):   executable role/JWT-context checks using transaction-local
---                      SET LOCAL ROLE + request.jwt.claims. No persistent data change.
---                      Degrades to a NOTICE (run the manual steps) if the session
---                      cannot SET ROLE in this environment.
+--   * Section 2 (K):   MANDATORY, FAIL-CLOSED executable role/JWT-context checks using
+--                      transaction-local SET LOCAL ROLE + request.jwt.claims (no
+--                      persistent change). If the session cannot switch roles / set
+--                      claims, or the required administrator/customer fixtures are
+--                      missing, the script RAISES and FAILS. It NEVER skips a
+--                      security-context test — a test that did not run must not pass.
 --   * Section 3 (J):   the unexpected app_metadata-only-admin ABORT test is a
 --                      MANDATORY manual, rollback-only / disposable-staging scenario
---                      (it is mutating and is intentionally NOT automated here).
+--                      (it mutates and is intentionally NOT automated here); the
+--                      staging report must record its execution + outcome (see below).
 --
 -- Run against an ISOLATED STAGING DB, AFTER applying the migration, as a
--- service/superuser session. Failed assertions RAISE and abort. No emails/secrets.
+-- service/superuser session THAT CAN SET ROLE. Failed assertions RAISE and abort.
+-- No emails/secrets.
 
 \set ON_ERROR_STOP on
 
@@ -51,9 +55,8 @@ begin
      and not exists (select 1 from public.user_roles ur where ur.user_id=u.id and ur.role='administrator');
   if v_n <> 0 then raise exception 'FAIL(E): % non-canonical user(s) resolve is_admin()=true', v_n; end if;
 
-  -- (F) self-scoped helper EXECUTE grants. PUBLIC is checked via
-  --     information_schema.routine_privileges (grantee='PUBLIC'); anon/authenticated are
-  --     real roles checked with has_function_privilege().
+  -- (F) self-scoped helper EXECUTE grants. PUBLIC via information_schema.routine_privileges
+  --     (grantee='PUBLIC'); anon/authenticated are real roles via has_function_privilege().
   if exists (
     select 1 from information_schema.routine_privileges
      where routine_schema='public' and routine_name='is_current_user_admin'
@@ -80,59 +83,75 @@ begin
   raise notice 'PASS: read-only assertions A-H';
 end $$;
 
--- ==================== Section 2: K — executable role/JWT context ====================
--- Uses transaction-local SET LOCAL ROLE + request.jwt.claims; reverts automatically at
--- statement end (autocommit) and changes no persistent data. A wrong RESULT fails; an
--- environment that cannot SET ROLE degrades to a NOTICE pointing at the manual steps.
+-- ============= Section 2: K — MANDATORY, FAIL-CLOSED role/JWT context =============
+-- Transaction-local SET LOCAL ROLE + request.jwt.claims (no persistent change; settings
+-- revert at statement end). Fail-closed: missing role-switch capability OR missing
+-- admin/customer fixtures RAISE — the security-context tests are never skipped.
 do $$
 declare v_admin uuid; v_customer uuid; v_res boolean;
 begin
-  select ur.user_id into v_admin from public.user_roles ur where ur.role='administrator' limit 1;
-  select u.id into v_customer from auth.users u
-    where not exists (select 1 from public.user_roles ur where ur.user_id=u.id and ur.role='administrator')
-    limit 1;
+  -- (K0) fixtures REQUIRED — never silently skip
+  select ur.user_id into v_admin
+    from public.user_roles ur where ur.role='administrator' limit 1;
+  if v_admin is null then
+    raise exception 'FAIL(K-fixture): no canonical administrator (user_roles administrator) exists to test';
+  end if;
+  select u.id into v_customer
+    from auth.users u
+   where not exists (select 1 from public.user_roles ur where ur.user_id=u.id and ur.role='administrator')
+   limit 1;
+  if v_customer is null then
+    raise exception 'FAIL(K-fixture): no non-administrator customer exists to test';
+  end if;
 
-  -- anon must be DENIED execute on the self-scoped helper
+  -- (K1) capability probe — if the session cannot switch roles / set jwt claims, HARD FAIL.
   begin
-    set local role anon;
-  exception when insufficient_privilege then
-    reset role;
-    raise notice 'K SKIPPED (session cannot SET ROLE anon): run the manual role/JWT scenarios below';
-    return;
+    set local role anon;          reset role;
+    set local role authenticated; reset role;
+    perform set_config('request.jwt.claims', '{}', true);
+    perform set_config('request.jwt.claims', '',  true);
+  exception when others then
+    raise exception 'FAIL(K-env): this session cannot SET LOCAL ROLE / set request.jwt.claims (%). Run this gate as a role that can (service/superuser); a security-context test must not be skipped.', sqlerrm;
   end;
+
+  -- (K2) anon must be DENIED execute on the self-scoped helper
+  set local role anon;
   begin
     perform public.is_current_user_admin();
     reset role;
     raise exception 'FAIL(K-anon): anon executed is_current_user_admin()';
-  exception when insufficient_privilege then
-    reset role;  -- expected: EXECUTE denied
+  exception
+    when insufficient_privilege then
+      reset role;  -- expected: EXECUTE denied (capability already proven in K1)
   end;
 
-  -- authenticated + administrator JWT -> true
-  if v_admin is not null then
-    perform set_config('request.jwt.claims', json_build_object('sub', v_admin, 'role','authenticated')::text, true);
-    set local role authenticated;
-    v_res := public.is_current_user_admin();
-    reset role;
-    if v_res is distinct from true then raise exception 'FAIL(K-admin): is_current_user_admin() = % (want true)', v_res; end if;
+  -- (K3) authenticated + administrator JWT -> true
+  perform set_config('request.jwt.claims', json_build_object('sub', v_admin, 'role', 'authenticated')::text, true);
+  set local role authenticated;
+  v_res := public.is_current_user_admin();
+  reset role;
+  if v_res is distinct from true then
+    raise exception 'FAIL(K-admin): administrator JWT is_current_user_admin() = % (want true)', v_res;
   end if;
 
-  -- authenticated + customer JWT -> false
-  if v_customer is not null then
-    perform set_config('request.jwt.claims', json_build_object('sub', v_customer, 'role','authenticated')::text, true);
-    set local role authenticated;
-    v_res := public.is_current_user_admin();
-    reset role;
-    if v_res is distinct from false then raise exception 'FAIL(K-customer): is_current_user_admin() = % (want false)', v_res; end if;
+  -- (K4) authenticated + customer JWT -> false
+  perform set_config('request.jwt.claims', json_build_object('sub', v_customer, 'role', 'authenticated')::text, true);
+  set local role authenticated;
+  v_res := public.is_current_user_admin();
+  reset role;
+  if v_res is distinct from false then
+    raise exception 'FAIL(K-customer): customer JWT is_current_user_admin() = % (want false)', v_res;
   end if;
 
   perform set_config('request.jwt.claims', '', true);
-  raise notice 'PASS(K): anon denied; administrator JWT -> true; customer JWT -> false';
+  raise notice 'PASS(K): fixtures present; anon denied; administrator JWT -> true; customer JWT -> false';
 end $$;
 
 -- ==================== Section 3: J — MANDATORY manual abort test ====================
 -- The unexpected app_metadata-only-admin ABORT is mutating and is NOT automated here.
--- On a DISPOSABLE staging snapshot:
+-- On a DISPOSABLE staging snapshot (or a transaction you ROLL BACK):
 --   1. Flag a spare non-admin user (not in user_roles/slab_admins) as app_metadata admin.
 --   2. Re-apply the migration; it MUST abort with message 'ADMIN_UNIFY_ABORT: ...'.
---   3. Discard the snapshot (or run inside a transaction you ROLL BACK).
+--   3. Roll back / discard the snapshot.
+-- The staging report MUST record: scenario executed; ADMIN_UNIFY_ABORT observed;
+-- transaction/snapshot discarded; no persistent account metadata retained.
