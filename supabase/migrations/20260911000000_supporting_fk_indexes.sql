@@ -1,8 +1,12 @@
--- 20260911000000_covering_indexes_active_fks.sql
+-- 20260911000000_supporting_fk_indexes.sql
 --
--- G6: covering indexes for unindexed foreign keys on the ACTIVE customer /
--- pricing / analysis path. Purely performance; no authorization or behaviour
--- change. See release/evidence/covering-indexes-plan.md.
+-- G6: SUPPORTING INDEXES for unindexed foreign keys on the ACTIVE customer /
+-- pricing / analysis path. Purely performance; no authorization or behaviour change.
+-- See release/evidence/supporting-fk-indexes-plan.md.
+--
+-- TERMINOLOGY: these are *supporting* indexes for foreign keys (a plain btree on the
+-- FK column), NOT "covering" indexes. A covering index would add INCLUDE columns to
+-- satisfy a query from the index alone; none of these do.
 --
 -- SCOPE DECISION: the advisor reports 28 unindexed FKs. This migration adds 17 —
 -- those on tables that grow with customer activity and are joined or filtered, or
@@ -11,11 +15,14 @@
 -- ebay_notifications) and are intentionally DEFERRED until those features are active
 -- (see the plan doc) — indexing empty tables is premature.
 --
--- LOCK / DEPLOY: all target tables are currently tiny (0–26 rows), so a plain
--- CREATE INDEX takes a brief ACCESS EXCLUSIVE lock for milliseconds. If any target
--- is large at apply time, create THAT index out-of-band with
--- `CREATE INDEX CONCURRENTLY` (cannot run inside a migration transaction) instead.
--- IF NOT EXISTS makes this migration idempotent and re-runnable.
+-- LOCK / DEPLOY: a plain CREATE INDEX takes a SHARE lock on the table — concurrent
+-- READS continue, but WRITES are blocked for the duration of the build. On the
+-- currently-tiny targets (0-26 rows) that is a few milliseconds. CREATE INDEX
+-- CONCURRENTLY avoids the write block but has different restrictions and CANNOT run
+-- inside a migration transaction (see the STOP CONDITION in the plan doc). IF NOT
+-- EXISTS only checks the index NAME, not its definition — use the executable
+-- verification in release/evidence/verify-supporting-fk-indexes.sql to prove each
+-- index has the expected definition.
 --
 -- ORDERING: apply after the F4 migration-ledger reconciliation. Draft — not applied
 -- to any environment; no production change.
