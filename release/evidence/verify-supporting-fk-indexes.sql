@@ -1,18 +1,25 @@
 -- Executable verification for 20260911000000_supporting_fk_indexes.sql
 --
--- Run against staging AFTER applying the migration. Asserts each of the 17 expected
--- indexes EXISTS and has the expected DEFINITION via pg_get_indexdef() — because
--- IF NOT EXISTS only checks the name, a same-name index with a different definition
--- would otherwise pass silently. Any failure RAISEs and aborts (fails the gate).
--- Read-only.
+-- Run against staging AFTER applying the migration. For each of the 17 expected
+-- (table, FK column) targets this asserts:
+--   1. the expected NAMED index exists and pg_get_indexdef() matches the expected
+--      table + leading FK column (IF NOT EXISTS only checks the name, so a same-name
+--      index with a different definition would otherwise pass silently);
+--   2. EXACTLY ONE equivalent supporting index exists (valid, ready, non-partial,
+--      non-expression btree whose FIRST key column is the FK column) — this catches a
+--      differently-NAMED redundant index and a missing index without relying on the
+--      advisor. 0 = missing, >1 = redundant; both FAIL.
+-- Any failure RAISEs and aborts (fails the gate). Read-only.
 
 \set ON_ERROR_STOP on
 
 do $$
 declare
-  r      record;
-  v_def  text;
-  v_fail integer := 0;
+  r        record;
+  v_def    text;
+  v_attnum smallint;
+  v_equiv  integer;
+  v_fail   integer := 0;
 begin
   for r in
     with expected(idxname, tbl, col) as (values
@@ -35,33 +42,61 @@ begin
       ('pricecharting_marketplace_settings_updated_by_idx','pricecharting_marketplace_settings','updated_by')
     ) select * from expected
   loop
+    -- resolve the FK column's attnum (must exist and not be dropped)
+    select a.attnum into v_attnum
+      from pg_attribute a
+     where a.attrelid = to_regclass('public.'||r.tbl)
+       and a.attname = r.col and not a.attisdropped;
+    if v_attnum is null then
+      raise warning 'MISSING COLUMN: public.%.% does not exist', r.tbl, r.col;
+      v_fail := v_fail + 1; continue;
+    end if;
+
+    -- 1) expected NAMED index exists with the expected definition
     if to_regclass('public.'||r.idxname) is null then
       raise warning 'MISSING: index public.% does not exist', r.idxname;
       v_fail := v_fail + 1;
-      continue;
+    else
+      v_def := pg_get_indexdef((to_regclass('public.'||r.idxname))::oid);
+      if v_def !~ ('ON public\.'||r.tbl||' USING btree \('||r.col||'\y') then
+        raise warning 'WRONG DEF: % -> %', r.idxname, v_def;
+        v_fail := v_fail + 1;
+      end if;
     end if;
-    v_def := pg_get_indexdef((to_regclass('public.'||r.idxname))::oid);
-    -- Definition must be a btree on the expected table leading with the expected FK
-    -- column. A same-name index on a different table/column/method fails this.
-    if v_def !~ ('ON public\.'||r.tbl||' USING btree \('||r.col||'\b') then
-      raise warning 'WRONG DEF: % -> %', r.idxname, v_def;
+
+    -- 2) exactly ONE equivalent supporting index (any name) leads with the FK column
+    select count(*) into v_equiv
+      from pg_index i
+      join pg_class ic on ic.oid = i.indexrelid
+      join pg_am    am on am.oid = ic.relam
+     where i.indrelid = to_regclass('public.'||r.tbl)
+       and am.amname = 'btree'
+       and i.indisvalid and i.indisready
+       and i.indpred is null      -- exclude partial indexes
+       and i.indexprs is null     -- exclude expression indexes
+       and i.indkey[0] = v_attnum; -- FK column is the FIRST key column
+    if v_equiv = 0 then
+      raise warning 'NO EQUIVALENT INDEX: public.%(%) has no valid/ready btree leading with the FK column', r.tbl, r.col;
+      v_fail := v_fail + 1;
+    elsif v_equiv > 1 then
+      raise warning 'REDUNDANT: public.%(%) has % equivalent supporting indexes (expected exactly 1)', r.tbl, r.col, v_equiv;
       v_fail := v_fail + 1;
     end if;
   end loop;
 
   if v_fail > 0 then
-    raise exception 'FAIL: % of 17 supporting-index assertion(s) failed', v_fail;
+    raise exception 'FAIL: % supporting-index assertion(s) failed', v_fail;
   end if;
-  raise notice 'PASS: all 17 supporting FK indexes exist with the expected table + leading column';
+  raise notice 'PASS: 17 supporting FK indexes — each present, correctly defined, and exactly one equivalent index';
 end $$;
 
--- (deferred) The 11 dormant-table FKs should STILL be reported unindexed by the
--- advisor after this migration (they are intentionally not added here):
+-- (deferred) The 11 dormant-table FKs should STILL be reported unindexed by the advisor
+-- after this migration (intentionally not added here):
 --   builder_approvals(decided_by, requested_by), builder_audit_events(actor),
 --   builder_runs(requested_by), builder_tool_calls(acting_user, approval_id, step_id),
 --   cgc_population_cards(population_set_id), cgc_population_import_runs(requested_by, set_id),
 --   ebay_notifications(ebay_account_id).
 --
--- (manual) Re-run the Supabase performance advisor on staging and confirm exactly
--- the 17 above cleared and only the 11 deferred remain — this also proves none of the
--- 17 duplicated a pre-existing (redundant) index.
+-- (secondary, manual) Re-run the Supabase performance advisor on staging to confirm the
+-- 17 cleared and only the 11 deferred remain. This is confirmation, not the sole
+-- redundancy proof — the exactly-one-equivalent-index assertion above is authoritative.
