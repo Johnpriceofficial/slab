@@ -4,42 +4,71 @@
 -- canonical administrator authority. Compatibility-preserving; no legacy source
 -- is dropped here. See release/evidence/admin-authority-unification-plan.md.
 --
--- DECISION (owner): Option B — user_roles is canonical; auth app_metadata is
--- demoted to a non-authoritative compatibility cache / UI hint; slab_admins is
--- staged for deprecation.
+-- DECISION (owner): Option B — user_roles is canonical; auth app_metadata is a
+-- non-authoritative compatibility cache / UI hint; slab_admins staged for deprecation.
+--
+-- BACKFILL POLICY (hardened): app_metadata is NOT trusted as a backfill source.
+-- The canonical set is seeded ONLY from (existing user_roles administrators) ∪
+-- (the explicit slab_admins allowlist). app_metadata is used solely as a
+-- CONSISTENCY GATE: if any account is flagged admin in app_metadata but is not
+-- represented in either trusted source, the migration ABORTS for manual owner
+-- review rather than silently laundering unreviewed JWT metadata into canonical
+-- administrator status.
 --
 -- ORDERING: apply ONLY AFTER the migration-ledger reconciliation (F4). This file
 -- has NOT been applied to any environment. Draft PR — do not merge/apply.
+-- No emails or secret data are stored in this migration.
 --
--- WHY THIS IS SAFE / COMPLETE FOR THE DB LAYER:
---   * The deployed schema was audited: public.is_admin(uuid) is the ONLY function
---     that reads raw_app_meta_data. 44 RLS policies call is_admin(); 8 call
---     has_role() (already user_roles-backed). No function reads slab_admins; no
---     runtime code reads has_role/slab_admins. Every Edge Function checks admin via
---     isCallerAdmin() -> is_admin() (service role). The frontend gate calls
---     is_admin() by RPC.
---   * Therefore repointing is_admin() at user_roles + backfilling every current
---     admin into user_roles makes ALL 52 admin policies + every RPC + every Edge
---     guard consistent from ONE source, with no other DB object changed.
+-- DEPLOYED-SCHEMA BASIS: is_admin(uuid) is the ONLY function reading app_metadata;
+-- 44 RLS policies call is_admin(), 8 call has_role() (already user_roles-backed);
+-- no function/runtime code reads slab_admins; every Edge guard and the frontend
+-- funnel through is_admin(). Repointing is_admin() at user_roles + this backfill
+-- makes all 52 admin policies consistent from one source, nothing else changed.
 
 begin;
 
--- 1) BACKFILL — every current administrator (by any legacy source) becomes a
---    user_roles('administrator') row. Idempotent (unique on user_id, role).
---    Current state at authoring time: app_metadata admins = {owner, test-admin};
---    slab_admins = {owner}; user_roles administrators = {test-admin}. After this:
---    user_roles administrators = {owner, test-admin}.
+-- 1) Existing user_roles('administrator') rows are preserved untouched (this
+--    migration only inserts; it never updates or deletes user_roles).
+
+-- 2) Backfill the EXPLICIT admin allowlist (public.slab_admins) into user_roles.
+--    Idempotent via the (user_id, role) unique key. app_metadata is intentionally
+--    NOT a source here.
 insert into public.user_roles (user_id, role)
-select distinct u.id, 'administrator'::public.app_role
-  from auth.users u
- where coalesce((u.raw_app_meta_data->>'graded_card_value_admin')::boolean, false)
-    or exists (select 1 from public.slab_admins sa where sa.user_id = u.id)
+select distinct sa.user_id, 'administrator'::public.app_role
+  from public.slab_admins sa
+ where sa.user_id is not null
 on conflict (user_id, role) do nothing;
 
--- 2) CANONICAL SOURCE — is_admin() now derives authority from user_roles only.
---    Signature, volatility, SECURITY DEFINER, search_path and EXECUTE grants are
---    unchanged, so all 44 is_admin RLS policies, every RPC, and every Edge guard
---    keep working and are now user_roles-sourced. app_metadata is no longer read.
+-- 3) CONSISTENCY GATE (runs BEFORE is_admin() is repointed). app_metadata is not an
+--    authorization input: any account flagged admin there but absent from both
+--    user_roles('administrator') and slab_admins is unexpected (stale or accidental
+--    elevation) and aborts the whole transaction for manual review.
+do $$
+declare
+  v_unexpected integer;
+begin
+  select count(*)
+    into v_unexpected
+    from auth.users u
+   where coalesce((u.raw_app_meta_data->>'graded_card_value_admin')::boolean, false)
+     and not exists (
+       select 1 from public.user_roles ur
+        where ur.user_id = u.id and ur.role = 'administrator')
+     and not exists (
+       select 1 from public.slab_admins sa
+        where sa.user_id = u.id);
+  if v_unexpected > 0 then
+    raise exception
+      'ADMIN_UNIFY_ABORT: % app_metadata administrator account(s) are not represented in user_roles or slab_admins. Add legitimate admins to slab_admins (or user_roles) after review, then re-run; app_metadata is not auto-promoted.',
+      v_unexpected
+      using errcode = 'raise_exception';
+  end if;
+end $$;
+
+-- 4) CANONICAL SOURCE — is_admin() now derives from user_roles only. Signature,
+--    volatility, SECURITY DEFINER, search_path and EXECUTE grants are unchanged, so
+--    all 44 is_admin RLS policies, every RPC, and every Edge guard keep working and
+--    are now user_roles-sourced. app_metadata is no longer read for authorization.
 create or replace function public.is_admin(_user_id uuid)
   returns boolean
   language sql
@@ -55,9 +84,10 @@ as $$
   );
 $$;
 
--- 3) SELF-SCOPED helpers (G4) — clients must never pass an arbitrary user_id.
---    The frontend admin gate and any browser role check move to these; they read
---    only the caller's own identity, removing the role-enumeration surface.
+-- 5) SELF-SCOPED helpers (G4, PARTIAL) — clients must never pass an arbitrary
+--    user_id. These read only the caller's own identity. Migrating callers to them
+--    and revoking the arbitrary-user variants is explicitly STAGED (see the plan);
+--    role enumeration is NOT fully closed by this migration.
 create or replace function public.is_current_user_admin()
   returns boolean
   language sql
@@ -85,13 +115,11 @@ grant execute on function public.current_user_has_role(public.app_role) to authe
 
 commit;
 
--- NOT done here (staged — later migrations, after callers move to the self-scoped
--- helpers and the ledger/behaviour is proven on staging):
---   * REVOKE arbitrary-user is_admin(uuid)/has_role(uuid,app_role) EXECUTE from
---     authenticated (blocked until all 52 policies + the frontend use the
---     self-scoped variants, else is_admin(auth.uid()) in RLS loses EXECUTE).
---   * migrate the frontend AuthProvider from rpc('is_admin',{_user_id}) to
---     rpc('is_current_user_admin') (slab-scribe-pro repo).
---   * deprecate then drop public.slab_admins (migrate its admin-list writes to
---     scoped RPCs / trusted server ops, then revoke authenticated DML, then drop).
---   * collapse the redundant app_role 'admin' vs 'administrator' values.
+-- STAGED (later migrations; NOT done here — see the plan doc):
+--   * migrate the 44 is_admin RLS policies to is_current_user_admin() (where they
+--     pass auth.uid()), and the frontend AuthProvider to rpc('is_current_user_admin').
+--   * ONLY THEN revoke arbitrary-user is_admin(uuid)/has_role(uuid,app_role) EXECUTE
+--     from authenticated + anon (keep service_role) — this is what actually closes
+--     role enumeration (G4). It CANNOT be done here or RLS is_admin(auth.uid()) breaks.
+--   * deprecate then drop public.slab_admins (route writes through scoped RPCs first).
+--   * collapse redundant app_role 'admin' vs 'administrator'.

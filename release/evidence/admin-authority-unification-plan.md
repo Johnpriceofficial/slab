@@ -40,17 +40,32 @@ the split — the owner passes the 44 `is_admin` policies but fails the 8 `has_r
 
 ## Migration 1 (this PR) — `20260910000000_admin_authority_unification.sql`
 
-1. **Backfill** every current admin (app_metadata ∪ `slab_admins`) into
-   `user_roles('administrator')` — idempotent. Result: `user_roles` administrators =
-   {owner, test-admin}.
-2. **Repoint `is_admin()`** to read `user_roles` only (signature/grants unchanged →
-   all 52 policies + RPCs + Edge guards now user_roles-sourced; app_metadata unread).
-3. **Add self-scoped helpers** `is_current_user_admin()` and
-   `current_user_has_role(app_role)` (EXECUTE to `authenticated` only) so clients never
-   pass an arbitrary `user_id`.
+1. **Backfill the explicit allowlist only.** Existing `user_roles('administrator')`
+   rows are preserved untouched; `slab_admins` entries are backfilled into
+   `user_roles('administrator')` (idempotent). **`app_metadata` is NOT a backfill
+   source** — trusting it would re-launder unreviewed JWT metadata into canonical admin.
+2. **Consistency gate (fail-safe).** BEFORE repointing `is_admin()`, the migration
+   counts any account flagged admin in `app_metadata` but absent from BOTH
+   `user_roles` and `slab_admins`, and **`RAISE`s / aborts the whole transaction**
+   (`ADMIN_UNIFY_ABORT`) for manual owner review if any exist. With current data this
+   passes and yields `user_roles` administrators = {owner, test-admin}.
+3. **Repoint `is_admin()`** to read `user_roles` only (signature/security/search_path/
+   grants unchanged → all 52 policies + RPCs + Edge guards now user_roles-sourced;
+   app_metadata unread for authorization).
+4. **Add self-scoped helpers** `is_current_user_admin()` and
+   `current_user_has_role(app_role)` (EXECUTE to `authenticated` only).
 
-After this migration the owner and test-admin are both authoritative via `user_roles`,
-and the eBay/`has_role` policies and the `is_admin` policies agree.
+Executable read-only verification: `release/evidence/verify-admin-authority-unification.sql`
+(asserts is_admin↔user_roles agreement, backfill completeness, gate held, canonical
+admins true / others false, helper grants, and the staged-invariant that arbitrary-user
+`is_admin(uuid)` EXECUTE is still present).
+
+> **G4 status: PARTIAL — role enumeration is NOT fully resolved by this migration.**
+> It adds the self-scoped helpers, but full mitigation requires, in later staged PRs:
+> (a) migrating the 44 `is_admin` RLS policies to `is_current_user_admin()`,
+> (b) moving the frontend `AuthProvider` to `rpc('is_current_user_admin')`, and
+> (c) only THEN revoking EXECUTE on arbitrary-user `is_admin(uuid)`/`has_role(uuid,app_role)`
+> from `authenticated`/`anon` (revoking earlier breaks `is_admin(auth.uid())` in RLS).
 
 ## Staged follow-up (later PRs — NOT in migration 1)
 
