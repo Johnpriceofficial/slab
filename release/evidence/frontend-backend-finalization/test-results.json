@@ -1,0 +1,57 @@
+{
+  "verification": "disposable-only; read-only production; no prod/staging/DNS/customer/marketplace change",
+  "environment": {
+    "canonical_repo": "Johnpriceofficial/slab",
+    "git_sha": "c65d438805a03e7c555a32337631b114b2e7ca69",
+    "disposable_pg_image": "postgres@sha256:a426e44bac0b759c95894d68e1a0ac03ecc20b619f498a91aae373bf06d8508d",
+    "disposable_pg_version": "17.10",
+    "production_pg_version": "17.6.1.141",
+    "supabase_cli": "2.109.1",
+    "migration_count": 69,
+    "first_migration": "20260709000000_slab_admin.sql",
+    "final_migration": "20260908000000_slab_permission_model.sql"
+  },
+  "test_A_clean_install": {
+    "result": "PASS",
+    "migrations_applied": 69,
+    "manual_interventions": 0,
+    "idempotency_ledger_reruns": 0,
+    "schema_properties": {
+      "security_definer_without_pinned_search_path": 0,
+      "public_tables": 49,
+      "public_tables_rls_on": 49,
+      "public_tables_without_rls": 0,
+      "private_tables": 10,
+      "private_tables_rls_on": 10,
+      "security_definer_functions": 60,
+      "policies": 50,
+      "foreign_keys": 88,
+      "triggers": 28
+    }
+  },
+  "test_B_production_shaped_upgrade": {
+    "result": "PASS",
+    "base_migrations_applied_through_20260904": 65,
+    "purge_fn_present_at_base": false,
+    "upgrade_migrations_20260905_to_20260908_applied": 4,
+    "purge_fn_present_after_upgrade": true,
+    "fidelity_caveat": "base uses canonical <=20260904 definitions; out-of-band prod objects (has_role/app_role/user_roles, drifted link/save_confirmed/list_pending bodies) are documented in the reconciliation, not modeled in the upgrade base."
+  },
+  "database_contract_tests": {
+    "administrator_authority": {
+      "result": "PASS",
+      "model": "is_admin(uuid) reads auth.users.raw_app_meta_data->>'graded_card_value_admin' (canonical/deployed app-metadata model)",
+      "checks": ["admin allowed", "normal customer denied", "unknown user denied (no auto-promotion)", "unauthenticated denied", "fail-closed default false"],
+      "note": "Unification to user_roles (draft PR #95) is NOT merged; production carries both app_metadata (is_admin) and has_role/user_roles — split authority."
+    },
+    "account_deletion": {
+      "result": "PASS",
+      "function": "purge_customer_account_data",
+      "checks": ["unauthenticated caller refused (AUTH_REQUIRED)", "authorized self-purge FK-safe (14 ON DELETE RESTRICT FKs)", "target app-data cleaned", "unrelated user + slab untouched", "storage cleanup enqueued to private.slab_storage_cleanup_queue", "auth identity NOT deleted by the purge (removed in a separate post-cleanup step)"],
+      "note": "purge_customer_account_data is ABSENT in production (see reconciliation); verified only on the disposable clean schema."
+    },
+    "grading_quota": {"result": "PASS", "verified_in": "prior PR #8 review session against disposable Postgres using slab-scribe-pro backend-patches (consume_grading_advice_quota)", "note": "NOT part of the slab backend; not present in production."},
+    "catalog_visibility": {"result": "PASS", "verified_in": "prior PR #8 review session", "note": "slab-scribe-pro backend-patch; not in the slab backend/production."},
+    "shared_rate_limiting": {"result": "PASS", "verified_in": "prior PR #8 review session (try_rate_limit_consume, advisory-lock, exactly one concurrent winner)", "note": "slab-scribe-pro backend-patch; not in the slab backend/production."}
+  }
+}

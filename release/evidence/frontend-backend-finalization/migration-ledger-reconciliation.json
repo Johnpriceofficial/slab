@@ -1,0 +1,83 @@
+{
+  "generated_by": "disposable read-only verification (no production write)",
+  "canonical_repo": "Johnpriceofficial/slab",
+  "canonical_sha": "c65d438805a03e7c555a32337631b114b2e7ca69",
+  "production_project": "rcbwemkfcefarqnlgrmv",
+  "production_ledger_tip": "20260904000000_slab_deletion_tombstones_rls",
+  "comparison_method": "normalized function-body md5 (regexp_replace(prosrc,'\\\\s+',' ')) + object existence; NOT filename",
+  "out_of_band_prod_entries": [
+    "20260729131106_save_confirmed_slab_from_analysis",
+    "20260729131134_slab_permission_model"
+  ],
+  "migrations": [
+    {
+      "version": "20260905000000",
+      "file": "20260905000000_analyze_slab_link_hardening.sql",
+      "sha256": "76cf8fccf8443d6cad9bc2eac94857bb1f0572ed7937d8f9f19848fe129ae4e5",
+      "purpose": "Harden public.link_ai_analysis_run (analysis->slab link) authorization/definition.",
+      "objects_expected": ["public.link_ai_analysis_run(uuid,uuid)"],
+      "prod_ledger_entry": null,
+      "objects_present_in_prod": ["public.link_ai_analysis_run"],
+      "definition_equivalence": "DIFFERENT (prod body md5 fecac02221e99d983302a6895ed05171 != canonical cea8c9ef8184b9bdaacc0aa1519a042e)",
+      "grants_rls_equivalence": "n/a (function)",
+      "status": "PARTIALLY_PRESENT",
+      "safe_repair_action": "Apply 20260905 on staging then production (updates link_ai_analysis_run to the hardened definition). CREATE OR REPLACE — no new object; low risk.",
+      "staging_rehearsal_required": true,
+      "production_command": "supabase migration up (after ledger reconciliation) — owner-gated",
+      "rollback_constraints": "CREATE OR REPLACE FUNCTION is not auto-reversible; keep the prior definition (prod current) to restore.",
+      "stop_conditions": ["definition diff must be reviewed to confirm the change is intended before apply"]
+    },
+    {
+      "version": "20260906000000",
+      "file": "20260906000000_account_deletion.sql",
+      "sha256": "2bb8091fdf4ffb46560a42ea826c1d636f4c231844efef7ae6e53ca41ccddbaa",
+      "purpose": "Customer account deletion: FK-safe app-data purge + storage-cleanup enqueue (purge_customer_account_data); RETURNS TABLE change to list_pending_slab_storage_cleanup.",
+      "objects_expected": ["public.purge_customer_account_data(uuid)", "public.list_pending_slab_storage_cleanup()", "private.slab_storage_cleanup_queue (used)"],
+      "prod_ledger_entry": null,
+      "objects_present_in_prod": ["public.list_pending_slab_storage_cleanup (DIFFERENT body)", "private.slab_storage_cleanup_queue (present)"],
+      "objects_absent_in_prod": ["public.purge_customer_account_data"],
+      "definition_equivalence": "purge_customer_account_data ABSENT; list_pending prod md5 ee13223df75e8d0bd73b57d64fc041bd != canonical fc3218f8a7f2c2300c171f3cb8274c54",
+      "status": "ABSENT",
+      "note": "Per rule: MUST NOT be marked applied/repaired-as-applied while purge_customer_account_data and its supporting behavior are absent.",
+      "safe_repair_action": "Apply 20260906 on staging then production (creates purge_customer_account_data; updates list_pending). Requires the storage-cleanup consumer to drain private.slab_storage_cleanup_queue.",
+      "staging_rehearsal_required": true,
+      "production_command": "supabase migration up — owner-gated; verify account-deletion end-to-end on staging first",
+      "rollback_constraints": "New function purge_customer_account_data can be dropped; list_pending body change needs the prior definition to restore.",
+      "stop_conditions": ["do not classify applied while purge_customer_account_data absent", "confirm no in-flight deletions before apply"]
+    },
+    {
+      "version": "20260907000000",
+      "file": "20260907000000_save_confirmed_slab_from_analysis.sql",
+      "sha256": "7ca6dba48ff4cfa98cbfc61a488d3ca7ae63073eab78f1aff7b12d975fd450c7",
+      "purpose": "Reconciled definition of save_confirmed_slab_from_analysis (atomic confirmed save).",
+      "objects_expected": ["public.save_confirmed_slab_from_analysis(uuid,jsonb,text,text)"],
+      "prod_ledger_entry": "20260729131106_save_confirmed_slab_from_analysis (out-of-band)",
+      "objects_present_in_prod": ["public.save_confirmed_slab_from_analysis (DIFFERENT body)"],
+      "definition_equivalence": "DIFFERENT (prod body md5 c5265afef8be92541174d80fa4db5e91 != canonical 536522911f020295c50537a0457e339a)",
+      "status": "PARTIALLY_PRESENT",
+      "note": "Same subject exists under out-of-band ledger id 131106, but the canonical (reconciled) definition is not applied.",
+      "safe_repair_action": "Diff prod vs canonical body; if canonical is the intended reconciled version, apply 20260907 (CREATE OR REPLACE) on staging then production. Reconcile the ledger id (131106 -> record 20260907) via supabase migration repair AFTER staging rehearsal.",
+      "staging_rehearsal_required": true,
+      "production_command": "supabase migration repair --status applied 20260907 ONLY after confirming definition equivalence; else apply then repair — owner-gated",
+      "rollback_constraints": "CREATE OR REPLACE; keep prior definition to restore.",
+      "stop_conditions": ["do not repair the ledger id to 20260907 until the body is confirmed equivalent OR the canonical body is applied"]
+    },
+    {
+      "version": "20260908000000",
+      "file": "20260908000000_slab_permission_model.sql",
+      "sha256": "b86bc59ae559648e89d52de22a24b2178416aebb0732c2e5d1366d38dcfef0da",
+      "purpose": "Slab permission model: correct_slab_identification + forbid_direct_slab_delete + guard_slab_protected_columns + slab_correction_events + owner/admin slabs policies.",
+      "objects_expected": ["public.correct_slab_identification", "public.forbid_direct_slab_delete", "public.guard_slab_protected_columns", "public.slab_correction_events", "policy slabs_owner_select", "policy slabs_admin_select"],
+      "prod_ledger_entry": "20260729131134_slab_permission_model (out-of-band)",
+      "objects_present_in_prod": ["all three functions (body-IDENTICAL)", "slab_correction_events (present)", "slabs_owner_select + slabs_admin_select (present)"],
+      "definition_equivalence": "EQUIVALENT: correct_slab_identification/forbid_direct_slab_delete/guard_slab_protected_columns body md5 identical prod==canonical",
+      "status": "EQUIVALENT_UNDER_DIFFERENT_LEDGER_ID",
+      "note": "The DECLARED objects are present and body-equivalent (applied out-of-band as 131134). HOWEVER production ALSO carries has_role(), app_role type, and public.user_roles, which the canonical 20260908 does NOT create — these are the split-administrator-authority artifacts targeted by draft PR #95 (unmerged). Extra objects, not canonical.",
+      "safe_repair_action": "Record the ledger id (repair 131134 -> 20260908) AFTER staging rehearsal confirms full object+policy equivalence. Do NOT re-apply (objects already present). Separately, admin-authority unification (has_role/app_role/user_roles vs is_admin/app_metadata) is draft PR #95, owner-gated.",
+      "staging_rehearsal_required": true,
+      "production_command": "supabase migration repair --status applied 20260908 (ledger-only; no object change) — owner-gated after equivalence confirmed",
+      "rollback_constraints": "Ledger repair is reversible (repair back). No object change performed.",
+      "stop_conditions": ["reconcile the extra has_role/app_role/user_roles authority split separately (PR #95); do not silently drop them"]
+    }
+  ]
+}
