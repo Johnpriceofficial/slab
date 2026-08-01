@@ -40,6 +40,12 @@ AS $$
   DELETE FROM public.rate_limit_hits WHERE created_at < now() - interval '1 day';
 $$;
 
+-- Server-maintenance only: prune must not be callable by anon/authenticated
+-- (default PUBLIC execute on a SECURITY DEFINER function is an exposure the
+-- Supabase advisor flags as anon_security_definer_function_executable).
+REVOKE ALL ON FUNCTION public.prune_rate_limit_hits() FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.prune_rate_limit_hits() TO service_role;
+
 -- ---- atomic consume function -------------------------------------------
 -- ==========================================================================
 -- Atomic rate-limit consume function
