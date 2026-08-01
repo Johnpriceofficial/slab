@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ??
@@ -91,6 +92,7 @@ suite("raw-card public inventory identifiers", () => {
   it("resolves R-codes and slab S-codes through the unified resolver as an admin", async () => {
     // Promote the owner to admin so resolve_inventory (ownership-scoped) returns rows.
     await service.auth.admin.updateUserById(ownerId, { app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, ownerId);
     const adminClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `raw-adm-${stamp}` } });
     await adminClient.auth.signInWithPassword({ email: `raw-owner+${stamp}@slabvault.test`, password: `Test-raw-${stamp}` });
 

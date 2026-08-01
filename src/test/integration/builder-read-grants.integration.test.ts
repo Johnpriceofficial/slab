@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Behavioral coverage for 20260903 builder read grants: authenticated holds
@@ -27,6 +28,7 @@ suite("builder read grants (SELECT-only for authenticated, anon fully revoked)",
     const adminEmail = `builder-rg-admin+${stamp}@slabvault.test`;
     const adminPassword = `Test-brg-a-${stamp}`;
     const { data: au } = await service.auth.admin.createUser({ email: adminEmail, password: adminPassword, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, au.user!.id);
     userIds.push(au.user!.id);
     await service.from("slab_admins").insert({ user_id: au.user!.id });
     adminClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `brg-admin-${stamp}` } });

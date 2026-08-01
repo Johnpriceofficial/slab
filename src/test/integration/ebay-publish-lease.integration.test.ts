@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Behavioral coverage for 20260820000000_ebay_publish_lease_private.sql against the
@@ -26,6 +27,7 @@ suite("eBay publish lease (private, single-flight, fenced)", () => {
     const email = `ebay-lease+${stamp}@slabvault.test`;
     const password = `Test-eblease-${stamp}`;
     const { data: u } = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, u.user!.id);
     userIds.push(u.user!.id);
     await service.from("slab_admins").insert({ user_id: u.user!.id });
     adminClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `eblease-admin-${stamp}` } });

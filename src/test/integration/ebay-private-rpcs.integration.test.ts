@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Regression coverage for 20260813000000_ebay_private_access_rpcs.sql. The eBay
@@ -27,6 +28,7 @@ suite("eBay private-schema RPCs (SECURITY DEFINER, service_role only)", () => {
     const email = `ebay-rpc+${stamp}@slabvault.test`;
     const password = `Test-ebrpc-${stamp}`;
     const { data, error } = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, data.user!.id);
     if (error) throw error;
     userIds.push(data.user!.id);
     await service.from("slab_admins").insert({ user_id: data.user!.id });

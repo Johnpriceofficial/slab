@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Behavioral coverage for 20260825000000_ebay_listing_reconcile_local_rpc.sql against
@@ -41,6 +42,7 @@ suite("ebay_listing_reconcile_local (atomic, identity+fingerprint-gated, service
     const email = `ebay-rl+${stamp}@slabvault.test`;
     const password = `Test-rl-${stamp}`;
     const { data: u } = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, u.user!.id);
     userIds.push(u.user!.id);
     await service.from("slab_admins").insert({ user_id: u.user!.id });
     adminClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `rl-admin-${stamp}` } });
