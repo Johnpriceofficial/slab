@@ -7,6 +7,7 @@
  * when the evidence no longer supports a trusted value. Env-gated like the rest.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ?? {}) as Record<string, string | undefined>;
@@ -53,6 +54,7 @@ suite("valuation-status integrity (evidence-based exact_api_tier)", () => {
     const email = `vintegrity+${stamp}@slabvault.test`;
     const password = "Test-" + email;
     const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(admin, data.user!.id);
     if (error) throw error;
     userIds.push(data.user!.id);
     await admin.from("slab_admins").insert({ user_id: data.user!.id });

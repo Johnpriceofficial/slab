@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Behavioral coverage for 20260904: the tombstone ledger accepts no direct
@@ -55,6 +56,7 @@ suite("slab_deletion_tombstones RLS (deny-all direct, trusted paths intact)", ()
     const adminEmail = `tombstone-admin+${stamp}@slabvault.test`;
     const adminPassword = `Test-ts-a-${stamp}`;
     const { data: au } = await service.auth.admin.createUser({ email: adminEmail, password: adminPassword, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, au.user!.id);
     userIds.push(au.user!.id);
     await service.from("slab_admins").insert({ user_id: au.user!.id });
     adminClient = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `ts-admin-${stamp}` } });

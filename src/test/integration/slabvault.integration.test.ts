@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ??
@@ -81,6 +82,7 @@ suite("GradedCardValue.com live integration", () => {
     if (error) throw error;
     createdUserIds.push(data.user!.id);
     if (makeAdmin) {
+      await grantAdministrator(admin, data.user!.id);
       // Kept in sync for any legacy reader of the allowlist table.
       const { error: e } = await admin.from("slab_admins").insert({ user_id: data.user!.id });
       if (e) throw e;

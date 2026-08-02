@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ??
@@ -41,6 +42,7 @@ suite("permanent public inventory identifiers", () => {
     const { data, error } = await service.auth.admin.createUser({
       email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true },
     });
+    await grantAdministrator(service, data.user!.id);
     if (error) throw error;
     userIds.push(data.user!.id);
     const client = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `inv-${stamp}` } });

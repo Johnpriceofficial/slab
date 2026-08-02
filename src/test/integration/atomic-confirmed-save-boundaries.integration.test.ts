@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as
@@ -68,6 +69,7 @@ suite("atomic confirmed save — schema-current boundary cases", () => {
     if (created.error) throw created.error;
     const id = created.data.user!.id;
     users.push(id);
+    if (appMetadata.graded_card_value_admin === true) await grantAdministrator(service, id);
     const client = createClient(URL_!, ANON!, {
       auth: { persistSession: false, autoRefreshToken: false, storageKey: `boundary-${tag}-${stamp}` },
     });

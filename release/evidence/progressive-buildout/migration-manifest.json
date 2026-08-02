@@ -1,0 +1,35 @@
+{
+  "verified_on": "disposable postgres:17 (destroyed after run)",
+  "read_only_production": true,
+  "canonical_base": {"repo": "Johnpriceofficial/slab", "main": "c65d438805a03e7c555a32337631b114b2e7ca69", "tip": "20260908000000_slab_permission_model", "count": 69},
+  "proven_landing_sequence": [
+    {"version": "20260908500000", "name": "authority_foundation", "origin": "NEW (canonicalized from user-roles-foundation patch; D-4 resolution)", "creates": ["type app_role", "table user_roles", "function has_role"], "idempotent": true},
+    {"version": "20260909000000", "name": "least_privilege_authz_tables", "origin": "PR #94", "requires": ["user_roles", "slab_admins"]},
+    {"version": "20260910000000", "name": "admin_authority_unification", "origin": "PR #95", "requires": ["user_roles", "app_role", "has_role", "slab_admins"], "note": "repoints is_admin() at user_roles; app_metadata consistency gate"},
+    {"version": "20260911000000", "name": "supporting_fk_indexes", "origin": "PR #96"},
+    {"version": "20260912000000", "name": "grading_advisor", "origin": "NEW (canonicalized from 20260731-grading-advisor)", "requires": ["auth.users"], "adds": ["15 grading tables", "consume_grading_advice_quota"]},
+    {"version": "20260913000000", "name": "atomic_rate_limit_consume", "origin": "NEW (canonicalized from rate-limit-atomic + rate_limit_hits.sql)", "adds": ["rate_limit_hits", "try_rate_limit_consume", "prune_rate_limit_hits"], "live_call_site": "slab-scribe-pro src/integrations/security/rate-limit.server.ts", "distinct_from": "api_rate_limits/reserve_api_request_slot"}
+  ],
+  "disposable_verification": {
+    "migrations_applied": 75,
+    "manual_interventions": 0,
+    "schema_assertions": "PASS",
+    "grading_advisor_tests": "PASS",
+    "atomic_rate_limit_tests": "PASS"
+  },
+  "defect_D4": {
+    "severity": "P1",
+    "summary": "PR #94 and #95 reference user_roles/app_role/has_role but no canonical migration creates them (out-of-band only); clean apply fails at #94; is the cause of D-1 MIGRATIONS_FAILED",
+    "resolution": "20260908500000_authority_foundation.sql before #94/#95 (verified); Phase-5 must rebase #95 onto it",
+    "slab_admins_note": "slab_admins IS canonical (20260709_slab_admin); only user_roles authority was missing"
+  },
+  "committed_to_release_branch": [
+    "supabase/migrations/20260908500000_authority_foundation.sql",
+    "supabase/migrations/20260912000000_grading_advisor.sql",
+    "supabase/migrations/20260913000000_atomic_rate_limit_consume.sql",
+    "scripts/verify/grading-advisor-tests.sql",
+    "scripts/verify/atomic-rate-limit-tests.sql"
+  ],
+  "not_committed_here": ["PR #94/#95/#96 migrations (remain their own PRs; sequenced in Phase 5)"],
+  "remaining_phase4": ["frontend contract-snapshot regen (grading currently unwired)", "eBay token-storage/account-foundation reconciliation vs prod objects"]
+}

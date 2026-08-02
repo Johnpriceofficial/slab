@@ -1,0 +1,90 @@
+{
+  "captured_at": "2026-08-01",
+  "read_only": true,
+  "github": {
+    "frontend": {
+      "repo": "Johnpriceofficial/slab-scribe-pro",
+      "main_sha": "eadeedf98ae165ec7cb98d87a9b79a314bd58c95",
+      "merge_commit_subject": "Merge PR #8: reconcile Lovable remediation into main",
+      "main_ci": "14/14 success",
+      "branch_protection": false,
+      "open_prs": []
+    },
+    "backend": {
+      "repo": "Johnpriceofficial/slab",
+      "main_sha": "c65d438805a03e7c555a32337631b114b2e7ca69",
+      "branch_protection": true,
+      "migration_tip": "20260908000000_slab_permission_model",
+      "migration_count": 69,
+      "open_prs": [
+        {"n": 97, "head": "e42dc5a55fd82c4c5d67352146ad8761c6e2bb8d", "draft": true, "state": "CLEAN", "migration": null, "scope": "evidence", "merge": "do-not-merge"},
+        {"n": 96, "head": "1c7989615c4a736a01038e0f8be5424e9d6b1be3", "draft": true, "state": "CLEAN", "migration": "20260911000000_supporting_fk_indexes.sql"},
+        {"n": 95, "head": "b78df1868b9661a69ea3f569168a1ffd93b73a6d", "draft": true, "state": "BLOCKED", "migration": "20260910000000_admin_authority_unification.sql"},
+        {"n": 94, "head": "9f3a992104cc5688473dec258d17769405dfb6da", "draft": true, "state": "BLOCKED", "migration": "20260909000000_least_privilege_authz_tables.sql"},
+        {"n": 79, "head": "a1cda980b2d4eeb15ed432028a47365f014dc48f", "scope": "out-of-scope", "state": "BEHIND"},
+        {"n": 41, "head": "61af11c7d3310a5611548ebe8c7b14324f976df1", "scope": "out-of-scope", "state": "BEHIND"},
+        {"n": 40, "head": "cbef2d71f7bf23634a1a3d2c78f4376092a6b1c1", "scope": "out-of-scope", "state": "CONFLICTING"}
+      ],
+      "next_free_migration_id": "20260912000000"
+    }
+  },
+  "supabase": {
+    "production": {
+      "ref": "rcbwemkfcefarqnlgrmv",
+      "org": "fjfcjjyocmbipetyyzdp",
+      "status": "ACTIVE_HEALTHY",
+      "pg": "17.6",
+      "ledger_tip": "20260904000000",
+      "out_of_band_ledger": ["20260729131106", "20260729131134"],
+      "control_plane_default_branch": {"id": "b317ade1-b311-4209-b3ad-2d7c1c771c85", "status": "MIGRATIONS_FAILED"},
+      "function_state": {
+        "link_ai_analysis_run": {"md5": "fecac02221e99d983302a6895ed05171", "canonical": "cea8c9ef8184b9bdaacc0aa1519a042e", "equal": false},
+        "list_pending_slab_storage_cleanup": {"md5": "ee13223df75e8d0bd73b57d64fc041bd", "canonical": "fc3218f8a7f2c2300c171f3cb8274c54", "equal": false},
+        "purge_customer_account_data": {"present": false, "canonical": "136365bc6bb3d6ca4664b5f461be7be0"},
+        "save_confirmed_slab_from_analysis": {"md5": "c5265afef8be92541174d80fa4db5e91", "canonical": "536522911f020295c50537a0457e339a", "equal": false},
+        "correct_slab_identification": {"md5": "b38bf0276a1f0edaeea3c1ae25b13221", "equal": true},
+        "forbid_direct_slab_delete": {"md5": "0db91967ddc86b1b21117dddf7d83ebe", "equal": true},
+        "guard_slab_protected_columns": {"md5": "90cb13a81819459606700f9ae6841fe8", "equal": true}
+      },
+      "admin_authority": {"has_role": true, "user_roles": true, "app_role": true, "is_admin": true, "split": true},
+      "edge_functions": {"analyze-slab": 88, "scan-card": 65, "pricecharting-search": 99, "pricecharting-marketplace": 61, "pricecharting-sync": 61, "marketplace-scheduler": 19, "ebay-oauth-start": 61, "ebay-oauth-callback": 61, "ebay-account-sync": 61, "ebay-reference-search": 61, "ebay-list-item": 61, "ebay-revise-item": 61, "ebay-end-item": 61, "ebay-order-sync": 61, "ebay-fulfillment": 61, "ebay-finances-sync": 61, "ebay-notification-handler": 61, "market-intelligence": 15}
+    },
+    "staging": {
+      "ref": "msbdwwgojuvgnuugrrry",
+      "branch_id": "9665d6c8-bd60-4c7f-b6eb-e3088c906137",
+      "status": "FUNCTIONS_DEPLOYED",
+      "customer_data": false,
+      "ledger_tip": "20260904000000",
+      "canonical_rehearsal_entries": 5,
+      "targets_byte_match_canonical": "7/7",
+      "reapply_20260905_08": false
+    },
+    "out_of_scope_branch": {"name": "v2-integration", "ref": "bunjmritgcwmwrrjzpvy"}
+  },
+  "vercel": {
+    "team": "team_Aa6u5Idjikkysa6Y2mB8FOgE",
+    "existing_project": {"name": "slab-13rc", "id": "prj_s3HNK69VRTNimpNMQnxxP9JyA575", "repo": "slab", "custom_domain": false, "do_not_touch": true},
+    "project_importing_slab_scribe_pro": null,
+    "graded_card_value_domain_on_vercel": false
+  },
+  "lovable": {
+    "project_id": "d3c023a7-ef76-49d3-83ec-29074c6d035e",
+    "template": "tanstack_start_ts_current",
+    "canonical_source": "github:slab-scribe-pro/main",
+    "published_state": "not-inspectable-without-lovable-api"
+  },
+  "defects": [
+    {"id": "D-1", "severity": "P1-gate-a", "system": "supabase-control-plane", "summary": "prod default branch MIGRATIONS_FAILED; DB healthy; reflects unreconciled ledger"},
+    {"id": "D-2", "severity": "P2", "system": "github", "summary": "slab-scribe-pro/main has no branch protection"},
+    {"id": "D-3", "severity": "P3", "system": "github", "summary": "out-of-scope PR #40 CONFLICTING, #41/#79 BEHIND"}
+  ],
+  "phase4_delta": {
+    "grading_advisor": {"present_slab": false, "present_staging": false, "present_prod": false, "action": "port->20260912"},
+    "rate_limit_atomic": {"present_slab": false, "slab_alt": "api_rate_limits", "action": "reconcile"},
+    "ebay_token_storage": {"action": "reconcile-vs-prod"},
+    "user_roles_foundation": {"owner": "PR#95"},
+    "atomic_confirmed_save": {"canonical": "20260907"},
+    "slab_permission_model": {"canonical": "20260908"}
+  },
+  "production_untouched": true
+}

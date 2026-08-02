@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ?? {}) as Record<string, string | undefined>;
@@ -29,6 +30,7 @@ suite("slab inventory maintenance", () => {
     if (error) throw error;
     userIds.push(data.user!.id);
     if (makeAdmin) await service.from("slab_admins").insert({ user_id: data.user!.id });
+    if (makeAdmin) await grantAdministrator(service, data.user!.id);
     const client = createClient(URL!, ANON!, { auth: { persistSession: false, autoRefreshToken: false, storageKey: `maint-${tag}-${stamp}` } });
     const { error: signInError } = await client.auth.signInWithPassword({ email, password });
     if (signInError) throw signInError;

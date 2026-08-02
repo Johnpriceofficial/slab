@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ??
@@ -69,6 +70,7 @@ suite("cross-account slab ownership (RLS)", () => {
     if (error) throw error;
     const id = data.user!.id;
     userIds.push(id);
+    if (isAdmin) await grantAdministrator(service, id);
     const client = createClient(URL!, ANON!, {
       auth: { persistSession: false, autoRefreshToken: false, storageKey: `own-${tag}-${stamp}` },
     });

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const ENV = (((globalThis as Record<string, unknown>).process as { env?: Record<string, string | undefined> } | undefined)?.env ?? {}) as Record<string, string | undefined>;
@@ -21,6 +22,7 @@ suite("buildout integrity hardening", () => {
     const email = `integrity-${stamp}@slabvault.test`;
     const password = `Integrity-${stamp}`;
     const created = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, created.data!.user!.id);
     if (created.error || !created.data.user) throw created.error ?? new Error("admin creation failed");
     adminId = created.data.user.id;
     await service.from("slab_admins").insert({ user_id: adminId });

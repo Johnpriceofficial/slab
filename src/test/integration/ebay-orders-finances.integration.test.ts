@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Behavioral coverage for 20260817000000_ebay_orders_finances_rpcs.sql against the
@@ -30,6 +31,7 @@ suite("eBay orders/finances apply RPCs", () => {
     const email = `ebay-of+${stamp}@slabvault.test`;
     const password = `Test-ebof-${stamp}`;
     const { data: u, error: uErr } = await service.auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true } });
+    await grantAdministrator(service, u.user!.id);
     if (uErr) throw uErr;
     userIds.push(u.user!.id);
     await service.from("slab_admins").insert({ user_id: u.user!.id });

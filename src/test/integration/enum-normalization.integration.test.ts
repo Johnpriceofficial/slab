@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAdministrator } from "./support/admin-role";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // Regression coverage for 20260812000000_reconcile_production_audit_repairs.sql,
@@ -28,6 +29,7 @@ suite("slab enum-input normalization (production reconciliation)", () => {
     const { data, error } = await service.auth.admin.createUser({
       email, password, email_confirm: true, app_metadata: { graded_card_value_admin: true },
     });
+    await grantAdministrator(service, data.user!.id);
     if (error) throw error;
     userIds.push(data.user!.id);
     await service.from("slab_admins").insert({ user_id: data.user!.id });
