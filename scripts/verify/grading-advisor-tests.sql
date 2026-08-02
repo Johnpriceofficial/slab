@@ -313,4 +313,110 @@ begin
 end
 $$;
 
+-- ============================================================================
+-- P1 (PR #98 review): cross-owner child-row injection must be denied. Run-linked
+-- child INSERT/UPDATE must verify the referenced grading_advice_runs parent is
+-- owned by the caller, not merely that owner_id = auth.uid(). a1=alice, b2=bob.
+-- ============================================================================
+insert into public.grading_advice_runs (id, owner_id, idempotency_key, ruleset_version, engine_version, status)
+values
+  ('30000000-0000-0000-0000-000000000a01', '00000000-0000-0000-0000-0000000000a1', 'run-a', 'v1', 'v1', 'succeeded'),
+  ('30000000-0000-0000-0000-000000000b01', '00000000-0000-0000-0000-0000000000b2', 'run-b', 'v1', 'v1', 'succeeded');
+
+do $$
+declare v_denied boolean;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000a1', true);
+
+  -- (1) same-owner: A inserts a child into A's OWN run -> allowed
+  insert into public.grading_condition_observations (run_id, owner_id, area, severity)
+  values ('30000000-0000-0000-0000-000000000a01', '00000000-0000-0000-0000-0000000000a1', 'corner', 'minor');
+
+  -- (2) cross-owner INSERT: A -> B's run with A's owner_id -> DENIED (WITH CHECK)
+  v_denied := false;
+  begin
+    insert into public.grading_condition_observations (run_id, owner_id, area, severity)
+    values ('30000000-0000-0000-0000-000000000b01', '00000000-0000-0000-0000-0000000000a1', 'edge', 'minor');
+  exception when insufficient_privilege then v_denied := true; end;
+  if not v_denied then raise exception 'FAIL P1: cross-owner child INSERT into victim run was allowed'; end if;
+
+  -- (3) cross-owner UPDATE reassignment: A moves A's child onto B's run -> DENIED
+  v_denied := false;
+  begin
+    update public.grading_condition_observations
+       set run_id = '30000000-0000-0000-0000-000000000b01'
+     where owner_id = '00000000-0000-0000-0000-0000000000a1';
+  exception when insufficient_privilege then v_denied := true; end;
+  if not v_denied then raise exception 'FAIL P1: cross-owner child UPDATE reassignment was allowed'; end if;
+
+  -- (4) uniqueness/ownership cannot be poisoned across customers
+  if exists (select 1 from public.grading_condition_observations
+              where run_id = '30000000-0000-0000-0000-000000000b01'
+                and owner_id = '00000000-0000-0000-0000-0000000000a1') then
+    raise exception 'FAIL P1: an A-owned child leaked under B''s run';
+  end if;
+
+  execute 'reset role';
+  raise notice 'PASS P1: same-owner insert allowed; cross-owner insert + reassignment denied; no leakage';
+end $$;
+
+-- service-role processing still works (RLS-bypassing maintenance path)
+insert into public.grading_condition_observations (run_id, owner_id, area, severity)
+values ('30000000-0000-0000-0000-000000000b01', '00000000-0000-0000-0000-0000000000b2', 'surface', 'moderate');
+do $$
+begin
+  if not exists (select 1 from public.grading_condition_observations
+                  where run_id='30000000-0000-0000-0000-000000000b01'
+                    and owner_id='00000000-0000-0000-0000-0000000000b2') then
+    raise exception 'FAIL P1: legitimate service-role child processing failed';
+  end if;
+  raise notice 'PASS P1: service-role child processing works';
+end $$;
+
+-- ============================================================================
+-- P2 (PR #98 review): a standards version is visible only when the version is
+-- active AND its parent grading company is active (not retired/stale/inactive).
+-- ============================================================================
+insert into public.grading_companies (id, name, standards_source_url, status)
+values ('stale-co', 'Stale Co', 'https://example.test/stale', 'stale')
+on conflict (id) do nothing;
+
+insert into public.grading_standards_versions (id, company_id, version, source_url, status)
+values
+  ('40000000-0000-0000-0000-000000000001', 'active-co',  'sv-active', 'https://example.test/a', 'active'),
+  ('40000000-0000-0000-0000-000000000002', 'retired-co', 'sv-active', 'https://example.test/r', 'active'),
+  ('40000000-0000-0000-0000-000000000003', 'stale-co',   'sv-active', 'https://example.test/s', 'active'),
+  ('40000000-0000-0000-0000-000000000004', 'active-co',  'sv-draft',  'https://example.test/d', 'draft');
+
+do $$
+declare v_count int;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000a1', true);
+
+  select count(*) into v_count from public.grading_standards_versions;
+  if v_count <> 1 then raise exception 'FAIL P2: expected exactly 1 visible standards version, got %', v_count; end if;
+  if not exists (select 1 from public.grading_standards_versions where id='40000000-0000-0000-0000-000000000001') then
+    raise exception 'FAIL P2: active version under active company must be visible';
+  end if;
+  if exists (select 1 from public.grading_standards_versions where company_id in ('retired-co','stale-co')) then
+    raise exception 'FAIL P2: standards under retired/stale company must be hidden';
+  end if;
+  if exists (select 1 from public.grading_standards_versions where status <> 'active') then
+    raise exception 'FAIL P2: draft/inactive standards version must be hidden';
+  end if;
+
+  execute 'reset role';
+  raise notice 'PASS P2: active+active visible; retired/stale parent hidden; draft hidden';
+end $$;
+
+do $$
+begin
+  if (select count(*) from public.grading_standards_versions) < 4 then
+    raise exception 'FAIL P2: service-role maintenance must see all standards versions';
+  end if;
+  raise notice 'PASS P2: service-role maintenance sees all standards versions';
+end $$;
+
 rollback;

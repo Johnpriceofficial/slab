@@ -237,14 +237,12 @@ create table if not exists public.grading_advice_quota_consumptions (
 
 -- ------------------------------------------------------------- privileges
 
+-- Owner-scoped tables that are NOT run-linked (the parent run itself and the
+-- standalone batch optimizer): owner_id is the only ownership axis.
 do $$
 declare t text;
 begin
-  foreach t in array array[
-    'grading_advice_runs','grading_image_quality_assessments','grading_condition_observations',
-    'grading_company_grade_estimates','grading_grade_value_scenarios','grading_cost_scenarios',
-    'grading_saved_recommendations','grading_batch_optimizations'
-  ] loop
+  foreach t in array array['grading_advice_runs','grading_batch_optimizations'] loop
     execute format('revoke all on public.%I from public, anon', t);
     execute format('grant select, insert, update, delete on public.%I to authenticated', t);
     execute format('grant all on public.%I to service_role', t);
@@ -259,6 +257,63 @@ begin
       create policy %I on public.%I for update to authenticated
       using (owner_id = auth.uid()) with check (owner_id = auth.uid());
     $f$, t || '_update_own', t);
+    execute format($f$
+      create policy %I on public.%I for delete to authenticated using (owner_id = auth.uid());
+    $f$, t || '_delete_own', t);
+  end loop;
+end $$;
+
+-- Run-linked child tables: a child row is legitimately writable only when BOTH
+-- the child's owner_id is the caller AND the referenced grading_advice_runs
+-- parent belongs to the caller. Without the parent-ownership predicate a
+-- customer who learns another customer's run_id could inject or reassign a
+-- child row into the victim's run (the FK proves the run EXISTS, not that it is
+-- owned by the caller). INSERT and UPDATE therefore also verify parent
+-- ownership; UPDATE keeps both USING and WITH CHECK so run_id/owner_id cannot be
+-- changed to escape ownership. SELECT/DELETE stay owner-scoped (a caller can
+-- only ever see or delete their own rows).
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'grading_image_quality_assessments','grading_condition_observations',
+    'grading_company_grade_estimates','grading_grade_value_scenarios',
+    'grading_cost_scenarios','grading_saved_recommendations'
+  ] loop
+    execute format('revoke all on public.%I from public, anon', t);
+    execute format('grant select, insert, update, delete on public.%I to authenticated', t);
+    execute format('grant all on public.%I to service_role', t);
+    execute format('alter table public.%I enable row level security', t);
+    execute format($f$
+      create policy %I on public.%I for select to authenticated using (owner_id = auth.uid());
+    $f$, t || '_select_own', t);
+    execute format($f$
+      create policy %I on public.%I for insert to authenticated
+      with check (
+        owner_id = auth.uid()
+        and exists (
+          select 1 from public.grading_advice_runs r
+           where r.id = %I.run_id and r.owner_id = auth.uid()
+        )
+      );
+    $f$, t || '_insert_own', t, t);
+    execute format($f$
+      create policy %I on public.%I for update to authenticated
+      using (
+        owner_id = auth.uid()
+        and exists (
+          select 1 from public.grading_advice_runs r
+           where r.id = %I.run_id and r.owner_id = auth.uid()
+        )
+      )
+      with check (
+        owner_id = auth.uid()
+        and exists (
+          select 1 from public.grading_advice_runs r
+           where r.id = %I.run_id and r.owner_id = auth.uid()
+        )
+      );
+    $f$, t || '_update_own', t, t, t);
     execute format($f$
       create policy %I on public.%I for delete to authenticated using (owner_id = auth.uid());
     $f$, t || '_delete_own', t);
@@ -283,26 +338,41 @@ create policy grading_advice_quota_consumptions_service_role_only
 -- Reference/catalog tables: read-only for authenticated (active rows only),
 -- writes restricted to service_role. Customers and anonymous users must not
 -- read draft, pending, reviewed, stale, retired, or unpublished records.
+-- grading_companies: its own status gates visibility (it is the root parent).
 do $$
-declare
-  t text;
 begin
-  -- Tables that carry their own `status` column. Only 'active' rows are
-  -- customer-readable. Writes are service_role-only (migration / admin tools).
-  foreach t in array array[
-    'grading_companies','grading_standards_versions'
-  ] loop
-    execute format('revoke all on public.%I from public, anon', t);
-    execute format('grant select on public.%I to authenticated', t);
-    execute format('grant all on public.%I to service_role', t);
-    execute format('alter table public.%I enable row level security', t);
-    execute format($f$
-      create policy %I on public.%I for select to authenticated using (status = 'active');
-    $f$, t || '_select_published', t);
-    execute format($f$
-      create policy %I on public.%I for all to service_role using (true) with check (true);
-    $f$, t || '_service_write', t);
-  end loop;
+  revoke all on public.grading_companies from public, anon;
+  grant select on public.grading_companies to authenticated;
+  grant all on public.grading_companies to service_role;
+  alter table public.grading_companies enable row level security;
+  create policy grading_companies_select_published on public.grading_companies
+    for select to authenticated using (status = 'active');
+  create policy grading_companies_service_write on public.grading_companies
+    for all to service_role using (true) with check (true);
+end $$;
+
+-- grading_standards_versions: readable only when the version is active AND its
+-- parent grading company is active. Checking only the version's own status let
+-- an active version stay visible after its company was retired/stale/inactive;
+-- the active-parent predicate (same pattern as grade scales / service levels)
+-- closes that.
+do $$
+begin
+  revoke all on public.grading_standards_versions from public, anon;
+  grant select on public.grading_standards_versions to authenticated;
+  grant all on public.grading_standards_versions to service_role;
+  alter table public.grading_standards_versions enable row level security;
+  create policy grading_standards_versions_select_published on public.grading_standards_versions
+    for select to authenticated
+    using (
+      status = 'active'
+      and exists (
+        select 1 from public.grading_companies gc
+         where gc.id = grading_standards_versions.company_id and gc.status = 'active'
+      )
+    );
+  create policy grading_standards_versions_service_write on public.grading_standards_versions
+    for all to service_role using (true) with check (true);
 end $$;
 
 do $$
