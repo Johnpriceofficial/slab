@@ -1,0 +1,19 @@
+{
+  "comparison": "production rcbwemkfcefarqnlgrmv (read-only) vs canonical clean-installed schema (slab c65d438)",
+  "method": "normalized function body md5 = md5(regexp_replace(prosrc,'\\\\s+',' ','g')); object existence via catalog",
+  "objects": [
+    {"object": "public.link_ai_analysis_run", "kind": "function", "prod_body_md5": "fecac02221e99d983302a6895ed05171", "canonical_body_md5": "cea8c9ef8184b9bdaacc0aa1519a042e", "equal": false, "from_migration": "20260905000000"},
+    {"object": "public.list_pending_slab_storage_cleanup", "kind": "function", "prod_body_md5": "ee13223df75e8d0bd73b57d64fc041bd", "canonical_body_md5": "fc3218f8a7f2c2300c171f3cb8274c54", "equal": false, "from_migration": "20260906000000"},
+    {"object": "public.purge_customer_account_data", "kind": "function", "prod_body_md5": null, "canonical_body_md5": "136365bc6bb3d6ca4664b5f461be7be0", "equal": false, "prod_present": false, "from_migration": "20260906000000"},
+    {"object": "public.save_confirmed_slab_from_analysis", "kind": "function", "prod_body_md5": "c5265afef8be92541174d80fa4db5e91", "canonical_body_md5": "536522911f020295c50537a0457e339a", "equal": false, "from_migration": "20260907000000"},
+    {"object": "public.correct_slab_identification", "kind": "function", "prod_body_md5": "b38bf0276a1f0edaeea3c1ae25b13221", "canonical_body_md5": "b38bf0276a1f0edaeea3c1ae25b13221", "equal": true, "from_migration": "20260908000000"},
+    {"object": "public.forbid_direct_slab_delete", "kind": "function", "prod_body_md5": "0db91967ddc86b1b21117dddf7d83ebe", "canonical_body_md5": "0db91967ddc86b1b21117dddf7d83ebe", "equal": true, "from_migration": "20260908000000"},
+    {"object": "public.guard_slab_protected_columns", "kind": "function", "prod_body_md5": "90cb13a81819459606700f9ae6841fe8", "canonical_body_md5": "90cb13a81819459606700f9ae6841fe8", "equal": true, "from_migration": "20260908000000"},
+    {"object": "public.slab_correction_events", "kind": "table", "prod_present": true, "canonical_present": true, "from_migration": "20260908000000"},
+    {"object": "private.slab_storage_cleanup_queue", "kind": "table", "prod_present": true, "canonical_present": true},
+    {"object": "public.has_role", "kind": "function", "prod_present": true, "canonical_present": false, "note": "PROD-ONLY (out-of-band); split-administrator-authority; PR #95 target"},
+    {"object": "public.app_role", "kind": "type", "prod_present": true, "canonical_present": false, "note": "PROD-ONLY (out-of-band)"},
+    {"object": "public.user_roles", "kind": "table", "prod_present": true, "canonical_present": false, "note": "PROD-ONLY (out-of-band)"},
+    {"object": "public.is_admin", "kind": "function", "prod_present": true, "canonical_present": true, "note": "app-metadata model in both (reads raw_app_meta_data->>graded_card_value_admin)"}
+  ]
+}
