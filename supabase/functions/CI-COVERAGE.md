@@ -13,6 +13,7 @@ step is kept in sync with.
 - `pricecharting-marketplace`
 - `pricecharting-search`
 - `pricecharting-sync`
+- `ebay-connect-status`
 
 ## Generated bundles (freshness-gated in CI)
 
