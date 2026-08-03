@@ -19,11 +19,13 @@ import { fetchAllEbayFinanceTransactions } from "./ebay-finances-pagination.ts";
 import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "./ebay-sync-handler.ts";
 import { syncBody } from "./ebay-sync-response.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
+import { parseListingFeesInput, sanitizeListingFees } from "./ebay-listing-fees-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
   | "list_item" | "revise_item" | "end_item" | "order_sync"
-  | "fulfillment" | "finances_sync" | "notification";
+  | "fulfillment" | "finances_sync" | "notification"
+  | "listing_fees";
 
 const MODE = Deno.env.get("EBAY_ENVIRONMENT") === "sandbox" ? "sandbox" : "production";
 const API = MODE === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
@@ -680,6 +682,33 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
       sold_comparable: false,
     }));
     return reply({ status: "success", source: "EBAY_BROWSE", active_listings_only: true, items });
+  }
+
+  if (operation === "listing_fees") {
+    // Read-only: fee preview for the seller's own unpublished offers. Never a
+    // marketplace mutation, so it is intentionally not gated by a kill switch.
+    const parsed = parseListingFeesInput(body);
+    if (!parsed.ok) return reply({ status: "error", error_code: parsed.errorCode, message: parsed.message }, 400);
+    const admin = makeAdmin();
+    const startedAt = Date.now();
+    let accessToken: string;
+    try {
+      accessToken = await userAccessToken(admin, parsed.input.accountId);
+    } catch {
+      await recordApiRun(admin, parsed.input.accountId, "listing_fees", "error", Date.now() - startedAt, "reauthorization_required");
+      return unavailable(operation, "Connected eBay account");
+    }
+    try {
+      const data = await ebayFetch("/sell/inventory/v1/offer/get_listing_fees", accessToken, {
+        method: "POST",
+        body: JSON.stringify({ offers: parsed.input.offerIds.map((offerId) => ({ offerId })) }),
+      });
+      await recordApiRun(admin, parsed.input.accountId, "listing_fees", "success", Date.now() - startedAt, null);
+      return reply({ status: "success", ...sanitizeListingFees(data) });
+    } catch {
+      await recordApiRun(admin, parsed.input.accountId, "listing_fees", "error", Date.now() - startedAt, "listing_fees_fetch_failed");
+      return reply({ status: "error", error_code: "LISTING_FEES_FETCH_FAILED", message: "eBay did not return listing fees." }, 502);
+    }
   }
 
   if (operation === "account_sync") {
