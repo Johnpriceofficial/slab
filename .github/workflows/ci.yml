@@ -47,6 +47,7 @@ jobs:
           supabase/functions/pricecharting-marketplace/index.ts
           supabase/functions/pricecharting-search/index.ts
           supabase/functions/pricecharting-sync/index.ts
+          supabase/functions/ebay-connect-status/index.ts
 
       - name: Rebuild edge bundles (must match committed output)
         run: |
