@@ -1,0 +1,85 @@
+name: Phase B inventory runner
+
+on:
+  push:
+    branches:
+      - feat/ebay-seller-operation-boundaries
+    paths:
+      - .gcv-phase-b-inventory-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ebay-seller-operation-boundaries
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Apply deterministic implementation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/phase-b-inventory-read.yml').read_text()
+          marker = "python3 - <<'PY'\n"
+          body = source.split(marker, 1)[1].split("\n          PY", 1)[0]
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in body.splitlines())
+          exec(compile(script, 'phase-b-inventory-read.py', 'exec'))
+          PY
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Unit, component, and coverage-meta tests
+        run: bunx vitest run
+
+      - name: Deno-check pure seller-operation cores
+        run: |
+          deno check --no-config --node-modules-dir=manual --no-remote \
+            supabase/functions/_shared/ebay-listing-fees-core.ts \
+            supabase/functions/_shared/ebay-inventory-read-core.ts
+
+      - name: Secret scan and diff integrity
+        run: |
+          git diff --check
+          SECRET_RE='sk-ant-[A-Za-z0-9_-]{8}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xoxb-[0-9A-Za-z-]{10}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}'
+          if grep -rnE "$SECRET_RE" src supabase scripts \
+               --include='*.ts' --include='*.tsx' --include='*.js' --include='*.sql' --include='*.mjs' --include='*.sh' \
+               2>/dev/null | grep -v node_modules; then
+            echo "possible secret committed"
+            exit 1
+          fi
+
+      - name: Commit verified branch changes
+        run: |
+          git config user.name "gcv-phase-b-bot"
+          git config user.email "gcv-phase-b-bot@users.noreply.github.com"
+          git add \
+            .github/workflows/ci.yml \
+            src/test/ebay/inventory-read-core.test.ts \
+            supabase/functions/CI-COVERAGE.md \
+            supabase/functions/PHASE_B_SELLER_OP_PLAN.md \
+            supabase/functions/_shared/ebay-inventory-read-core.ts \
+            supabase/functions/_shared/ebay.ts \
+            supabase/functions/ebay-inventory-read/index.ts
+          git commit -m "feat(ebay): add admin-only inventory_read operation"
+          git push origin HEAD:feat/ebay-seller-operation-boundaries
