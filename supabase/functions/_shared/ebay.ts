@@ -20,12 +20,13 @@ import { runFinanceSync, runOrderSync, type SyncHandlerDeps } from "./ebay-sync-
 import { syncBody } from "./ebay-sync-response.ts";
 import { EBAY_MUTATION_FLAGS, mutationEnabled } from "./ebay-mutation-flags.ts";
 import { parseListingFeesInput, sanitizeListingFees } from "./ebay-listing-fees-core.ts";
+import { parseInventoryReadInput, sanitizeInventoryRead } from "./ebay-inventory-read-core.ts";
 
 type Operation =
   | "oauth_start" | "oauth_callback" | "account_sync" | "reference_search"
   | "list_item" | "revise_item" | "end_item" | "order_sync"
   | "fulfillment" | "finances_sync" | "notification"
-  | "listing_fees";
+  | "listing_fees" | "inventory_read";
 
 const MODE = Deno.env.get("EBAY_ENVIRONMENT") === "sandbox" ? "sandbox" : "production";
 const API = MODE === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
@@ -683,6 +684,98 @@ export async function handleEbay(req: Request, operation: Operation, deps: EbayD
     }));
     return reply({ status: "success", source: "EBAY_BROWSE", active_listings_only: true, items });
   }
+
+  if (operation === "inventory_read") {
+  // Read-only seller inventory discovery. The request is bounded to at
+  // most 25 SKUs so the offers-by-SKU fan-out cannot grow without limit.
+  // No marketplace mutation flag applies and no provider body is returned.
+  const parsed = parseInventoryReadInput(body);
+  if (!parsed.ok) {
+    return reply(
+      { status: "error", error_code: parsed.errorCode, message: parsed.message },
+      400,
+    );
+  }
+
+  const admin = makeAdmin();
+  const startedAt = Date.now();
+  let accessToken: string;
+  try {
+    accessToken = await userAccessToken(admin, parsed.input.accountId);
+  } catch {
+    const recorded = await recordApiRun(
+      admin,
+      parsed.input.accountId,
+      "inventory_read",
+      "error",
+      Date.now() - startedAt,
+      "reauthorization_required",
+    );
+    if (!recorded) {
+      return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
+    }
+    return unavailable(operation, "Connected eBay account");
+  }
+
+  try {
+    const query = new URLSearchParams({
+      limit: String(parsed.input.limit),
+      offset: String(parsed.input.offset),
+    });
+    const inventory = await ebayFetch(
+      `/sell/inventory/v1/inventory_item?${query.toString()}`,
+      accessToken,
+    );
+
+    // Sanitize once before fan-out so only bounded, validated SKU values
+    // can influence follow-up provider requests.
+    const safePage = sanitizeInventoryRead(inventory, {}, parsed.input);
+    const uniqueSkus = [...new Set(safePage.items.map((item) => item.sku))];
+    const offerEntries = await Promise.all(
+      uniqueSkus.map(async (sku) => [
+        sku,
+        await ebayFetch(
+`/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}`,
+accessToken,
+        ),
+      ] as const),
+    );
+    const offersBySku = Object.fromEntries(offerEntries);
+    const sanitized = sanitizeInventoryRead(inventory, offersBySku, parsed.input);
+    const recorded = await recordApiRun(
+      admin,
+      parsed.input.accountId,
+      "inventory_read",
+      "success",
+      Date.now() - startedAt,
+      null,
+    );
+    if (!recorded) {
+      return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
+    }
+    return reply({ status: "success", ...sanitized });
+  } catch {
+    const recorded = await recordApiRun(
+      admin,
+      parsed.input.accountId,
+      "inventory_read",
+      "error",
+      Date.now() - startedAt,
+      "inventory_read_fetch_failed",
+    );
+    if (!recorded) {
+      return reply({ status: "error", error_code: "api_run_persist_failed" }, 500);
+    }
+    return reply(
+      {
+        status: "error",
+        error_code: "INVENTORY_READ_FETCH_FAILED",
+        message: "eBay did not return a complete inventory page.",
+      },
+      502,
+    );
+  }
+}
 
   if (operation === "listing_fees") {
     // Read-only: fee preview for the seller's own unpublished offers. Never a

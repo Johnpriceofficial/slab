@@ -15,6 +15,11 @@ step is kept in sync with.
 - `pricecharting-sync`
 - `ebay-connect-status`
 
+## Pure shared cores deno-checked in CI
+
+- `_shared/ebay-listing-fees-core.ts`
+- `_shared/ebay-inventory-read-core.ts`
+
 ## Generated bundles (freshness-gated in CI)
 
 The `_shared/*-bundle.js` files are generated from `src/` by the `scripts/build-*-edge-bundle.mjs`
@@ -34,7 +39,7 @@ reasons **unrelated to their runtime behavior**:
 
 | Function | Reason |
 | --- | --- |
-| `ebay-account-sync`, `ebay-end-item`, `ebay-finances-sync`, `ebay-fulfillment`, `ebay-list-item`, `ebay-listing-fees`, `ebay-notification-handler`, `ebay-oauth-callback`, `ebay-oauth-start`, `ebay-order-sync`, `ebay-reference-search`, `ebay-revise-item` | All dispatch to `_shared/ebay.ts`, which trips two pre-existing type errors under `--no-config`: `crypto.subtle.importKey("raw", Uint8Array, …)` (WebCrypto `BufferSource`/`SharedArrayBuffer` lib mismatch) and `admin.schema("private")` (supabase-js client overload). Both need a Deno-aware `deno.json` lib config to resolve. The pure core `_shared/ebay-listing-fees-core.ts` is deno-checked separately below and unit-tested. |
+| `ebay-account-sync`, `ebay-end-item`, `ebay-inventory-read`, `ebay-finances-sync`, `ebay-fulfillment`, `ebay-list-item`, `ebay-listing-fees`, `ebay-notification-handler`, `ebay-oauth-callback`, `ebay-oauth-start`, `ebay-order-sync`, `ebay-reference-search`, `ebay-revise-item` | All dispatch to `_shared/ebay.ts`, which trips two pre-existing type errors under `--no-config`: `crypto.subtle.importKey("raw", Uint8Array, …)` (WebCrypto `BufferSource`/`SharedArrayBuffer` lib mismatch) and `admin.schema("private")` (supabase-js client overload). Both need a Deno-aware `deno.json` lib config to resolve. The pure cores `_shared/ebay-listing-fees-core.ts` and `_shared/ebay-inventory-read-core.ts` are deno-checked separately above and unit-tested. |
 | `scan-card` | Same WebCrypto `Uint8Array`/`Buffer` lib mismatch under `--no-config`. |
 
 These are latent (the functions were never in CI's deno-check before) and fixing them —

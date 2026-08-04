@@ -1,6 +1,6 @@
 # Phase B — eBay seller-operation boundary (backend)
 
-Status: **scope + implementation spec** (code to follow on this branch).
+Status: **listing_fees + inventory_read implemented; disconnect migration pending review**.
 Branch: `feat/ebay-seller-operation-boundaries` (base `main` @ 6d2faea).
 
 ## Key finding — the secure boundary already exists
@@ -29,7 +29,7 @@ stacks on frontend PR #13 and is blocked until #13 merges.
 
 | op | eBay endpoint | inputs | output allowlist | migration? | mutation flag |
 |----|---------------|--------|------------------|-----------|---------------|
-| `inventory_read` | `GET /sell/inventory/v1/inventory_item?limit&offset` + `GET /sell/inventory/v1/offer?sku=` | `account_id`, `limit`, `offset` | sku, condition, title, qty, offer{offerId,status,price,marketplaceId,listingId} — **no** buyer PII, **no** token | no | none (read-only) |
+| `inventory_read` | `GET /sell/inventory/v1/inventory_item?limit&offset` + `GET /sell/inventory/v1/offer?sku=` | `account_id`, `limit`, `offset` | sku, condition, title, qty, offer{offerId,status,marketplaceId,format,price,listingId} — **no** buyer PII, **no** token | no | none (read-only) |
 | `listing_fees` | `POST /sell/inventory/v1/offer/get_listing_fees` | `account_id`, `offer_ids[]` | per-offer fee summaries (amount cents + currency + fee type) | no | none (read-only) |
 | `disconnect` | — (local credential revoke) | `account_id` | `{status:"disconnected"}` only | **yes** — new `ebay_credential_delete(p_account_id)` service-role RPC | admin-only; optionally a new `EBAY_DISCONNECT_ENABLED` (default off) |
 
