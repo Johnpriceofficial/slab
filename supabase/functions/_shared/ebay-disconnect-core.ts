@@ -111,7 +111,7 @@ export async function handleEbayDisconnect(
   }
 
   const parsed = parseDisconnectInput(body);
-  if (!parsed.ok) {
+  if (parsed.ok === false) {
     return jsonResponse(
       400,
       { status: "error", error_code: parsed.errorCode, message: parsed.message },
