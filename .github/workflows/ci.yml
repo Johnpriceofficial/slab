@@ -48,6 +48,10 @@ jobs:
           supabase/functions/pricecharting-search/index.ts
           supabase/functions/pricecharting-sync/index.ts
           supabase/functions/ebay-connect-status/index.ts
+          supabase/functions/ebay-disconnect/index.ts
+          supabase/functions/_shared/ebay-listing-fees-core.ts
+          supabase/functions/_shared/ebay-inventory-read-core.ts
+          supabase/functions/_shared/ebay-disconnect-core.ts
 
       - name: Rebuild edge bundles (must match committed output)
         run: |
