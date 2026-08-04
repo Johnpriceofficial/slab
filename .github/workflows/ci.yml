@@ -262,6 +262,10 @@ jobs:
           exec(compile(script, 'phase-b-inventory-read.py', 'exec'))
           PY
 
+      - name: Restore workflow before branch commit
+        if: steps.pending.outputs.run == 'true'
+        run: git checkout -- .github/workflows/ci.yml
+
       - name: Install dependencies
         if: steps.pending.outputs.run == 'true'
         run: bun install --frozen-lockfile
@@ -290,7 +294,6 @@ jobs:
           git config user.name "gcv-phase-b-bot"
           git config user.email "gcv-phase-b-bot@users.noreply.github.com"
           git add \
-            .github/workflows/ci.yml \
             src/test/ebay/inventory-read-core.test.ts \
             supabase/functions/CI-COVERAGE.md \
             supabase/functions/PHASE_B_SELLER_OP_PLAN.md \
