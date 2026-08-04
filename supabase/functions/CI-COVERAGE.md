@@ -14,11 +14,13 @@ step is kept in sync with.
 - `pricecharting-search`
 - `pricecharting-sync`
 - `ebay-connect-status`
+- `ebay-disconnect`
 
 ## Pure shared cores deno-checked in CI
 
 - `_shared/ebay-listing-fees-core.ts`
 - `_shared/ebay-inventory-read-core.ts`
+- `_shared/ebay-disconnect-core.ts`
 
 ## Generated bundles (freshness-gated in CI)
 
