@@ -125,4 +125,37 @@ describe("certification number is never guessed", () => {
     expect(res.body.proposed.certification_number.value).toBeNull();
     expect(res.body.warnings.join(" ")).toMatch(/certification number needs review/i);
   });
+
+  it("rejects a grader-specific invalid certification format before auto-populating", async () => {
+    const { deps, calls } = seqDeps([
+      JSON.stringify({
+        fields: {
+          grader: { value: "CGC", confidence: 0.99, source: "label", readable: true },
+          certification_number: { value: "12345A", confidence: 0.99, source: "label", readable: true },
+        },
+      }),
+    ]);
+    const res = await analyzeSlabImages(FRONT, deps);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(res.body.proposed.certification_number.value).toBeNull();
+    expect(res.body.proposed.certification_number.readable).toBe(false);
+    expect(res.body.warnings.join(" ")).toMatch(/CGC certification numbers must resolve/i);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("names ambiguous digit groups when independent certification reads disagree", async () => {
+    const { deps } = seqDeps([
+      JSON.stringify({
+        fields: {
+          grader: { value: "CGC", confidence: 0.99, source: "label", readable: true },
+          certification_number: { value: "1234567890", confidence: 0.99, source: "label", readable: true },
+        },
+      }),
+      JSON.stringify({ certification_number: { value: "1234567896", confidence: 0.99, readable: true } }),
+    ]);
+    const res = await analyzeSlabImages(FRONT, deps);
+    if (res.body.status !== "success") throw new Error("expected success");
+    expect(res.body.proposed.certification_number.value).toBeNull();
+    expect(res.body.warnings.join(" ")).toMatch(/Ambiguous digit group\(s\).*0\/6\/8/i);
+  });
 });

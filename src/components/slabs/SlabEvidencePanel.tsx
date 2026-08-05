@@ -10,11 +10,16 @@ function State({ label, value, source }: { label: string; value: string; source:
 
 export function SlabEvidencePanel({ slab }: { slab: Slab }) {
   const { data: evidence = [] } = useQuery({ queryKey: ["field-evidence", slab.id], queryFn: () => fetchFieldEvidence(slab.id) });
+  const grader = slab.grader?.trim() || "this grader";
+  const certVerification =
+    slab.certification_verification_status === "verified"
+      ? "Verified"
+      : "Certification database verification is not configured for this grader.";
   return <div className="mt-6 space-y-6">
     <Card><CardHeader><CardTitle>Verification</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-4">
       <State label="Visual Identity" value={slab.visual_identity_status === "verified" ? "Verified" : slab.visual_identity_status === "rejected" ? "Rejected" : "Needs Review"} source="PHOTO + OPENAI" />
       <State label="PriceCharting Match" value={slab.pricecharting_match_status ?? "Unlinked"} source="PRICECHARTING" />
-      <State label="Certification Database" value={slab.certification_verification_status === "verified" ? "Verified" : "Not Checked"} source="CGC: NOT INTEGRATED" />
+      <State label="Certification Database" value={certVerification} source={slab.certification_verification_status === "verified" ? grader : "NOT CONFIGURED"} />
       <State label="Valuation" value={(slab.valuation_status ?? "unavailable").replace(/_/g, " ")} source={slab.valuation_status === "manual" ? "USER" : "PRICECHARTING"} />
     </CardContent></Card>
     <Card><CardHeader><CardTitle>Field Evidence</CardTitle></CardHeader><CardContent>
