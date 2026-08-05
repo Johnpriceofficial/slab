@@ -23,7 +23,7 @@ import type { Clock } from "../../lib/pricecharting/clock";
 import type { Logger } from "../../lib/pricecharting/logger";
 import { nullLogger } from "../../lib/pricecharting/logger";
 import { searchProducts, getProductById } from "../../lib/pricecharting/api";
-import { buildSearchQuery, scoreCandidate, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber, type ScoreBreakdown } from "../../lib/pricecharting/matching";
+import { buildSearchQuery, scoreCandidate, compareScoredCandidates, requiresHighConfidence, conflictsAreNumberOnly, extractHashNumber, type ScoreBreakdown } from "../../lib/pricecharting/matching";
 import { getValueForRequestedGrade } from "../../lib/pricecharting/grade-mapping";
 import { normalizeProduct } from "../../lib/pricecharting/product";
 import {
@@ -380,8 +380,17 @@ function toYear(year?: number | string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+function finishFlags(variation?: string): { holo?: boolean; reverse_holo?: boolean } {
+  const text = variation?.trim().toLowerCase() ?? "";
+  if (!text) return {};
+  const reverse = /\breverse[\s-]+holo\b/.test(text);
+  const holo = !reverse && /\bholo\b/.test(text);
+  return { holo: holo || undefined, reverse_holo: reverse || undefined };
+}
+
 /** Build the structured card input the library expects. */
 function toCardInput(input: SlabSearchInput): CardItemInput {
+  const finish = finishFlags(input.variation);
   return {
     category: "trading_card",
     card_name: input.card_name?.trim() || undefined,
@@ -390,6 +399,8 @@ function toCardInput(input: SlabSearchInput): CardItemInput {
     year: toYear(input.year),
     language: input.language?.trim() || undefined,
     variant: input.variation?.trim() || undefined,
+    holo: finish.holo,
+    reverse_holo: finish.reverse_holo,
     grading_company: toGradingCompany(input.grader),
     grade: toGradeNumber(input.grade),
   };
@@ -477,7 +488,7 @@ async function handleSearch(client: PriceChartingClient, input: SlabSearchInput,
     else throw err;
   }
 
-  const scored = products.map((p) => scoreCandidate(item, p)).sort((a, b) => b.score - a.score);
+  const scored = products.map((p) => scoreCandidate(item, p)).sort(compareScoredCandidates);
   const grader = item.grading_company;
   const grade = item.grade ?? null;
 

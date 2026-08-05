@@ -1,8 +1,13 @@
 /** Deterministic, non-generative image variants used only as reading aids. */
 
 export type DerivativeKind =
+  | "label_original"
+  | "label_corrected"
+  | "label_enhanced"
   | "label_contrast"
   | "label_grayscale"
+  | "label_sharpened"
+  | "label_thresholded"
   | "collector_threshold"
   | "certification_sharpened"
   | "grade_box"
@@ -18,8 +23,13 @@ export interface AnalysisVariant {
 }
 
 export const DETERMINISTIC_TRANSFORMS: Record<DerivativeKind, Record<string, unknown>> = {
+  label_original: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1, sharpen: false, interpolation: "bicubic", variant: "original_label_region" },
+  label_corrected: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1.1, sharpen: false, interpolation: "bicubic", upscale_max: 4, variant: "perspective_corrected_label_region" },
+  label_enhanced: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1.35, sharpen: true, interpolation: "bicubic", upscale_max: 4, variant: "enhanced_label_region" },
   label_contrast: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1.35, sharpen: true, interpolation: "bicubic" },
   label_grayscale: { version: 1, crop: [0, 0, 1, 0.32], grayscale: true, contrast: 1.5, sharpen: false, interpolation: "bicubic" },
+  label_sharpened: { version: 1, crop: [0, 0, 1, 0.32], grayscale: false, contrast: 1.15, sharpen: true, interpolation: "bicubic", upscale_max: 4, variant: "sharpened_label_region" },
+  label_thresholded: { version: 1, crop: [0, 0, 1, 0.32], grayscale: true, threshold: 0.58, sharpen: false, interpolation: "bicubic", upscale_max: 4, variant: "thresholded_label_region" },
   collector_threshold: { version: 1, crop: [0.48, 0.55, 0.52, 0.45], grayscale: true, threshold: 0.58, sharpen: false, interpolation: "bicubic" },
   certification_sharpened: { version: 1, crop: [0.45, 0, 0.55, 0.25], grayscale: false, contrast: 1.25, sharpen: true, interpolation: "bicubic", upscale_max: 4 },
   // Grade box — the small numeric grade + designation, usually top-left of the

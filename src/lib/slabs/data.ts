@@ -437,6 +437,7 @@ export async function analyzeSlab(
   const body: AnalyzeInput = {
     front_image_base64: await blobToBase64(front.blob),
     front_mime: front.mime,
+    strict_multi_pass: true,
   };
   if (back) {
     body.back_image_base64 = await blobToBase64(back.blob);
