@@ -9,30 +9,51 @@
     "rule": "Default generation is canonical. Proposed mode never writes to a canonical path, and canonical mode refuses to publish an operation whose status is PROPOSED_NOT_DEPLOYED or PROPOSED_CONTRACT_CORRECTION."
   },
 
-  "baseCommitInspected": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "baseCommitInspected": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
 
-  "mergedMainCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
-  "mergedMigrationCount": 69,
-  "mergedFinalMigration": "20260908000000_slab_permission_model",
-  "mergedContractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69",
+  "mergedMainCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  "mergedMigrationCount": 77,
+  "mergedFinalMigration": "20260915000000_grading_advisor_rls_hardening",
+  "mergedContractVersion": "1.4.0-merged-6d2faea0-m77-proposed-m77",
 
-  "proposedBranch": "fix/atomic-confirmed-slab-save",
-  "proposedBranchCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
-  "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/pull/91",
-  "proposedPullRequestState": "merged",
-  "proposedMigration": "20260908000000_slab_permission_model",
-  "proposedMigrationCount": 69,
-  "proposedContractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69",
+  "proposedBranch": "feat/publish-correct-analysis-contract",
+  "proposedBranchCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/pull/103",
+  "proposedPullRequestState": "draft-open",
+  "proposedMigration": "20260915000000_grading_advisor_rls_hardening",
+  "proposedMigrationCount": 77,
+  "proposedContractVersion": "1.4.0-merged-6d2faea0-m77-proposed-m77",
+
+  "proposedLayerContents": "CONTRACT-ONLY. This branch adds NO migration: it publishes correctAnalysis as READY against rpc:correct_slab_identification, which was created by the ALREADY-MERGED 20260908000000_slab_permission_model and is ALREADY APPLIED to production. The proposed migration facts above therefore equal the merged facts (empty proposed layer, released state), and the timestamps below describe the production-buildout deployment (PRs #94-#98, applied through ledger entry 20260802181313_grading_advisor_rls_hardening_20260915000000), not a new deployment.",
 
   "liveVerificationState": "passed-production",
-  "stagingVerifiedAt": "2026-07-30T00:00:00Z",
+  "stagingVerifiedAt": "2026-08-02T18:13:13Z",
   "mergeState": "merged",
-  "mergeCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
+  "mergeCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
   "deploymentState": "deployed",
-  "deployedCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
-  "deployedAt": "2026-07-30T00:00:00Z",
+  "deployedCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  "deployedAt": "2026-08-02T18:13:13Z",
   "productionSchemaContainsProposedMigration": true,
   "rpcIsProductionReady": true,
+
+  "stagingProjectState": "DELETED. The isolated staging project msbdwwgojuvgnuugrrry that verified the buildout no longer exists; no staging verification is possible for this cycle. Live verification for this cycle is the read-only production parity check recorded in correctAnalysisPublication plus the per-PR disposable-stack integration run in CI (supabase-integration job).",
+
+  "correctAnalysisPublication": {
+    "operation": "correctAnalysis",
+    "backendResource": "rpc:correct_slab_identification",
+    "closesGap": "G1 (docs/V2_INTEGRATION_GAPS.md): V1 patched public.slabs with an unwhitelisted Partial<Slab>; the permission model revokes that path and this RPC is the only browser write path for identification fields.",
+    "rpcOrigin": "20260908000000_slab_permission_model.sql, merged in PR #91 (72e6e58), applied to production in the buildout promotion (release/evidence/progressive-buildout/08-production-promotion.md: 'correct/forbid/guard + slab_correction_events present').",
+    "productionParityCheckedAt": "2026-08-04",
+    "productionParityChecked": [
+      "signature correct_slab_identification(p_slab_id uuid, p_corrections jsonb, p_idempotency_key text) SECURITY DEFINER with search_path=public, auth, pg_temp",
+      "the exact 15-column v_allowed whitelist (card_name, set_name, card_number, year, language, rarity, finish, variation, game_or_franchise, grader, grade, grade_label, certification_number, label_description, notes)",
+      "soft-error contract markers (idempotency_conflict), audit action slab.identification_corrected, per-(owner,key) advisory-lock replay serialization",
+      "EXECUTE granted to authenticated, nothing granted to anon",
+      "slab_correction_events: RLS enabled, owner-only SELECT policy, (owner_id, idempotency_key) partial unique index and (slab_id, created_at desc) index present"
+    ],
+    "productionParityMethod": "read-only pg_catalog/information_schema queries against production rcbwemkfcefarqnlgrmv (pg_get_functiondef, pg_policies, pg_indexes, routine_privileges); nothing was mutated.",
+    "behavioralCoverage": "src/test/integration/atomic-confirmed-save.integration.test.ts and atomic-confirmed-save-boundaries.integration.test.ts already exercise the RPC end to end (owner applies + audits + replays, no_corrections, field_not_correctable, cross-owner and admin-cross-owner not_found, idempotency conflict and key trimming, suspended/closed account refusals, anon denial, correction-event read scoping); they run on every pull request against the disposable local Supabase stack in the supabase-integration CI job."
+  },
 
   "determinism": {
     "generatedAt": "Not emitted. The generator inserts no clock value; it derives a timestamp only from SOURCE_DATE_EPOCH when that variable is supplied, so identical inputs always produce identical output bytes and checksums."
@@ -45,7 +66,8 @@
 
   "operationStatus": {
     "saveConfirmedSlabFromAnalysis": "READY",
-    "startSlabAnalysis": "READY"
+    "startSlabAnalysis": "READY",
+    "correctAnalysis": "READY"
   },
   "operationStatusMeaning": {
     "PROPOSED_NOT_DEPLOYED": "The backend resource itself exists only on this branch. Nothing may call it.",
@@ -66,6 +88,7 @@
   },
 
   "contractCorrections": {
+    "correctAnalysis": "Corrected on branch feat/publish-correct-analysis-contract: the previous entry named table:slabs (the V1 direct-patch path that the permission model revokes) with status BACKEND_CONTRACT_REQUIRED and classification SECURITY_REVIEW_REQUIRED. The corrected entry names the deployed rpc:correct_slab_identification, status READY, classification BROWSER_CUSTOMER_SAFE. Contract facts read from the migration and re-verified read-only against the production definition on 2026-08-04: 15-column whitelist (CORRECT_SLAB_IDENTIFICATION_FIELDS), self-owned-only FOR UPDATE row selection for every caller including administrators (cross-owner returns not_found), active-profile gate for non-admins, SOFT jsonb refusals ({ok:false,error} — not raised exceptions), success {ok:true,replayed,slab_id,changes} without the updated row, btrim/NULL-clearing semantics, ::integer year cast that raises on non-numeric input, optional trimmed idempotency key with per-(owner,key) advisory-lock serialization and idempotency_conflict on key reuse against a different slab, slab_correction_events + audit_log appends in the same transaction.",
     "startSlabAnalysis": "Request type replaced with the real handler body read at supabase/functions/analyze-slab/index.ts: front_image_base64 + front_mime required, back_image_base64/back_mime optional and forwarded ONLY when both are present, variants[] {label,image_base64,mime} max 8. There is no slabId argument. Limits from src/server/analyze-slab/validate-images.ts: 15728640 bytes per image, 41943040 bytes aggregate, MIME jpeg/png/webp/heic/heif. The manifest separates an application-facing camelCase StartSlabAnalysisRequest from the snake_case StartSlabAnalysisWireRequest, with toStartSlabAnalysisWireRequest as the only sanctioned conversion. That serializer rejects blank and whitespace-only front, back and variant image data, rejects blank and whitespace-only variant labels with INVALID_VARIANT_LABEL, accepts exactly eight variants and rejects nine, emits both back keys or neither, never emits an empty variants array, emits only the exact wire keys, and mutates nothing it is given. Status is READY: the handler is merged (72e6e58) and deployed, and this corrected request/authorization contract was exercised against the live handler (401 unauthenticated, 400 MISSING_IMAGE for an authorized customer on an empty body, 403 ACCOUNT_NOT_ACTIVE for a suspended customer).",
     "duplicateCertificationRace": "The wrapper takes pg_advisory_xact_lock(918273645) — the same transaction-scoped lock canonical create_slab (20260833000000) uses — BEFORE its certification probe, so a concurrent intake cannot insert a matching normalized grader/certification between probe and insert. Without it the probe could miss and create_slab would raise an uncaught 23505 instead of returning result='duplicate_certification'.",
     "fieldEvidenceOwnership": "Canonical link_ai_analysis_run applies its ai_field_evidence ownership check only to non-admins. Because this wrapper is self-owned-only, the check is meaningful for every caller and is applied unconditionally before anything is created (42501)."
@@ -74,7 +97,7 @@
   "liveIntegrationTests": {
     "file": "src/test/integration/atomic-confirmed-save.integration.test.ts",
     "caseCount": 95,
-    "state": "WRITTEN; NOT EXECUTED THIS CYCLE — env-gated (requires an isolated staging database and the SLABVAULT_TEST_* credentials; the harness refuses production-looking URLs). The production verification actually performed was the security, access-control and request-contract subset via disposable-account live probes (see verifiedProperties).",
+    "state": "WRITTEN; NOT EXECUTED THIS CYCLE against any live hosted database — env-gated (requires an isolated staging database and the SLABVAULT_TEST_* credentials; the harness refuses production-looking URLs, and the staging project has since been deleted). It DOES run on every pull request against the disposable local Supabase stack in the supabase-integration CI job, including the correct_slab_identification behavioral cases. The production verification performed for the atomic-save release was the security, access-control and request-contract subset via disposable-account live probes (see verifiedProperties); for this contract-publication cycle it is the read-only parity check in correctAnalysisPublication.",
     "envGate": "SLABVAULT_TEST_URL / SLABVAULT_TEST_ANON_KEY / SLABVAULT_TEST_SERVICE_KEY / SLABVAULT_TEST_DB_URL; refuses to run against anything that looks like production",
     "extraDevDependency": "pg — required only so the rollback fixture can install and remove a temporary, test-only trigger. No testing hook exists in the migration.",
     "coverage": [
@@ -92,6 +115,7 @@
     ]
   },
   "verifiedProperties": [
+    "read-only production parity of rpc:correct_slab_identification on 2026-08-04 (deployed definition, 15-column whitelist, pinned search_path, authenticated-only EXECUTE, slab_correction_events RLS/policy/indexes) — see correctAnalysisPublication",
     "static SQL text assertions (function signature, auth.uid()-only identity, advisory-lock ordering, evidence-ownership assertion, typed error codes, revoke/grant)",
     "contract manifest assertions (startSlabAnalysis maps to edge:analyze-slab with the real base64 wire body; application/wire types, hardened serializer and its purity; saveConfirmedSlabFromAnalysis declared idempotent, retriable and READY)",
     "generator assertions (derived version string, lifecycle consistency, migrations on disk, migration-derived proposed operations, this file, checksum coverage, canonical/proposed separation, deterministic output)",

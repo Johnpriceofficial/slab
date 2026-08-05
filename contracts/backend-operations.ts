@@ -1,15 +1,13 @@
 // contracts/backend-operations.ts
 // The typed, frontend-facing operation contract for Graded Card Value V2.
 //
-// Merged source of truth: Supabase schema at 67 migrations
-// (20260709000000..20260906000000), main commit d8088f2a5379effc1fb82f2aea4b9d8c4e1d7271.
+// Merged source of truth: Supabase schema at 77 migrations
+// (20260709000000..20260915000000), main commit 6d2faea09b428f36d15ef2cbd82ae1643bc27c43.
 //
-// PROPOSED, NOT MERGED, NOT DEPLOYED: this revision additionally declares the
-// atomic save path added by 20260907000000_save_confirmed_slab_from_analysis.sql
-// on branch `fix/atomic-confirmed-slab-save` (68 migrations proposed). That
-// migration is NOT part of the deployed production schema. The version suffix
-// `-d8088f2a-m68` identifies the base commit plus the proposed migration count;
-// see contracts/PROPOSED_STATE.json for the authoritative merge/deploy state.
+// RELEASED STATE: there is no pending proposed migration layer — the proposed
+// facts in the version suffix equal the merged facts (`-m77-proposed-m77`).
+// See contracts/proposed/PROPOSED_STATE.json for the authoritative
+// merge/deploy/verification state of this revision.
 // The Lovable V2 frontend must consume ONLY this surface via its BackendProvider —
 // never raw tables, arbitrary RPCs, service-role behavior, cleanup queues, storage
 // deletion, credential retrieval, or unrestricted admin mutation.
@@ -356,26 +354,93 @@ export interface ConfirmAnalysisRequest {
   patch: Record<string, unknown>;
   event: Record<string, unknown>;
 }
+/**
+ * EXACTLY the columns `public.correct_slab_identification` whitelists
+ * (`v_allowed` in 20260908000000_slab_permission_model.sql). Any other key is
+ * refused by the RPC with `{ ok: false, error: "field_not_correctable" }`
+ * before anything is written.
+ */
+export const CORRECT_SLAB_IDENTIFICATION_FIELDS = [
+  "card_name",
+  "set_name",
+  "card_number",
+  "year",
+  "language",
+  "rarity",
+  "finish",
+  "variation",
+  "game_or_franchise",
+  "grader",
+  "grade",
+  "grade_label",
+  "certification_number",
+  "label_description",
+  "notes",
+] as const;
+
+export type CorrectSlabIdentificationField =
+  (typeof CORRECT_SLAB_IDENTIFICATION_FIELDS)[number];
+
 export interface CorrectAnalysisRequest {
   slabId: string;
-  /** Whitelisted, human-corrected identity/valuation fields. */
-  corrections: Partial<
-    Pick<
-      SlabRow,
-      | "card_name"
-      | "set_name"
-      | "card_number"
-      | "year"
-      | "language"
-      | "rarity"
-      | "variation"
-      | "grade"
-      | "grade_label"
-      | "finish"
-      | "game_or_franchise"
-    >
-  >;
+  /**
+   * Whitelisted, human-corrected identification fields. Values are btrim'd by
+   * the RPC and an empty (or whitespace-only) string clears the column to
+   * NULL. `year` is cast with `::integer` AFTER the trim — a non-numeric year
+   * raises a raw cast error instead of a typed refusal, so clients must
+   * validate year before calling.
+   */
+  corrections: Partial<Pick<SlabRow, CorrectSlabIdentificationField>>;
+  /**
+   * Optional replay key. The RPC trims it, treats blank as absent, and
+   * serializes per (owner, key) via a transaction-scoped advisory lock. A
+   * replay with the SAME key and slab returns `{ ok: true, replayed: true }`
+   * with the originally applied changes; the same key against a DIFFERENT
+   * slab is refused with `{ ok: false, error: "idempotency_conflict" }`.
+   */
+  idempotencyKey?: string;
 }
+
+/** Arguments of rpc:correct_slab_identification (positional, snake_case). */
+export interface CorrectSlabIdentificationWireRequest {
+  p_slab_id: string;
+  p_corrections: Partial<Pick<SlabRow, CorrectSlabIdentificationField>>;
+  p_idempotency_key?: string | null;
+}
+
+/**
+ * Soft-error codes of rpc:correct_slab_identification. The RPC returns these
+ * in a `{ ok: false, error }` jsonb body with HTTP/PostgREST status 200 — it
+ * does NOT raise for its typed refusals. `account_<status>` covers every
+ * non-active customer_profiles.account_status (e.g. `account_suspended`,
+ * `account_closed`). The only raw (raised) failures left are the `year`
+ * integer cast and infrastructure errors.
+ */
+export type CorrectSlabIdentificationError =
+  | "unauthenticated"
+  | "profile_missing"
+  | `account_${string}`
+  | "slab_required"
+  | "corrections_object_required"
+  | "idempotency_conflict"
+  | "not_found"
+  | "field_not_correctable"
+  | "no_corrections";
+
+export type CorrectSlabIdentificationResponse =
+  | {
+      ok: true;
+      replayed: boolean;
+      slab_id: string;
+      /** The whitelisted patch that was (or, on replay, had been) applied. */
+      changes: Partial<Pick<SlabRow, CorrectSlabIdentificationField>>;
+    }
+  | {
+      ok: false;
+      error: CorrectSlabIdentificationError;
+      /** Present only for field_not_correctable: the offending key. */
+      field?: string;
+    };
 
 // ── Pricing ──────────────────────────────────────────────────────────────────
 export interface PricingEvidence {
@@ -419,7 +484,7 @@ export interface OperationSpec {
  * migration count>-proposed-m<proposed migration count>`.
  * scripts/build-contract-snapshot.mjs derives and enforces every component.
  */
-export const CONTRACT_VERSION = "1.3.0-merged-72e6e58d-m69-proposed-m69" as const;
+export const CONTRACT_VERSION = "1.4.0-merged-6d2faea0-m77-proposed-m77" as const;
 
 
 export const OPERATIONS: readonly OperationSpec[] = [
@@ -738,17 +803,19 @@ export const OPERATIONS: readonly OperationSpec[] = [
     name: "correctAnalysis",
     domain: "analysis",
     role: "customer",
-    backendResource: ["table:slabs"],
+    backendResource: ["rpc:correct_slab_identification"],
     reads: false,
     writes: true,
-    authorization: "RLS owner-or-admin UPDATE policy",
-    classification: "SECURITY_REVIEW_REQUIRED",
-    status: "BACKEND_CONTRACT_REQUIRED",
+    authorization:
+      "auth.uid() only, self-owned only: the slab row is selected with owner_id = auth.uid() FOR UPDATE for EVERY caller — administrators included — so a cross-owner correction returns { ok: false, error: 'not_found' } and writes nothing; no owner is ever read from the payload. Non-admins additionally need an active customer_profiles row (profile_missing / account_<status> refusals). EXECUTE revoked from public/anon, granted to authenticated + service_role.",
+    classification: "BROWSER_CUSTOMER_SAFE",
+    status: "READY",
     idempotent: true,
     retriable: false,
-    sideEffects: "slabs field updates; identity re-derivation triggers",
+    sideEffects:
+      "whitelisted slabs column updates (btrim'd; empty string clears to NULL) + slab_correction_events append + audit_log append ('slab.identification_corrected'), in ONE transaction",
     notes:
-      "V1 patches slabs with an unwhitelisted Partial<Slab>. V2 needs a whitelisted correction RPC (see V2_INTEGRATION_GAPS).",
+      "READY: closes gap G1 (V1 patched public.slabs with an unwhitelisted Partial<Slab>; the permission model revokes that path). The RPC is SECURITY DEFINER with search_path pinned, merged into main in 20260908000000_slab_permission_model (72e6e58) and deployed to production, where its live definition was re-verified read-only on 2026-08-04: signature (p_slab_id uuid, p_corrections jsonb, p_idempotency_key text default null), the exact 15-column v_allowed whitelist in CORRECT_SLAB_IDENTIFICATION_FIELDS, pinned search_path, EXECUTE authenticated-only, and the owner-scoped append-only slab_correction_events table (RLS on, owner SELECT policy, (owner_id, idempotency_key) partial unique index). CONTRACT SHAPE: typed refusals are SOFT — jsonb { ok: false, error } (see CorrectSlabIdentificationError), not raised exceptions; success is { ok: true, replayed, slab_id, changes } and does NOT return the updated row, so callers must refetch the slab. Replay-safe ONLY when the caller supplies p_idempotency_key (trimmed; blank = absent; same key + different slab -> idempotency_conflict): idempotent assumes a keyed call, and retriable stays false because the key is optional at the SQL level and year casts ::integer (a non-numeric year raises). Behavioral coverage runs in CI's disposable-stack integration suite (atomic-confirmed-save.integration.test.ts and atomic-confirmed-save-boundaries.integration.test.ts): owner applies + audits, cross-owner and admin-cross-owner not_found, field_not_correctable, no_corrections, idempotency conflict/trim/replay, suspended/closed refusals, anon denied, correction-event read scoping.",
   },
   // pricing
   {
