@@ -38,35 +38,44 @@ const PROVENANCE = {
   backendRepository: "Johnpriceofficial/slab",
 
   // The commit whose source was READ to author this change.
-  baseCommitInspected: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  baseCommitInspected: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
 
   // What `main` actually contains right now. `backendCommit` keeps its
   // historical name/meaning for existing consumers: the MERGED state.
-  backendCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
-  mergedMainCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
-  migrationCount: 69,
-  finalMigration: "20260908000000_slab_permission_model",
+  backendCommit: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  mergedMainCommit: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  migrationCount: 77,
+  finalMigration: "20260915000000_grading_advisor_rls_hardening",
 
-  // RELEASED STATE: the atomic-save/permission work formerly proposed on
-  // `fix/atomic-confirmed-slab-save` is now MERGED into main and DEPLOYED, so
-  // there is no pending proposed layer. The proposed* facts therefore equal the
-  // merged facts (an EMPTY proposed layer, not a fake one): proposedMigrationCount
-  // == migrationCount and proposedFinalMigration == finalMigration. See the
-  // released-state invariant below.
-  proposedBranch: "fix/atomic-confirmed-slab-save",
-  proposedBranchCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
-  proposedMigrationCount: 69,
-  proposedFinalMigration: "20260908000000_slab_permission_model",
+  // RELEASED STATE: the production-buildout layer (m70..m77, PRs #94-#98,
+  // merged as 9580f79 and 6d2faea) is MERGED into main and APPLIED to
+  // production `rcbwemkfcefarqnlgrmv` (ledger entries through
+  // 20260802181313_grading_advisor_rls_hardening_20260915000000; see
+  // release/evidence/progressive-buildout/). There is no pending proposed
+  // layer, so the proposed* facts equal the merged facts (an EMPTY proposed
+  // layer, not a fake one): proposedMigrationCount == migrationCount and
+  // proposedFinalMigration == finalMigration. This branch
+  // (feat/publish-correct-analysis-contract) is contract-only: it publishes
+  // correctAnalysis against the ALREADY-DEPLOYED rpc:correct_slab_identification
+  // (migration 20260908000000, in production since the buildout promotion)
+  // and adds no migration.
+  proposedBranch: "feat/publish-correct-analysis-contract",
+  proposedBranchCommit: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  proposedMigrationCount: 77,
+  proposedFinalMigration: "20260915000000_grading_advisor_rls_hardening",
 
   // Lifecycle. Each advances only when the step it names actually happened.
+  // Timestamps are derived from the production migration ledger (the
+  // reconcile-time version of the final applied repo migration,
+  // 20260802181313 = 2026-08-02T18:13:13Z), not from a wall clock.
   liveVerificationState: "passed-production",
-  stagingVerifiedAt: "2026-07-30T00:00:00Z",
+  stagingVerifiedAt: "2026-08-02T18:13:13Z",
   liveCaseCount: 95,
   mergeState: "merged",
-  mergeCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
+  mergeCommit: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
   deploymentState: "deployed",
-  deployedCommit: "72e6e58d9586316f047be64fb8395e643faedfa8",
-  deployedAt: "2026-07-30T00:00:00Z",
+  deployedCommit: "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+  deployedAt: "2026-08-02T18:13:13Z",
 
   contractVersion: CONTRACT_VERSION,
 };
@@ -192,14 +201,28 @@ const derivedProposedResources = new Set(
     (m) => `rpc:${m[1]}`,
   ),
 );
-if (derivedProposedResources.size === 0) {
+// While a proposed layer is PENDING the gate must be able to derive at least
+// one function from the proposed migration, or it could not gate anything.
+// Once promoted (merged + deployed) the proposed layer is EMPTY and its tail
+// migration is simply the last merged migration, which may legitimately create
+// no function (e.g. 20260915000000_grading_advisor_rls_hardening is
+// policy-only). An empty derived set is therefore valid ONLY in the released
+// state; declared contract corrections below still gate independently.
+if (!promoted && derivedProposedResources.size === 0) {
   fail("no function could be derived from the proposed migration; the gate would be vacuous");
 }
 
 // (b) Operations whose *description* is corrected on this branch. These name a
 // deployed resource, so nothing can derive them from SQL: they are declared
 // here and cross-checked against PROPOSED_STATE.json below.
-const DECLARED_CONTRACT_CORRECTIONS = new Set(["startSlabAnalysis"]);
+// This branch corrects correctAnalysis: the previous entry named table:slabs
+// (the revoked V1 direct-patch path) and status BACKEND_CONTRACT_REQUIRED; the
+// corrected entry names the deployed rpc:correct_slab_identification
+// (migration 20260908000000, live in production) whose definition, whitelist,
+// grants and audit surface were re-verified read-only against production on
+// 2026-08-04. startSlabAnalysis's correction cycle completed in PR #93 and is
+// no longer gated here.
+const DECLARED_CONTRACT_CORRECTIONS = new Set(["correctAnalysis"]);
 
 const EXPECTED_UNPROMOTED_STATUS = {
   migration: "PROPOSED_NOT_DEPLOYED",

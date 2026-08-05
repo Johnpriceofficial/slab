@@ -186,7 +186,7 @@ describe("analysis contract", () => {
 
   it("carries a version string that separates merged from proposed migrations", () => {
     expect(CONTRACT_VERSION).toMatch(/^\d+\.\d+\.\d+-merged-[0-9a-f]{8}-m\d+-proposed-m\d+$/);
-    expect(CONTRACT_VERSION).toBe("1.3.0-merged-72e6e58d-m69-proposed-m69");
+    expect(CONTRACT_VERSION).toBe("1.4.0-merged-6d2faea0-m77-proposed-m77");
     // The old form attached migration 68 to the merged commit.
     expect(CONTRACT_VERSION).not.toBe("1.3.0-d8088f2a-m68");
     expect(proposedState.proposedContractVersion).toBe(CONTRACT_VERSION);
@@ -198,24 +198,27 @@ describe("analysis contract", () => {
     const finalMigration = proposedState.mergedFinalMigration;
     const proposedMigrationCount = proposedState.proposedMigrationCount;
     const proposedFinalMigration = proposedState.proposedMigration;
-    expect(p.baseCommitInspected).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
-    expect(p.mergedMainCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
-    expect(migrationCount).toBe(69);
-    expect(finalMigration).toBe("20260908000000_slab_permission_model");
+    expect(p.baseCommitInspected).toBe("6d2faea09b428f36d15ef2cbd82ae1643bc27c43");
+    expect(p.mergedMainCommit).toBe("6d2faea09b428f36d15ef2cbd82ae1643bc27c43");
+    expect(migrationCount).toBe(77);
+    expect(finalMigration).toBe("20260915000000_grading_advisor_rls_hardening");
     // RELEASED: the proposed layer is EMPTY (all merged), so the proposed facts
     // equal the merged facts — this is a first-class fully-merged state, not a
-    // fake pending migration.
-    expect(proposedMigrationCount).toBe(69);
-    expect(proposedFinalMigration).toBe("20260908000000_slab_permission_model");
-    // The work is merged (72e6e58) and deployed to production; verification passed.
+    // fake pending migration. This branch is contract-only and adds nothing to
+    // any database.
+    expect(proposedMigrationCount).toBe(77);
+    expect(proposedFinalMigration).toBe("20260915000000_grading_advisor_rls_hardening");
+    // The buildout layer (m70..m77) is merged (6d2faea) and applied to
+    // production; the timestamps are derived from the production migration
+    // ledger (20260802181313), not from a wall clock.
     expect(p.proposedBranchCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(p.mergeState).toBe("merged");
-    expect(p.mergeCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
+    expect(p.mergeCommit).toBe("6d2faea09b428f36d15ef2cbd82ae1643bc27c43");
     expect(p.deploymentState).toBe("deployed");
-    expect(p.deployedCommit).toBe("72e6e58d9586316f047be64fb8395e643faedfa8");
-    expect(p.deployedAt).toBe("2026-07-30T00:00:00Z");
+    expect(p.deployedCommit).toBe("6d2faea09b428f36d15ef2cbd82ae1643bc27c43");
+    expect(p.deployedAt).toBe("2026-08-02T18:13:13Z");
     expect(p.liveVerificationState).toBe("passed-production");
-    expect(p.stagingVerifiedAt).toBe("2026-07-30T00:00:00Z");
+    expect(p.stagingVerifiedAt).toBe("2026-08-02T18:13:13Z");
   });
 
   it("declares the merged + deployed atomic-save operation READY", () => {

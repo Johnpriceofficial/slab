@@ -3,11 +3,11 @@
   "snapshotMode": "canonical",
   "provenance": {
     "backendRepository": "Johnpriceofficial/slab",
-    "backendCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
-    "mergedMainCommit": "72e6e58d9586316f047be64fb8395e643faedfa8",
-    "migrationCount": 69,
-    "finalMigration": "20260908000000_slab_permission_model",
-    "contractVersion": "1.3.0-merged-72e6e58d-m69-proposed-m69"
+    "backendCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+    "mergedMainCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
+    "migrationCount": 77,
+    "finalMigration": "20260915000000_grading_advisor_rls_hardening",
+    "contractVersion": "1.4.0-merged-6d2faea0-m77-proposed-m77"
   },
   "operations": [
     {
@@ -363,18 +363,18 @@
       "operation": "correctAnalysis",
       "domain": "analysis",
       "backendResource": [
-        "table:slabs"
+        "rpc:correct_slab_identification"
       ],
       "role": "customer",
       "reads": false,
       "writes": true,
-      "authorization": "RLS owner-or-admin UPDATE policy",
-      "classification": "SECURITY_REVIEW_REQUIRED",
-      "integration": "BACKEND_CONTRACT_REQUIRED",
+      "authorization": "auth.uid() only, self-owned only: the slab row is selected with owner_id = auth.uid() FOR UPDATE for EVERY caller — administrators included — so a cross-owner correction returns { ok: false, error: 'not_found' } and writes nothing; no owner is ever read from the payload. Non-admins additionally need an active customer_profiles row (profile_missing / account_<status> refusals). EXECUTE revoked from public/anon, granted to authenticated + service_role.",
+      "classification": "BROWSER_CUSTOMER_SAFE",
+      "integration": "READY",
       "idempotent": true,
       "retriable": false,
-      "sideEffects": "slabs field updates; identity re-derivation triggers",
-      "notes": "V1 patches slabs with an unwhitelisted Partial<Slab>. V2 needs a whitelisted correction RPC (see V2_INTEGRATION_GAPS)."
+      "sideEffects": "whitelisted slabs column updates (btrim'd; empty string clears to NULL) + slab_correction_events append + audit_log append ('slab.identification_corrected'), in ONE transaction",
+      "notes": "READY: closes gap G1 (V1 patched public.slabs with an unwhitelisted Partial<Slab>; the permission model revokes that path). The RPC is SECURITY DEFINER with search_path pinned, merged into main in 20260908000000_slab_permission_model (72e6e58) and deployed to production, where its live definition was re-verified read-only on 2026-08-04: signature (p_slab_id uuid, p_corrections jsonb, p_idempotency_key text default null), the exact 15-column v_allowed whitelist in CORRECT_SLAB_IDENTIFICATION_FIELDS, pinned search_path, EXECUTE authenticated-only, and the owner-scoped append-only slab_correction_events table (RLS on, owner SELECT policy, (owner_id, idempotency_key) partial unique index). CONTRACT SHAPE: typed refusals are SOFT — jsonb { ok: false, error } (see CorrectSlabIdentificationError), not raised exceptions; success is { ok: true, replayed, slab_id, changes } and does NOT return the updated row, so callers must refetch the slab. Replay-safe ONLY when the caller supplies p_idempotency_key (trimmed; blank = absent; same key + different slab -> idempotency_conflict): idempotent assumes a keyed call, and retriable stays false because the key is optional at the SQL level and year casts ::integer (a non-numeric year raises). Behavioral coverage runs in CI's disposable-stack integration suite (atomic-confirmed-save.integration.test.ts and atomic-confirmed-save-boundaries.integration.test.ts): owner applies + audits, cross-owner and admin-cross-owner not_found, field_not_correctable, no_corrections, idempotency conflict/trim/replay, suspended/closed refusals, anon denied, correction-event read scoping."
     },
     {
       "operation": "getPricingEvidence",
