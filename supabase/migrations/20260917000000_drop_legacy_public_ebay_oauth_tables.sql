@@ -1,4 +1,4 @@
--- 20260916000000_drop_legacy_public_ebay_oauth_tables.sql
+-- 20260917000000_drop_legacy_public_ebay_oauth_tables.sql
 --
 -- Retire the two legacy PUBLIC-schema eBay OAuth tables. The seller OAuth flow
 -- moved to the private schema long ago and is the sole authority today:
