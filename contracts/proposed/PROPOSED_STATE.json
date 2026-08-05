@@ -18,7 +18,7 @@
 
   "proposedBranch": "feat/publish-correct-analysis-contract",
   "proposedBranchCommit": "6d2faea09b428f36d15ef2cbd82ae1643bc27c43",
-  "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/compare/main...feat/publish-correct-analysis-contract",
+  "proposedPullRequest": "https://github.com/Johnpriceofficial/slab/pull/103",
   "proposedPullRequestState": "draft-open",
   "proposedMigration": "20260915000000_grading_advisor_rls_hardening",
   "proposedMigrationCount": 77,
